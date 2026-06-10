@@ -1,0 +1,16 @@
+{
+  "name": "Invoicing",
+  "short_name": "Invoicing",
+  "description": "A simple, private, browser-run invoicing & finance app. Data stays encrypted on your device.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0F0E0D",
+  "theme_color": "#0F0E0D",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
