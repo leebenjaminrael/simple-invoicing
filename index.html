@@ -1391,6 +1391,7 @@ const SEED_DATA = {
   settings: {
     brandName: 'invoicing',
     appTitle: 'App',
+    baseCurrency: 'ZAR',
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     bankProfiles: [],
     autoLockMinutes: 15,
@@ -1400,7 +1401,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.0.0';          // bump on each release (also bump version.json)
+const APP_VERSION = '1.1.0';          // bump on each release (also bump version.json)
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1573,6 +1574,10 @@ function addDays(iso, days) {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 const SYM = { ZAR: 'R', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', KES: 'KSh' };
+const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'KES'];
+// The app's home/reporting currency — everything converts to this for the dashboard,
+// finances and accountant report. Configurable in Settings; defaults to ZAR.
+function baseCcy() { return (state && state.settings && state.settings.baseCurrency) || 'ZAR'; }
 function fmtMoney(n, currency) {
   const num = Number(n) || 0;
   const sym = SYM[currency] || currency + ' ';
@@ -1628,14 +1633,15 @@ async function fetchFxRates(force = false) {
   }
   // open.er-api.com — free, no key, broad currency support including KES
   try {
-    const res = await fetch('https://open.er-api.com/v6/latest/ZAR');
+    const base = baseCcy();
+    const res = await fetch('https://open.er-api.com/v6/latest/' + base);
     if (!res.ok) throw new Error('FX fetch failed: HTTP ' + res.status);
     const data = await res.json();
     if (!data.rates) throw new Error('FX fetch: no rates in response');
-    // data.rates[X] = how many X per 1 ZAR. We want toZAR rate: 1 X = 1/rate ZAR.
-    const want = ['USD','EUR','GBP','AUD','KES'];
-    const rates = { ZAR: 1 };
-    for (const c of want) {
+    // data.rates[X] = how many X per 1 BASE. We want toBase rate: 1 X = 1/rate BASE.
+    const rates = { [base]: 1 };
+    for (const c of SUPPORTED_CURRENCIES) {
+      if (c === base) continue;
       if (data.rates[c] && data.rates[c] > 0) rates[c] = 1 / data.rates[c];
     }
     s.fxRates = rates;
@@ -1648,8 +1654,8 @@ async function fetchFxRates(force = false) {
   }
 }
 
-function toZAR(amount, currency) {
-  if (currency === 'ZAR') return amount;
+function toBase(amount, currency) {
+  if (currency === baseCcy()) return amount;
   const r = (state.settings.fxRates || {})[currency];
   if (!r) return null;
   return amount * r;
@@ -1682,6 +1688,8 @@ function migrateState() {
   if (!state.settings.brandName) state.settings.brandName = 'seed';
   if (!state.settings.appTitle) state.settings.appTitle = 'Invoicing';
   if (!state.settings.bankProfiles) state.settings.bankProfiles = [];
+  // v5.1: configurable base/home currency (defaults to ZAR for existing vaults)
+  if (!state.settings.baseCurrency) state.settings.baseCurrency = 'ZAR';
 
   // v5: wrap the single flat business into entities[]. Must be LAST — after this,
   // top-level clients/documents/expenses/statements and the per-entity settings
@@ -1739,7 +1747,7 @@ function ymOf(iso) { return iso ? iso.slice(0, 7) : null; }
 // Returns ZAR-equivalent revenue for a doc using cached FX. Null if rate missing.
 function docRevenueZAR(doc) {
   const t = calcTotals(doc);
-  return toZAR(t.total, doc.currency);
+  return toBase(t.total, doc.currency);
 }
 
 // Returns the "recognition date" for a doc under given basis. null if doc shouldn't count.
@@ -1778,7 +1786,7 @@ function expensesByMonth(periodStart, periodEnd) {
   let missingFx = false;
   for (const e of state.expenses) {
     if (e.date < periodStart || e.date > periodEnd) continue;
-    const z = e.currency === 'ZAR' ? e.amount : toZAR(e.amount, e.currency);
+    const z = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
     if (z == null) { missingFx = true; continue; }
     const ym = ymOf(e.date);
     out[ym] = (out[ym] || 0) + z;
@@ -1803,7 +1811,7 @@ function agingBuckets() {
     else if (days > 60) key = '61-90';
     else if (days > 30) key = '31-60';
     const t = calcTotals(d);
-    const z = toZAR(t.due, d.currency);
+    const z = toBase(t.due, d.currency);
     if (z == null) { missingFx = true; continue; }
     buckets[key] += z;
     byClient[d.clientId] = byClient[d.clientId] || { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0, total: 0 };
@@ -1856,7 +1864,7 @@ function pipeline(convWindow) {
     if (d.type !== 'invoice') continue;
     if (d.status !== 'sent' && d.status !== 'overdue') continue;
     const t = calcTotals(d);
-    const z = toZAR(t.due, d.currency);
+    const z = toBase(t.due, d.currency);
     if (z == null) { missingFx = true; continue; }
     confirmed += z;
   }
@@ -1865,7 +1873,7 @@ function pipeline(convWindow) {
     if (d.type !== 'quote') continue;
     if (!(d.status === 'sent' || d.status === 'accepted')) continue;
     const t = calcTotals(d);
-    const z = toZAR(t.total, d.currency);
+    const z = toBase(t.total, d.currency);
     if (z == null) { missingFx = true; continue; }
     openQuotesValue += z;
   }
@@ -2093,7 +2101,7 @@ function renderDashboard() {
   let outstandingZAR = 0;
   let canConvert = true;
   for (const [c, v] of Object.entries(outstandingByCcy)) {
-    const z = toZAR(v, c);
+    const z = toBase(v, c);
     if (z == null) { canConvert = false; break; }
     outstandingZAR += z;
   }
@@ -2106,7 +2114,7 @@ function renderDashboard() {
   for (const d of invoices) {
     if (d.status !== 'paid') continue;
     if (!d.paidDate || d.paidDate < monthStart || d.paidDate > today) continue;
-    const z = toZAR(calcTotals(d).total, d.currency);
+    const z = toBase(calcTotals(d).total, d.currency);
     if (z == null) { thisMonthMissingFx = true; continue; }
     thisMonthZAR += z;
   }
@@ -2143,8 +2151,8 @@ function renderDashboard() {
             <span class="chip chip-on-bright">${monthName}</span>
           </div>
           <div class="value-wrap">
-            <div class="value">${fmtMoney(thisMonthZAR, 'ZAR')}</div>
-            <div class="sub">${thisMonthMissingFx ? 'Partial — FX rates missing for some currencies' : (thisMonthZAR > 0 ? 'Cash basis · ZAR equivalent' : 'No income recorded yet this month')}</div>
+            <div class="value">${fmtMoney(thisMonthZAR, baseCcy())}</div>
+            <div class="sub">${thisMonthMissingFx ? 'Partial — FX rates missing for some currencies' : (thisMonthZAR > 0 ? 'Cash basis · ' + baseCcy() + ' equivalent' : 'No income recorded yet this month')}</div>
           </div>
         </div>
       </div>
@@ -2157,7 +2165,7 @@ function renderDashboard() {
             ${overdue > 0 ? `<span class="chip chip-on-dark has-warn">${overdue} overdue</span>` : `<span class="chip chip-on-dark">${unpaid.length} unpaid</span>`}
           </div>
           <div class="value-wrap">
-            <div class="value" style="color:var(--accent-bright);">${canConvert ? fmtMoney(outstandingZAR, 'ZAR') : '—'}</div>
+            <div class="value" style="color:var(--accent-bright);">${canConvert ? fmtMoney(outstandingZAR, baseCcy()) : '—'}</div>
             <div class="sub">${fxLabel}</div>
           </div>
         </div>
@@ -2330,7 +2338,7 @@ function renderFinances() {
         <div class="stat-v2 is-lime">
           <div class="label">This month so far</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:48px;">${fmtMoney(thisMonth, 'ZAR')}</div>
+            <div class="value" style="font-size:48px;">${fmtMoney(thisMonth, baseCcy())}</div>
             <div class="sub">${monthShort(new Date().getMonth())} ${new Date().getFullYear()}</div>
           </div>
         </div>
@@ -2339,8 +2347,8 @@ function renderFinances() {
         <div class="stat-v2 is-dark">
           <div class="label">YTD earned</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:42px;color:var(--accent-bright);">${fmtMoney(ytd, 'ZAR')}</div>
-            <div class="sub">${ytdPrev > 0 ? `vs ${fmtMoney(ytdPrev, 'ZAR')} last year` : 'No prior year data yet'}</div>
+            <div class="value" style="font-size:42px;color:var(--accent-bright);">${fmtMoney(ytd, baseCcy())}</div>
+            <div class="sub">${ytdPrev > 0 ? `vs ${fmtMoney(ytdPrev, baseCcy())} last year` : 'No prior year data yet'}</div>
             ${ytdProgressPct != null ? `
               <div style="margin-top:14px;background:rgba(245,242,236,0.10);border-radius:99px;height:6px;overflow:hidden;">
                 <div style="height:100%;background:var(--accent-bright);width:${ytdProgressPct}%;border-radius:99px;"></div>
@@ -2354,7 +2362,7 @@ function renderFinances() {
         <div class="stat-v2 is-cream-warm">
           <div class="label">Outstanding</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:42px;">${fmtMoney(aging.buckets['0-30'] + aging.buckets['31-60'] + aging.buckets['61-90'] + aging.buckets['90+'], 'ZAR')}</div>
+            <div class="value" style="font-size:42px;">${fmtMoney(aging.buckets['0-30'] + aging.buckets['31-60'] + aging.buckets['61-90'] + aging.buckets['90+'], baseCcy())}</div>
             <div class="sub">${state.documents.filter((d) => d.type === 'invoice' && (d.status === 'sent' || d.status === 'overdue')).length} unpaid invoices</div>
           </div>
         </div>
@@ -2371,7 +2379,7 @@ function renderFinances() {
       <div style="overflow-x:auto;">
         ${svgBarChart(monthLabels, monthValues, { width: 760, height: 260, goalSeries: annualGoal > 0 ? monthlyGoals : null })}
       </div>
-      ${expYear.total > 0 ? `<div class="text-sm" style="color:var(--text-mid);margin-top:10px;">Expenses YTD: ${fmtMoney(expYear.total, 'ZAR')} · Net: <span style="color:var(--accent-bright);">${fmtMoney(ytd - expYear.total, 'ZAR')}</span></div>` : ''}
+      ${expYear.total > 0 ? `<div class="text-sm" style="color:var(--text-mid);margin-top:10px;">Expenses YTD: ${fmtMoney(expYear.total, baseCcy())} · Net: <span style="color:var(--accent-bright);">${fmtMoney(ytd - expYear.total, baseCcy())}</span></div>` : ''}
     </div>
 
     <!-- Pipeline — bento of 3 -->
@@ -2381,7 +2389,7 @@ function renderFinances() {
         <div class="stat-v2 is-dark">
           <div class="label">Confirmed (unpaid)</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:32px;">${fmtMoney(pipe.confirmed, 'ZAR')}</div>
+            <div class="value" style="font-size:32px;">${fmtMoney(pipe.confirmed, baseCcy())}</div>
             <div class="sub">100% weighted</div>
           </div>
         </div>
@@ -2390,8 +2398,8 @@ function renderFinances() {
         <div class="stat-v2 is-dark">
           <div class="label">Likely (open quotes × ${(cr.rate * 100).toFixed(0)}%)</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:32px;">${fmtMoney(pipe.likely, 'ZAR')}</div>
-            <div class="sub">From ${fmtMoney(pipe.openQuotesValue, 'ZAR')} of open quotes</div>
+            <div class="value" style="font-size:32px;">${fmtMoney(pipe.likely, baseCcy())}</div>
+            <div class="sub">From ${fmtMoney(pipe.openQuotesValue, baseCcy())} of open quotes</div>
           </div>
         </div>
       </div>
@@ -2399,7 +2407,7 @@ function renderFinances() {
         <div class="stat-v2 is-lime">
           <div class="label">Expected total</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:36px;">${fmtMoney(pipe.total, 'ZAR')}</div>
+            <div class="value" style="font-size:36px;">${fmtMoney(pipe.total, baseCcy())}</div>
             <div class="sub">Confirmed + Likely</div>
           </div>
         </div>
@@ -2444,7 +2452,7 @@ function renderFinances() {
       <div class="section-head" style="margin-top:0;"><h2>Annual goal</h2></div>
       <div class="row-flex" style="gap:12px;">
         <div class="field" style="max-width:240px;">
-          <label>Target for ${ty.label} (ZAR)</label>
+          <label>Target for ${ty.label} (${baseCcy()})</label>
           <input id="goal-annual" type="number" step="any" value="${annualGoal}" />
         </div>
         <div class="text-sm text-mid">Per-month overrides in Settings.</div>
@@ -2461,8 +2469,8 @@ function renderAgingTable(aging) {
   const rows = Object.entries(aging.byClient).sort((a, b) => b[1].total - a[1].total).map(([cid, b]) => `
     <tr>
       <td>${escapeHtml(clientName(cid))}</td>
-      ${buckets.map((k) => `<td class="amount">${b[k] > 0 ? fmtMoney(b[k], 'ZAR') : '<span class="text-muted">—</span>'}</td>`).join('')}
-      <td class="amount"><strong>${fmtMoney(b.total, 'ZAR')}</strong></td>
+      ${buckets.map((k) => `<td class="amount">${b[k] > 0 ? fmtMoney(b[k], baseCcy()) : '<span class="text-muted">—</span>'}</td>`).join('')}
+      <td class="amount"><strong>${fmtMoney(b.total, baseCcy())}</strong></td>
     </tr>
   `).join('');
   return `
@@ -2479,8 +2487,8 @@ function renderAgingTable(aging) {
         <tfoot>
           <tr style="border-top:1px solid var(--border);">
             <td><strong>Total</strong></td>
-            ${buckets.map((k) => `<td class="amount"><strong>${fmtMoney(totalsByBucket[k], 'ZAR')}</strong></td>`).join('')}
-            <td class="amount"><strong>${fmtMoney(grand, 'ZAR')}</strong></td>
+            ${buckets.map((k) => `<td class="amount"><strong>${fmtMoney(totalsByBucket[k], baseCcy())}</strong></td>`).join('')}
+            <td class="amount"><strong>${fmtMoney(grand, baseCcy())}</strong></td>
           </tr>
         </tfoot>
       </table>
@@ -2497,7 +2505,7 @@ function renderTopClients(tc) {
         ${tc.list.map((c) => `
           <tr>
             <td>${escapeHtml(c.name)}</td>
-            <td class="amount">${fmtMoney(c.value, 'ZAR')}</td>
+            <td class="amount">${fmtMoney(c.value, baseCcy())}</td>
             <td class="amount">${(c.share * 100).toFixed(0)}%</td>
           </tr>
         `).join('')}
@@ -2514,9 +2522,9 @@ function renderVatTable(periods) {
         ${periods.map((p) => `
           <tr>
             <td>${escapeHtml(p.label)}</td>
-            <td class="amount">${fmtMoney(p.output, 'ZAR')}</td>
-            <td class="amount">${fmtMoney(p.input, 'ZAR')}</td>
-            <td class="amount"><strong>${fmtMoney(p.net, 'ZAR')}</strong></td>
+            <td class="amount">${fmtMoney(p.output, baseCcy())}</td>
+            <td class="amount">${fmtMoney(p.input, baseCcy())}</td>
+            <td class="amount"><strong>${fmtMoney(p.net, baseCcy())}</strong></td>
           </tr>
         `).join('')}
       </tbody>
@@ -2563,7 +2571,7 @@ function renderExpensesView() {
     <div class="page-head">
       <div>
         <div class="title">Expenses</div>
-        <div class="sub">${state.expenses.length} expense${state.expenses.length === 1 ? '' : 's'} · YTD ${fmtMoney(ytdExp.total, 'ZAR')}</div>
+        <div class="sub">${state.expenses.length} expense${state.expenses.length === 1 ? '' : 's'} · YTD ${fmtMoney(ytdExp.total, baseCcy())}</div>
       </div>
       <div class="page-actions">
         <input type="text" class="search-input" id="exp-search" placeholder="Search description/category…" value="${escapeHtml(expSearch)}" />
@@ -2594,7 +2602,7 @@ function openExpenseModal(expense) {
     desc: '',
     category: state.settings.expenseCategories[0] || 'Other',
     amount: 0,
-    currency: 'ZAR',
+    currency: baseCcy(),
     vat: false,
     paymentSource: 'sa',
     notes: '',
@@ -3590,16 +3598,16 @@ function exportAccountantReport() {
 
   // INCOME — paid invoices in period (cash basis)
   row(`INCOME (cash basis)`);
-  row('Invoice #', 'Date', 'Paid date', 'Client', 'Project', 'Currency', 'Subtotal', 'VAT', 'Total', 'ZAR equiv');
+  row('Invoice #', 'Date', 'Paid date', 'Client', 'Project', 'Currency', 'Subtotal', 'VAT', 'Total', baseCcy() + ' equiv');
   let incZAR = 0, incVAT = 0;
   for (const d of state.documents.filter((x) => x.type === 'invoice' && x.status === 'paid' && x.paidDate >= periodStart && x.paidDate <= periodEnd).sort((a, b) => (a.paidDate || '').localeCompare(b.paidDate || ''))) {
     const t = calcTotals(d);
-    const zar = toZAR(t.total, d.currency);
+    const zar = toBase(t.total, d.currency);
     if (zar != null) incZAR += zar;
     incVAT += d.currency === 'ZAR' ? t.vat : 0;
     row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.subtotal.toFixed(2), t.vat.toFixed(2), t.total.toFixed(2), zar == null ? '' : zar.toFixed(2));
   }
-  row('', '', '', '', '', 'TOTAL ZAR equiv', '', '', '', incZAR.toFixed(2));
+  row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', '', '', '', incZAR.toFixed(2));
   row();
 
   // EXPENSES
@@ -3607,13 +3615,13 @@ function exportAccountantReport() {
   row('Date', 'Description', 'Category', 'Currency', 'Amount', 'ZAR equiv', 'VAT (input)', 'Notes');
   let expZAR = 0, expInputVAT = 0;
   for (const e of state.expenses.filter((x) => x.date >= periodStart && x.date <= periodEnd).sort((a, b) => a.date.localeCompare(b.date))) {
-    const zar = e.currency === 'ZAR' ? e.amount : toZAR(e.amount, e.currency);
+    const zar = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
     if (zar != null) expZAR += zar;
     const inputVAT = (e.vat && e.currency === 'ZAR') ? (e.amount * 15) / 115 : 0;
     expInputVAT += inputVAT;
     row(e.date, e.desc, e.category || '', e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), e.notes || '');
   }
-  row('', '', '', '', 'TOTAL ZAR equiv', expZAR.toFixed(2));
+  row('', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', expZAR.toFixed(2));
   row();
 
   // VAT SUMMARY
@@ -3631,14 +3639,14 @@ function exportAccountantReport() {
   const today = todayISO();
   for (const d of state.documents.filter((x) => x.type === 'invoice' && (x.status === 'sent' || x.status === 'overdue')).sort((a, b) => a.date.localeCompare(b.date))) {
     const t = calcTotals(d);
-    const zar = toZAR(t.due, d.currency);
+    const zar = toBase(t.due, d.currency);
     const days = Math.floor((new Date(today) - new Date(d.dueDate || d.date)) / (24 * 3600 * 1000));
     row(docNumber(d), d.date, d.dueDate || '', clientName(d.clientId), d.currency, t.due.toFixed(2), zar == null ? '' : zar.toFixed(2), Math.max(days, 0));
   }
   row();
 
   // P&L SUMMARY
-  row(`P&L SUMMARY (cash basis, ZAR equivalent)`);
+  row(`P&L SUMMARY (cash basis, ${baseCcy()} equivalent)`);
   row('Income', incZAR.toFixed(2));
   row('Expenses', expZAR.toFixed(2));
   row('Net', (incZAR - expZAR).toFixed(2));
@@ -3897,8 +3905,8 @@ function openDocEditor(docId, defaultType) {
       type,
       number: type === 'invoice' ? state.settings.nextInv : state.settings.nextQt,
       clientId: state.clients[0] ? state.clients[0].id : '',
-      currency: 'ZAR',
-      bankId: 'sa',
+      currency: baseCcy(),
+      bankId: (state.settings.banking.find((b) => b.currency === baseCcy()) || state.settings.banking[0] || { id: 'sa' }).id,
       date: today,
       dueDate: type === 'invoice' ? addDays(today, 7) : null,
       expiry: type === 'quote' ? addDays(today, 30) : null,
@@ -3942,7 +3950,7 @@ function renderDocEditor() {
     <div style="position:relative;display:inline-block;">
       <button class="btn btn-sm" id="line-saved-toggle" type="button">Insert saved item ▾</button>
       <div id="line-saved-menu" style="display:none;position:absolute;top:32px;left:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-md);z-index:5;min-width:240px;padding:4px;">
-        ${savedItemsList.map((s, i) => `<div style="padding:8px 10px;cursor:pointer;border-radius:4px;font-size:13px;" data-saved-line="${i}" onmouseover="this.style.background='rgba(0,0,0,0.04)'" onmouseout="this.style.background=''">${escapeHtml(s.desc)} <span class="text-muted mono">${fmtMoney(s.price, 'ZAR')}</span></div>`).join('')}
+        ${savedItemsList.map((s, i) => `<div style="padding:8px 10px;cursor:pointer;border-radius:4px;font-size:13px;" data-saved-line="${i}" onmouseover="this.style.background='rgba(0,0,0,0.04)'" onmouseout="this.style.background=''">${escapeHtml(s.desc)} <span class="text-muted mono">${fmtMoney(s.price, baseCcy())}</span></div>`).join('')}
       </div>
     </div>
   ` : '';
@@ -4793,8 +4801,14 @@ function renderSettings() {
       <div class="form-grid">
         <div class="field"><label>Brand name <span class="text-muted">(sidebar + lock screen, short)</span></label><input data-cs="brandName" value="${escapeHtml(state.settings.brandName || '')}" placeholder="e.g. acme" /></div>
         <div class="field"><label>App title <span class="text-muted">(browser tab suffix)</span></label><input data-cs="appTitle" value="${escapeHtml(state.settings.appTitle || 'Invoicing')}" placeholder="e.g. Invoicing" /></div>
+        <div class="field">
+          <label>Base currency <span class="text-muted">(home currency for dashboard + reports)</span></label>
+          <select data-cs="baseCurrency">
+            ${SUPPORTED_CURRENCIES.map((c) => `<option value="${c}" ${c === baseCcy() ? 'selected' : ''}>${c} (${SYM[c] || c})</option>`).join('')}
+          </select>
+        </div>
       </div>
-      <div class="text-sm text-mid" style="margin-top:10px;">The brand name is shown in the sidebar, lock screen and browser tab in the app's serif font. The logo (below) is only used on PDFs (invoices and quotes), not in the app itself.</div>
+      <div class="text-sm text-mid" style="margin-top:10px;">The brand name is shown in the sidebar, lock screen and browser tab in the app's serif font. The logo (below) is only used on PDFs (invoices and quotes), not in the app itself. Base currency is what the dashboard and finance reports convert everything into — new invoices default to it too.</div>
     </div>
 
     <div class="settings-section">
@@ -4915,7 +4929,7 @@ function renderSettings() {
       <h3>Goals</h3>
       <div class="form-grid">
         <div class="field">
-          <label>Annual revenue target (ZAR, current SA tax year)</label>
+          <label>Annual revenue target (${baseCcy()}, current SA tax year)</label>
           <input data-goal-annual type="number" step="any" value="${state.settings.goals?.annual || 0}" />
         </div>
       </div>
@@ -4975,7 +4989,7 @@ function bindSettingsEvents() {
       const f = el.dataset.cs;
       let v = el.value;
       if (f === 'nextInv' || f === 'nextQt' || f === 'autoLockMinutes') v = Number(v) || 0;
-      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle'].includes(f)) state.settings[f] = v;
+      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -4987,6 +5001,13 @@ function bindSettingsEvents() {
       if (f === 'autoLockMinutes') resetLockTimer();
       if (f === 'brandName' || f === 'appTitle') applyBrand();
       if (f === 'name') { renderEntitySwitcher(); applyBrand(); }
+      if (f === 'baseCurrency') {
+        // Rates are base-relative — clear and re-fetch for the new base, then refresh views
+        state.settings.fxRates = {};
+        state.settings.fxFetchedAt = null;
+        await fetchFxRates(true);
+        render();
+      }
     });
   });
 
