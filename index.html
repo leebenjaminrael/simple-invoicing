@@ -1369,7 +1369,7 @@ const ACF_CLIENT = null; // (removed in shareable build)
 const DEFAULT_EXPENSE_CATEGORIES = ['Software', 'Hosting', 'Hardware', 'Travel', 'Office', 'Subcontractor', 'Bank fees', 'FX fees', 'Marketing', 'Professional fees', 'Drawings / Salary', 'Other'];
 
 const SEED_DATA = {
-  version: 5,
+  version: 6,
   activeEntityId: 'ent-1',
   entities: [
     {
@@ -1380,28 +1380,30 @@ const SEED_DATA = {
       banking: BANKING_DEFAULT,
       nextInv: 1,
       nextQt: 1,
+      baseCurrency: 'ZAR',
+      vatPercent: 15,
+      vatCycle: 'bi-monthly',
       goals: { annual: 0, monthly: {} },
       savedLineItems: [],
       clients: [],
       documents: [],
       expenses: [],
       statements: [],
+      fxRates: {},
+      fxFetchedAt: null,
     },
   ],
   settings: {
     brandName: 'invoicing',
     appTitle: 'App',
-    baseCurrency: 'ZAR',
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     bankProfiles: [],
     autoLockMinutes: 15,
-    fxRates: {},
-    fxFetchedAt: null,
   },
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.1.0';          // bump on each release (also bump version.json)
+const APP_VERSION = '1.3.1';          // MAJOR.MINOR.PATCH — patch=small fix, minor=feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1507,7 +1509,7 @@ function installEntityAccessors() {
   };
   ['clients', 'documents', 'expenses', 'statements'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
-  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'goals', 'savedLineItems'].forEach((k) => defineProxy(state.settings, k));
+  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'goals', 'savedLineItems', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
 }
 
 async function saveState() {
@@ -1578,6 +1580,11 @@ const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'KES'];
 // The app's home/reporting currency — everything converts to this for the dashboard,
 // finances and accountant report. Configurable in Settings; defaults to ZAR.
 function baseCcy() { return (state && state.settings && state.settings.baseCurrency) || 'ZAR'; }
+// This business's VAT rate as a percentage number (e.g. 15). 0 = not VAT registered.
+function vatRate() { const v = state && state.settings ? Number(state.settings.vatPercent) : NaN; return isNaN(v) ? 15 : v; }
+// VAT applies to documents in the business's base currency, when a rate is set
+// (foreign-currency sales are treated as zero-rated / exports).
+function docHasVat(currency) { return currency === baseCcy() && vatRate() > 0; }
 function fmtMoney(n, currency) {
   const num = Number(n) || 0;
   const sym = SYM[currency] || currency + ' ';
@@ -1596,9 +1603,9 @@ function calcLine(line) {
 }
 function calcTotals(doc) {
   const subtotal = doc.lines.reduce((sum, l) => sum + calcLine(l), 0);
-  const isZAR = doc.currency === 'ZAR';
+  const rate = docHasVat(doc.currency) ? vatRate() / 100 : 0;
   let vat = 0;
-  if (isZAR) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l) * 0.15 : 0), 0);
+  if (rate > 0) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l) * rate : 0), 0);
   const total = subtotal + vat;
   const depositPct = Number(doc.depositPct) || 0;
   const deposit = total * (depositPct / 100);
@@ -1688,8 +1695,6 @@ function migrateState() {
   if (!state.settings.brandName) state.settings.brandName = 'seed';
   if (!state.settings.appTitle) state.settings.appTitle = 'Invoicing';
   if (!state.settings.bankProfiles) state.settings.bankProfiles = [];
-  // v5.1: configurable base/home currency (defaults to ZAR for existing vaults)
-  if (!state.settings.baseCurrency) state.settings.baseCurrency = 'ZAR';
 
   // v5: wrap the single flat business into entities[]. Must be LAST — after this,
   // top-level clients/documents/expenses/statements and the per-entity settings
@@ -1704,21 +1709,47 @@ function migrateState() {
       banking: s.banking || [],
       nextInv: typeof s.nextInv === 'number' ? s.nextInv : 1,
       nextQt: typeof s.nextQt === 'number' ? s.nextQt : 1,
+      baseCurrency: s.baseCurrency || 'ZAR',
       goals: s.goals || { annual: 0, monthly: {} },
       savedLineItems: s.savedLineItems || [],
       clients: state.clients || [],
       documents: state.documents || [],
       expenses: state.expenses || [],
       statements: state.statements || [],
+      fxRates: s.fxRates || {},
+      fxFetchedAt: s.fxFetchedAt || null,
     };
     state.entities = [entity];
     state.activeEntityId = 'ent-1';
     // Remove moved fields from their old homes
-    ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'goals', 'savedLineItems'].forEach((k) => { delete s[k]; });
+    ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'goals', 'savedLineItems', 'fxRates', 'fxFetchedAt'].forEach((k) => { delete s[k]; });
     delete state.clients; delete state.documents; delete state.expenses; delete state.statements;
   }
   if (!state.activeEntityId && state.entities && state.entities[0]) state.activeEntityId = state.entities[0].id;
-  state.version = 5;
+
+  // v5.2: base currency + FX rates move from global settings to each business.
+  // Earlier v5 vaults had a single global baseCurrency/fxRates — copy them onto
+  // every entity that lacks its own, then drop the globals.
+  {
+    const s = state.settings;
+    const globalBase = s.baseCurrency;
+    const globalRates = s.fxRates;
+    const globalFetched = s.fxFetchedAt;
+    for (const ent of (state.entities || [])) {
+      if (!ent.baseCurrency) ent.baseCurrency = globalBase || 'ZAR';
+      if (!ent.fxRates) ent.fxRates = globalRates ? { ...globalRates } : {};
+      if (ent.fxFetchedAt === undefined) ent.fxFetchedAt = globalFetched || null;
+    }
+    delete s.baseCurrency; delete s.fxRates; delete s.fxFetchedAt;
+  }
+
+  // v6.1: per-business VAT rate (defaults to 15% for existing businesses)
+  // v6.2: per-business VAT cycle (defaults to bi-monthly = previous SA behaviour)
+  for (const ent of (state.entities || [])) {
+    if (ent.vatPercent === undefined) ent.vatPercent = 15;
+    if (ent.vatCycle === undefined) ent.vatCycle = 'bi-monthly';
+  }
+  state.version = 6;
 }
 
 /* ============================================================
@@ -1884,37 +1915,32 @@ function pipeline(convWindow) {
 }
 
 // SA bi-monthly VAT periods. Returns latest N periods.
-function vatPeriods(n) {
-  // Periods: Mar-Apr, May-Jun, Jul-Aug, Sep-Oct, Nov-Dec, Jan-Feb
-  // Compute current period from today
+// VAT return cycle for the active business. Each cycle is a period length in
+// months, anchored to the calendar (Jan). All lengths divide 12, so periods
+// never straddle a year boundary.
+const VAT_CYCLE_MONTHS = { 'monthly': 1, 'bi-monthly': 2, 'quarterly': 3, 'biannual': 6, 'annual': 12 };
+const VAT_CYCLE_LABELS = { 'monthly': 'Monthly', 'bi-monthly': 'Bi-monthly', 'quarterly': 'Quarterly', 'biannual': 'Bi-annual', 'annual': 'Annual' };
+function vatCycle() { return (state && state.settings && state.settings.vatCycle) || 'bi-monthly'; }
+function vatCycleLabel() { return VAT_CYCLE_LABELS[vatCycle()] || 'Bi-monthly'; }
+
+function vatPeriods(n, cycle) {
+  cycle = cycle || vatCycle();
+  const L = VAT_CYCLE_MONTHS[cycle] || 2;
   const today = new Date();
   const periods = [];
   let y = today.getFullYear();
-  let m = today.getMonth(); // 0-based
-  // Walk back to find each period start
+  let startM = Math.floor(today.getMonth() / L) * L; // 0-based start month of current period
   for (let i = 0; i < n; i++) {
-    let pStartM, pEndM, pStartY, pEndY;
-    // Map current month to its period
-    // periods (0-based): [2-3], [4-5], [6-7], [8-9], [10-11], [0-1]
-    const periodIdx = Math.floor(((m + 12 - 2) % 12) / 2); // 0..5 starting from Mar-Apr
-    const baseM = (periodIdx * 2 + 2) % 12;
-    pStartM = baseM;
-    pEndM = (baseM + 1) % 12;
-    if (periodIdx === 5) { // Jan-Feb belongs to previous tax year
-      pStartY = y;
-      pEndY = y;
-    } else {
-      pStartY = y;
-      pEndY = y;
-    }
-    const pStart = `${pStartY}-${String(pStartM + 1).padStart(2, '0')}-01`;
-    const lastDay = new Date(pEndY, pEndM + 1, 0).getDate();
-    const pEnd = `${pEndY}-${String(pEndM + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-    const label = `${monthShort(pStartM)}–${monthShort(pEndM)} ${pEndY}`;
+    const endM = startM + L - 1;
+    const pStart = `${y}-${String(startM + 1).padStart(2, '0')}-01`;
+    const lastDay = new Date(y, endM + 1, 0).getDate();
+    const pEnd = `${y}-${String(endM + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    const label = L === 1 ? `${monthShort(startM)} ${y}`
+      : L === 12 ? `${y}`
+      : `${monthShort(startM)}–${monthShort(endM)} ${y}`;
     periods.push({ start: pStart, end: pEnd, label });
-    // Step back 2 months
-    m -= 2;
-    if (m < 0) { m += 12; y -= 1; }
+    startM -= L;
+    if (startM < 0) { startM += 12; y -= 1; }
   }
   return periods;
 }
@@ -1926,9 +1952,10 @@ function monthShort(m) {
 function vatForPeriod(pStart, pEnd, basis) {
   let output = 0;
   let input = 0;
+  const rate = vatRate();
   for (const d of state.documents) {
     if (d.type !== 'invoice') continue;
-    if (d.currency !== 'ZAR') continue;
+    if (!docHasVat(d.currency)) continue;
     const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
     if (!rd) continue;
     if (rd < pStart || rd > pEnd) continue;
@@ -1937,10 +1964,10 @@ function vatForPeriod(pStart, pEnd, basis) {
   }
   for (const e of state.expenses) {
     if (!e.vat) continue;
-    if (e.currency !== 'ZAR') continue;
+    if (e.currency !== baseCcy() || rate <= 0) continue;
     if (e.date < pStart || e.date > pEnd) continue;
-    // Expense amount is VAT-inclusive — input VAT = amount × 15/115
-    input += (e.amount * 15) / 115;
+    // Expense amount is VAT-inclusive — input VAT = amount × rate/(100+rate)
+    input += (e.amount * rate) / (100 + rate);
   }
   return { output, input, net: output - input };
 }
@@ -2442,7 +2469,7 @@ function renderFinances() {
     <div class="list-card is-cream">
       <div class="list-head">
         <h2>VAT summary</h2>
-        <span class="text-sm" style="color:rgba(15,14,13,0.55);">Bi-monthly · ZAR only · ${financesBasis}</span>
+        <span class="text-sm" style="color:rgba(15,14,13,0.55);">${vatCycleLabel()} · ${baseCcy()} @ ${vatRate()}% · ${financesBasis}</span>
       </div>
       <div style="padding:0 24px 20px;">${renderVatTable(vatList)}</div>
     </div>
@@ -3591,7 +3618,9 @@ function exportAccountantReport() {
   };
   const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
 
-  row(`Seed Web Design CC — Accountant Report`);
+  const co = state.settings.company || {};
+  const orgName = co.name || (state.settings.brandName) || 'Business';
+  row(`${orgName} — Accountant Report`);
   row(`Period`, `${periodStart} to ${periodEnd} (SA tax year ${ty.label})`);
   row(`Generated`, new Date().toISOString().slice(0, 19).replace('T', ' '));
   row();
@@ -3604,7 +3633,7 @@ function exportAccountantReport() {
     const t = calcTotals(d);
     const zar = toBase(t.total, d.currency);
     if (zar != null) incZAR += zar;
-    incVAT += d.currency === 'ZAR' ? t.vat : 0;
+    incVAT += docHasVat(d.currency) ? t.vat : 0;
     row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.subtotal.toFixed(2), t.vat.toFixed(2), t.total.toFixed(2), zar == null ? '' : zar.toFixed(2));
   }
   row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', '', '', '', incZAR.toFixed(2));
@@ -3612,12 +3641,12 @@ function exportAccountantReport() {
 
   // EXPENSES
   row(`EXPENSES`);
-  row('Date', 'Description', 'Category', 'Currency', 'Amount', 'ZAR equiv', 'VAT (input)', 'Notes');
+  row('Date', 'Description', 'Category', 'Currency', 'Amount', baseCcy() + ' equiv', 'VAT (input)', 'Notes');
   let expZAR = 0, expInputVAT = 0;
   for (const e of state.expenses.filter((x) => x.date >= periodStart && x.date <= periodEnd).sort((a, b) => a.date.localeCompare(b.date))) {
     const zar = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
     if (zar != null) expZAR += zar;
-    const inputVAT = (e.vat && e.currency === 'ZAR') ? (e.amount * 15) / 115 : 0;
+    const inputVAT = (e.vat && e.currency === baseCcy() && vatRate() > 0) ? (e.amount * vatRate()) / (100 + vatRate()) : 0;
     expInputVAT += inputVAT;
     row(e.date, e.desc, e.category || '', e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), e.notes || '');
   }
@@ -3625,7 +3654,7 @@ function exportAccountantReport() {
   row();
 
   // VAT SUMMARY
-  row(`VAT SUMMARY (ZAR-only invoices, output VAT)`);
+  row(`VAT SUMMARY (${baseCcy()} invoices @ ${vatRate()}%, output VAT)`);
   row('Period', 'Output VAT', 'Input VAT', 'Net payable');
   for (const p of vatPeriods(6).reverse()) {
     const v = vatForPeriod(p.start, p.end, financesBasis);
@@ -3635,7 +3664,7 @@ function exportAccountantReport() {
 
   // OUTSTANDING
   row(`OUTSTANDING (unpaid invoices)`);
-  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount', 'ZAR equiv', 'Days outstanding');
+  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount', baseCcy() + ' equiv', 'Days outstanding');
   const today = todayISO();
   for (const d of state.documents.filter((x) => x.type === 'invoice' && (x.status === 'sent' || x.status === 'overdue')).sort((a, b) => a.date.localeCompare(b.date))) {
     const t = calcTotals(d);
@@ -3658,7 +3687,8 @@ function exportAccountantReport() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `seed-accountant-${ty.label.replace('/', '-')}-${todayISO()}.csv`;
+  const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'business';
+  a.download = `${slug}-accountant-${ty.label.replace('/', '-')}-${todayISO()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
   toast('Report downloaded');
@@ -3930,7 +3960,7 @@ function openDocEditor(docId, defaultType) {
 function renderDocEditor() {
   const d = editingDoc;
   const t = calcTotals(d);
-  const isZAR = d.currency === 'ZAR';
+  const isZAR = docHasVat(d.currency);
   const linesHtml = d.lines.map((l, i) => `
     <tr data-line-idx="${i}">
       <td><input data-lf="desc" value="${escapeHtml(l.desc)}" placeholder="Description" /></td>
@@ -4058,7 +4088,7 @@ function renderDocEditor() {
 
       <div class="totals-box mt-24">
         <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, d.currency)}</span></div>
-        ${isZAR ? `<div class="row"><span>VAT 15%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
+        ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
         <div class="row total"><span>Total ${d.currency}</span><span class="v">${fmtMoney(t.total, d.currency)}</span></div>
         ${t.depositPct > 0 ? `<div class="row muted"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
         <div class="row due"><span>Amount due ${d.currency}</span><span class="v">${fmtMoney(t.due, d.currency)}</span></div>
@@ -4210,12 +4240,12 @@ function bindEditorEvents() {
 
 function updateTotalsBox() {
   const t = calcTotals(editingDoc);
-  const isZAR = editingDoc.currency === 'ZAR';
+  const isZAR = docHasVat(editingDoc.currency);
   const box = document.querySelector('.totals-box');
   if (!box) return;
   box.innerHTML = `
     <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, editingDoc.currency)}</span></div>
-    ${isZAR ? `<div class="row"><span>VAT 15%</span><span class="v">${fmtMoney(t.vat, editingDoc.currency)}</span></div>` : ''}
+    ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, editingDoc.currency)}</span></div>` : ''}
     <div class="row total"><span>Total ${editingDoc.currency}</span><span class="v">${fmtMoney(t.total, editingDoc.currency)}</span></div>
     ${t.depositPct > 0 ? `<div class="row muted"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, editingDoc.currency)}</span></div>` : ''}
     <div class="row due"><span>Amount due ${editingDoc.currency}</span><span class="v">${fmtMoney(t.due, editingDoc.currency)}</span></div>
@@ -4256,7 +4286,7 @@ function openDocPreview(docId) {
   const c = state.clients.find((x) => x.id === d.clientId) || { name: '—', addr: '', vat: '' };
   const bank = state.settings.banking.find((b) => b.id === d.bankId) || { details: '' };
   const co = state.settings.company || COMPANY_DEFAULT;
-  const isZAR = d.currency === 'ZAR';
+  const isZAR = docHasVat(d.currency);
   const isInv = d.type === 'invoice';
   const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
   const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price).map((l) => `
@@ -4264,7 +4294,7 @@ function openDocPreview(docId) {
       <td>${escapeHtml(l.desc)}</td>
       <td class="text-right">${l.qty}</td>
       <td class="text-right">${fmtMoney(Number(l.price) || 0, d.currency)}</td>
-      ${isZAR ? `<td class="text-right">${l.vat ? '15%' : '—'}</td>` : ''}
+      ${isZAR ? `<td class="text-right">${l.vat ? vatRate() + '%' : '—'}</td>` : ''}
       <td class="text-right">${fmtMoney(calcLine(l), d.currency)}</td>
     </tr>
   `).join('');
@@ -4341,7 +4371,7 @@ function openDocPreview(docId) {
 
             <div class="preview-totals">
               <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, d.currency)}</span></div>
-              ${isZAR ? `<div class="row"><span>VAT 15%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
+              ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
               <div class="row line"><span>TOTAL ${d.currency}</span><span class="v">${fmtMoney(t.total, d.currency)}</span></div>
               ${t.depositPct > 0 ? `<div class="row deposit-callout"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
               <div class="row line"><span>Amount Due ${d.currency}</span><span class="v">${fmtMoney(t.due, d.currency)}</span></div>
@@ -4510,7 +4540,7 @@ async function generatePdf(d) {
   const c = state.clients.find((x) => x.id === d.clientId) || { name: '—', addr: '', vat: '' };
   const bank = state.settings.banking.find((b) => b.id === d.bankId) || { details: '' };
   const co = state.settings.company || COMPANY_DEFAULT;
-  const isZAR = d.currency === 'ZAR';
+  const isZAR = docHasVat(d.currency);
   const isInv = d.type === 'invoice';
   const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
 
@@ -4659,7 +4689,7 @@ async function generatePdf(d) {
       fmtMoney(Number(l.price) || 0, d.currency),
       fmtMoney(calcLine(l), d.currency),
     ];
-    if (isZAR) baseRow.splice(3, 0, l.vat ? '15%' : '—');
+    if (isZAR) baseRow.splice(3, 0, l.vat ? vatRate() + '%' : '—');
     return baseRow;
   });
 
@@ -4706,7 +4736,7 @@ async function generatePdf(d) {
     y += ROW_H;
   };
   totalRow('Subtotal', fmtMoney(t.subtotal, d.currency));
-  if (isZAR) totalRow('VAT 15%', fmtMoney(t.vat, d.currency));
+  if (isZAR) totalRow('VAT ' + vatRate() + '%', fmtMoney(t.vat, d.currency));
   // Separator above TOTAL — sits between previous row and TOTAL
   doc.setDrawColor(28, 27, 25);
   doc.setLineWidth(0.6);
@@ -4801,14 +4831,8 @@ function renderSettings() {
       <div class="form-grid">
         <div class="field"><label>Brand name <span class="text-muted">(sidebar + lock screen, short)</span></label><input data-cs="brandName" value="${escapeHtml(state.settings.brandName || '')}" placeholder="e.g. acme" /></div>
         <div class="field"><label>App title <span class="text-muted">(browser tab suffix)</span></label><input data-cs="appTitle" value="${escapeHtml(state.settings.appTitle || 'Invoicing')}" placeholder="e.g. Invoicing" /></div>
-        <div class="field">
-          <label>Base currency <span class="text-muted">(home currency for dashboard + reports)</span></label>
-          <select data-cs="baseCurrency">
-            ${SUPPORTED_CURRENCIES.map((c) => `<option value="${c}" ${c === baseCcy() ? 'selected' : ''}>${c} (${SYM[c] || c})</option>`).join('')}
-          </select>
-        </div>
       </div>
-      <div class="text-sm text-mid" style="margin-top:10px;">The brand name is shown in the sidebar, lock screen and browser tab in the app's serif font. The logo (below) is only used on PDFs (invoices and quotes), not in the app itself. Base currency is what the dashboard and finance reports convert everything into — new invoices default to it too.</div>
+      <div class="text-sm text-mid" style="margin-top:10px;">The brand name is shown in the sidebar, lock screen and browser tab in the app's serif font. The logo (below) is only used on PDFs (invoices and quotes), not in the app itself.</div>
     </div>
 
     <div class="settings-section">
@@ -4838,7 +4862,24 @@ function renderSettings() {
         <div class="field"><label>VAT number</label><input data-cs="vat" value="${escapeHtml(co.vat || '')}" /></div>
         <div class="field"><label>Email</label><input data-cs="email" value="${escapeHtml(co.email || '')}" /></div>
         <div class="field"><label>Phone</label><input data-cs="phone" value="${escapeHtml(co.phone || '')}" /></div>
+        <div class="field">
+          <label>Base currency <span class="text-muted">(this business's home currency)</span></label>
+          <select data-cs="baseCurrency">
+            ${SUPPORTED_CURRENCIES.map((c) => `<option value="${c}" ${c === baseCcy() ? 'selected' : ''}>${c} (${SYM[c] || c})</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>VAT / sales tax % <span class="text-muted">(0 if not registered)</span></label>
+          <input data-cs="vatPercent" type="number" step="any" min="0" value="${vatRate()}" />
+        </div>
+        <div class="field">
+          <label>VAT cycle <span class="text-muted">(return period grouping)</span></label>
+          <select data-cs="vatCycle">
+            ${Object.keys(VAT_CYCLE_LABELS).map((k) => `<option value="${k}" ${k === vatCycle() ? 'selected' : ''}>${VAT_CYCLE_LABELS[k]}</option>`).join('')}
+          </select>
+        </div>
       </div>
+      <div class="text-sm text-mid" style="margin-top:10px;">Base currency is what this business's dashboard and finance reports convert everything into — its new invoices default to it too. VAT applies to invoices in the base currency at the rate above (foreign-currency sales are treated as zero-rated); set 0% if this business isn't VAT/tax registered. Each business can use different values.</div>
     </div>
 
     <div class="settings-section">
@@ -4989,7 +5030,8 @@ function bindSettingsEvents() {
       const f = el.dataset.cs;
       let v = el.value;
       if (f === 'nextInv' || f === 'nextQt' || f === 'autoLockMinutes') v = Number(v) || 0;
-      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency'].includes(f)) state.settings[f] = v;
+      if (f === 'vatPercent') v = Math.max(0, Number(v) || 0);
+      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -5008,6 +5050,7 @@ function bindSettingsEvents() {
         await fetchFxRates(true);
         render();
       }
+      if (f === 'vatPercent' || f === 'vatCycle') render();  // recompute VAT / period buckets
     });
   });
 
@@ -5221,12 +5264,12 @@ function openHistoricalModal() {
     const total = Number(document.getElementById('h-total').value) || 0;
     if (!num || !total) { toast('Number and total are required'); return; }
     const currency = document.getElementById('h-currency').value;
-    const isZAR = currency === 'ZAR';
+    const isZAR = docHasVat(currency);
     const status = document.getElementById('h-status').value;
     const date = document.getElementById('h-date').value || todayISO();
     const desc = document.getElementById('h-desc').value || 'Services';
-    // Reverse-calc unit price so totals come out right
-    const price = isZAR ? total / 1.15 : total;
+    // Reverse-calc unit price so totals come out right (VAT-inclusive total → ex-VAT line)
+    const price = isZAR ? total / (1 + vatRate() / 100) : total;
     const doc = {
       id: uid('d-'),
       type: 'invoice',
@@ -5927,7 +5970,7 @@ function openBulkInvoicePreview(rows, fileName) {
       const id = 'd-inv' + String(it.num).padStart(4, '0');
       // Skip if same number already exists
       if (state.documents.some((d) => d.type === 'invoice' && d.number === it.num)) continue;
-      const isZAR = it.currency === 'ZAR';
+      const isZAR = docHasVat(it.currency);
       const vatBoolean = it.vatPct > 0 && isZAR;
       const line = { id: 'l-' + Math.random().toString(36).slice(2, 8), desc: it.description || 'Services', qty: 1, price: it.subtotal, vat: vatBoolean };
       const doc = {
@@ -6500,7 +6543,7 @@ async function applyPdfReview() {
   for (const it of plan) {
     if (state.documents.some((d) => d.type === 'invoice' && d.number === it.number)) continue;
     const client = state.clients.find((c) => c.name.toLowerCase() === it.client.toLowerCase());
-    const isZAR = it.currency === 'ZAR';
+    const isZAR = docHasVat(it.currency);
     const subtotal = it.subtotal && !isNaN(it.subtotal) ? it.subtotal : (isZAR && it.vat ? it.total - it.vat : it.total);
     const vatBoolean = !!(isZAR && it.vat && it.vat > 0);
     const id = 'd-inv' + String(it.number).padStart(4, '0');
@@ -6662,6 +6705,8 @@ async function switchEntity(id) {
   renderEntitySwitcher();
   setRoute('dashboard');
   toast('Switched to ' + (activeEntity().name || 'business'));
+  // This business may have a different base currency — refresh its rates if stale/empty
+  fetchFxRates().then(() => { if (currentRoute === 'dashboard' || currentRoute === 'finances') render(); });
 }
 
 async function addEntityFlow() {
@@ -6669,6 +6714,7 @@ async function addEntityFlow() {
   if (name == null) return;
   const trimmed = name.trim();
   if (!trimmed) { toast('A name is required'); return; }
+  const defaultBase = baseCcy();  // inherit the current business's base as a sensible default
   const id = 'ent-' + Math.random().toString(36).slice(2, 9);
   state.entities.push({
     id, name: trimmed,
@@ -6676,9 +6722,11 @@ async function addEntityFlow() {
     logo: null,
     banking: JSON.parse(JSON.stringify(BLANK_BANKING)),
     nextInv: 1, nextQt: 1,
+    baseCurrency: defaultBase,
     goals: { annual: 0, monthly: {} },
     savedLineItems: [],
     clients: [], documents: [], expenses: [], statements: [],
+    fxRates: {}, fxFetchedAt: null,
   });
   state.activeEntityId = id;
   await saveState();
@@ -6686,6 +6734,7 @@ async function addEntityFlow() {
   renderEntitySwitcher();
   setRoute('settings');
   toast('Added "' + trimmed + '" — now fill in its company & banking details');
+  fetchFxRates();  // fetch rates for the new business's base
 }
 
 async function deleteEntity(id) {

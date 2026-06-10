@@ -34,12 +34,12 @@ You can use it straight from the link above, but installing it gives you a real 
 ## First-time setup
 
 1. **Set a master password** (at least 8 characters). This encrypts your data. **Write it down somewhere safe — there is no way to recover it if you forget it.**
-2. **Settings → Brand:** your app name and your **base currency** (the home currency your dashboard and reports convert everything into).
-3. **Settings → Company:** name, address, email, phone, and **VAT number**. (If you enter a VAT number, invoices are labelled "TAX INVOICE"; without one they say "INVOICE".)
+2. **Settings → Brand:** your app name (shown in the sidebar, lock screen and browser tab).
+3. **Settings → Company:** your business details — name, address, email, phone, **VAT number**, **base currency**, **VAT %**, and **VAT cycle** (Monthly / Bi-monthly / Quarterly / Bi-annual / Annual). Enter a VAT number and invoices are labelled "TAX INVOICE"; leave it blank and they say "INVOICE". Set VAT % to `0` if you're not registered.
 4. **Settings → Logo:** upload your logo — it appears on invoice/quote PDFs.
 5. **Settings → Banking:** fill in your account details for each currency you use.
 
-Running more than one business? **Settings → Businesses → + Add business.** Each business has its own details, clients, invoices, and numbering; switch between them from the top of the sidebar.
+Running more than one business? **Settings → Businesses → + Add business.** Each business has its own details, clients, invoices, numbering, **currency and VAT settings**; switch between them from the top of the sidebar.
 
 ---
 
@@ -81,5 +81,5 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 
 ## Good to know
 
-- **Tax year & VAT default to South Africa** (1 March – end Feb; VAT 15%). Invoicing and reconciliation work anywhere, but the Finances tab's tax-year/VAT periods assume SA.
+- **Currency, VAT rate and VAT cycle are configurable per business** (Settings → Company) — so the app works for most countries. The one fixed assumption is the **tax year** (1 March – end Feb, South African), used only by the Finances tab's year framing.
 - **Forgot your password?** There's no recovery — the lock screen has a "reset vault" option that wipes the data so you can start over. Keep backups.
