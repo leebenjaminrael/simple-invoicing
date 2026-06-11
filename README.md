@@ -35,7 +35,7 @@ You can use it straight from the link above, but installing it gives you a real 
 
 1. **Set a master password** (at least 8 characters). This encrypts your data. **Write it down somewhere safe — there is no way to recover it if you forget it.**
 2. **Settings → Brand:** your app name (shown in the sidebar, lock screen and browser tab).
-3. **Settings → Company:** your business details — name, address, email, phone, **VAT number**, **base currency**, **VAT %**, and **VAT cycle** (Monthly / Bi-monthly / Quarterly / Bi-annual / Annual). Enter a VAT number and invoices are labelled "TAX INVOICE"; leave it blank and they say "INVOICE". Set VAT % to `0` if you're not registered.
+3. **Settings → Company:** your business details — name, address, email, phone, **VAT number**, **base currency**, **VAT %**, **VAT cycle** (Monthly / Bi-monthly / Quarterly / Bi-annual / Annual), and **tax-year start month**. Enter a VAT number and invoices are labelled "TAX INVOICE"; leave it blank and they say "INVOICE". Set VAT % to `0` if you're not registered.
 4. **Settings → Logo:** upload your logo — it appears on invoice/quote PDFs.
 5. **Settings → Banking:** fill in your account details for each currency you use.
 
@@ -81,5 +81,5 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 
 ## Good to know
 
-- **Currency, VAT rate and VAT cycle are configurable per business** (Settings → Company) — so the app works for most countries. The one fixed assumption is the **tax year** (1 March – end Feb, South African), used only by the Finances tab's year framing.
+- **Currency, VAT rate, VAT cycle and tax-year start are all configurable per business** (Settings → Company) — so the app works for most countries out of the box. The defaults are South African (ZAR, 15%, bi-monthly, March year-start); change them per business as needed.
 - **Forgot your password?** There's no recovery — the lock screen has a "reset vault" option that wipes the data so you can start over. Keep backups.
