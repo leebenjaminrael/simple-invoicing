@@ -1288,6 +1288,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <div class="nav-section">Main</div>
     <button class="nav-item" data-route="dashboard"><span class="dot"></span> Dashboard</button>
     <button class="nav-item" data-route="finances"><span class="dot"></span> Finances</button>
+    <button class="nav-item" data-route="vat"><span class="dot"></span> VAT</button>
     <button class="nav-item" data-route="documents"><span class="dot"></span> Documents</button>
     <button class="nav-item" data-route="clients"><span class="dot"></span> Clients</button>
     <button class="nav-item" data-route="expenses"><span class="dot"></span> Expenses</button>
@@ -1404,7 +1405,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.4.0';          // MAJOR.MINOR.PATCH — patch=small fix, minor=feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.4.1.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1586,6 +1587,19 @@ function vatRate() { const v = state && state.settings ? Number(state.settings.v
 // VAT applies to documents in the business's base currency, when a rate is set
 // (foreign-currency sales are treated as zero-rated / exports).
 function docHasVat(currency) { return currency === baseCcy() && vatRate() > 0; }
+// Input VAT claimable on an expense. VAT-inclusive amount → VAT = amount × rate/(100+rate).
+// Uses the amount stored at entry time (locked) when present; falls back to a live
+// calc at the current rate for older records that predate the stored field.
+function calcInputVat(amount, currency, rate) {
+  if (!(currency === baseCcy() && rate > 0)) return 0;
+  return (Number(amount) || 0) * rate / (100 + rate);
+}
+function inputVatOf(e) {
+  if (!e) return 0;
+  if (typeof e.vatAmount === 'number') return e.vatAmount;   // stored at entry
+  if (e.vat) return calcInputVat(e.amount, e.currency, vatRate()); // legacy fallback
+  return 0;
+}
 function fmtMoney(n, currency) {
   const num = Number(n) || 0;
   const sym = SYM[currency] || currency + ' ';
@@ -1962,7 +1976,6 @@ function monthShort(m) {
 function vatForPeriod(pStart, pEnd, basis) {
   let output = 0;
   let input = 0;
-  const rate = vatRate();
   for (const d of state.documents) {
     if (d.type !== 'invoice') continue;
     if (!docHasVat(d.currency)) continue;
@@ -1973,11 +1986,8 @@ function vatForPeriod(pStart, pEnd, basis) {
     output += t.vat;
   }
   for (const e of state.expenses) {
-    if (!e.vat) continue;
-    if (e.currency !== baseCcy() || rate <= 0) continue;
     if (e.date < pStart || e.date > pEnd) continue;
-    // Expense amount is VAT-inclusive — input VAT = amount × rate/(100+rate)
-    input += (e.amount * rate) / (100 + rate);
+    input += inputVatOf(e);  // stored at entry (or computed for legacy records)
   }
   return { output, input, net: output - input };
 }
@@ -2113,6 +2123,7 @@ function render() {
   const host = document.getElementById('view-host');
   if (currentRoute === 'dashboard') host.innerHTML = renderDashboard();
   else if (currentRoute === 'finances') host.innerHTML = renderFinances();
+  else if (currentRoute === 'vat') host.innerHTML = renderVatView();
   else if (currentRoute === 'documents') host.innerHTML = renderDocuments();
   else if (currentRoute === 'clients') host.innerHTML = renderClients();
   else if (currentRoute === 'expenses') host.innerHTML = renderExpensesView();
@@ -2479,7 +2490,7 @@ function renderFinances() {
     <div class="list-card is-cream">
       <div class="list-head">
         <h2>VAT summary</h2>
-        <span class="text-sm" style="color:rgba(15,14,13,0.55);">${vatCycleLabel()} · ${baseCcy()} @ ${vatRate()}% · ${financesBasis}</span>
+        <span class="link" data-route-link="vat" style="color:rgba(15,14,13,0.55);cursor:pointer;">Open VAT tab (drill-down + export) →</span>
       </div>
       <div style="padding:0 24px 20px;">${renderVatTable(vatList)}</div>
     </div>
@@ -2570,6 +2581,180 @@ function renderVatTable(periods) {
 }
 
 /* ============================================================
+   VAT VIEW — per-cycle summary, drill-down, per-period export
+   ============================================================ */
+
+let vatPeriodCount = 12;
+
+// The invoices (output VAT) and expenses (input VAT) that make up one period.
+function vatPeriodDetail(pStart, pEnd, basis) {
+  const invoices = [];
+  let output = 0;
+  for (const d of state.documents) {
+    if (d.type !== 'invoice' || !docHasVat(d.currency)) continue;
+    const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
+    if (!rd || rd < pStart || rd > pEnd) continue;
+    const t = calcTotals(d);
+    if (t.vat <= 0) continue;
+    invoices.push({ doc: d, recognised: rd, vat: t.vat, total: t.total });
+    output += t.vat;
+  }
+  const expenses = [];
+  let input = 0;
+  for (const e of state.expenses) {
+    if (!e.date || e.date < pStart || e.date > pEnd) continue;
+    const iv = inputVatOf(e);
+    if (iv <= 0) continue;
+    expenses.push({ exp: e, vat: iv });
+    input += iv;
+  }
+  invoices.sort((a, b) => (a.recognised || '').localeCompare(b.recognised || ''));
+  expenses.sort((a, b) => (a.exp.date || '').localeCompare(b.exp.date || ''));
+  return { invoices, expenses, output, input, net: output - input };
+}
+
+function renderVatView() {
+  const reg = (activeEntity() && activeEntity().company && activeEntity().company.vat) || '';
+  const periods = vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
+  const rows = periods.map((p, i) => `
+    <tr class="row-clickable" data-vat-idx="${i}">
+      <td><strong>${escapeHtml(p.label)}</strong><div class="text-sm text-mid">${fmtDate(p.start)} – ${fmtDate(p.end)}</div></td>
+      <td class="amount">${fmtMoney(p.output, baseCcy())}</td>
+      <td class="amount">${fmtMoney(p.input, baseCcy())}</td>
+      <td class="amount"><strong style="color:${p.net >= 0 ? 'var(--text)' : 'var(--accent-bright)'};">${fmtMoney(p.net, baseCcy())}</strong></td>
+      <td class="actions">
+        <button class="btn btn-sm" data-vat-view="${i}">Details</button>
+        <button class="btn btn-sm btn-ghost" data-vat-export="${i}">CSV</button>
+      </td>
+    </tr>
+  `).join('');
+
+  return `
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
+      <h1 class="title-hero">VAT</h1>
+      <div class="page-actions">
+        <div class="doc-toggle">
+          <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-vat-basis="cash">Cash basis</div>
+          <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-vat-basis="accrual">Invoice basis</div>
+        </div>
+      </div>
+    </div>
+    <div class="title-hero-sub">${vatCycleLabel()} cycle · ${baseCcy()} @ ${vatRate()}%${reg ? ' · VAT no. ' + escapeHtml(reg) : ''} · ${financesBasis === 'cash' ? 'payments (cash) basis' : 'invoice (accrual) basis'}</div>
+
+    <div style="margin-bottom:16px;display:flex;gap:6px;align-items:center;">
+      <span class="text-sm text-mid">Show:</span>
+      ${[6, 12, 24].map((n) => `<button class="btn btn-sm ${vatPeriodCount === n ? 'btn-primary' : ''}" data-vat-count="${n}">${n} periods</button>`).join('')}
+    </div>
+
+    <div class="list-card">
+      <div class="list-head"><h2>VAT by ${vatCycleLabel().toLowerCase()} period</h2><span class="text-sm text-mid">Output − Input = Net payable</span></div>
+      <div class="doc-list" style="border:0;overflow-x:auto;">
+        <table style="min-width:680px;">
+          <thead><tr><th>Period</th><th class="amount">Output VAT</th><th class="amount">Input VAT</th><th class="amount">Net payable</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5" class="empty">No VAT activity.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="text-sm text-mid" style="margin-top:12px;">
+      Output VAT = VAT charged on ${baseCcy()} invoices · Input VAT = VAT claimable on ${baseCcy()} expenses marked as VAT-inclusive. A <strong>positive net</strong> is payable to the tax authority; a negative net is a refund. Click a period for the line-by-line breakdown, or export it as CSV for your accountant.
+    </div>
+  `;
+}
+
+function openVatPeriodModal(p) {
+  const det = vatPeriodDetail(p.start, p.end, financesBasis);
+  const invRows = det.invoices.map((r) => `
+    <tr>
+      <td class="num">${docNumber(r.doc)}</td>
+      <td>${fmtDate(r.recognised)}</td>
+      <td>${escapeHtml(clientName(r.doc.clientId))}</td>
+      <td class="amount">${fmtMoney(r.total, r.doc.currency)}</td>
+      <td class="amount"><strong>${fmtMoney(r.vat, r.doc.currency)}</strong></td>
+    </tr>
+  `).join('') || `<tr><td colspan="5" class="text-mid" style="padding:12px;">No output VAT in this period.</td></tr>`;
+  const expRows = det.expenses.map((r) => `
+    <tr>
+      <td>${fmtDate(r.exp.date)}</td>
+      <td>${escapeHtml(r.exp.desc)}</td>
+      <td>${escapeHtml(r.exp.category || '—')}</td>
+      <td class="amount">${fmtMoney(r.exp.amount, r.exp.currency)}</td>
+      <td class="amount"><strong>${fmtMoney(r.vat, r.exp.currency)}</strong></td>
+    </tr>
+  `).join('') || `<tr><td colspan="5" class="text-mid" style="padding:12px;">No input VAT in this period.</td></tr>`;
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:820px;">
+        <div class="modal-head">
+          <div class="ttl">VAT · ${escapeHtml(p.label)}</div>
+          <div class="actions">
+            <button class="btn btn-sm" id="vat-modal-export">Download CSV</button>
+            <span class="modal-close" data-close>×</span>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
+            <div><div class="stat-label">Output VAT</div><div style="font-family:'DM Serif Display',serif;font-size:22px;">${fmtMoney(det.output, baseCcy())}</div></div>
+            <div><div class="stat-label">Input VAT</div><div style="font-family:'DM Serif Display',serif;font-size:22px;">${fmtMoney(det.input, baseCcy())}</div></div>
+            <div><div class="stat-label">Net payable</div><div style="font-family:'DM Serif Display',serif;font-size:22px;color:var(--accent-bright);">${fmtMoney(det.net, baseCcy())}</div></div>
+          </div>
+          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Output VAT — invoices</h2></div>
+          <div class="doc-list" style="overflow-x:auto;margin-bottom:18px;">
+            <table style="min-width:560px;"><thead><tr><th>#</th><th>Date</th><th>Client</th><th class="amount">Total</th><th class="amount">VAT</th></tr></thead><tbody>${invRows}</tbody></table>
+          </div>
+          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Input VAT — expenses</h2></div>
+          <div class="doc-list" style="overflow-x:auto;">
+            <table style="min-width:560px;"><thead><tr><th>Date</th><th>Description</th><th>Category</th><th class="amount">Amount</th><th class="amount">VAT</th></tr></thead><tbody>${expRows}</tbody></table>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Close</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('vat-modal-export').addEventListener('click', () => exportVatPeriod(p));
+}
+
+function exportVatPeriod(p) {
+  const det = vatPeriodDetail(p.start, p.end, financesBasis);
+  const co = (activeEntity() && activeEntity().company) || {};
+  const orgName = co.name || state.settings.brandName || 'Business';
+  const lines = [];
+  const csvEsc = (v) => { if (v == null) return ''; const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
+
+  row(`${orgName} — VAT ${p.label}`);
+  row('Period', `${p.start} to ${p.end}`);
+  row('Basis', financesBasis === 'cash' ? 'Payments (cash)' : 'Invoice (accrual)');
+  row('VAT rate', vatRate() + '%');
+  row('Currency', baseCcy());
+  row();
+  row('OUTPUT VAT — invoices');
+  row('Invoice #', 'Date', 'Client', 'Total', 'VAT');
+  for (const r of det.invoices) row(docNumber(r.doc), r.recognised, clientName(r.doc.clientId), r.total.toFixed(2), r.vat.toFixed(2));
+  row('', '', '', 'TOTAL OUTPUT VAT', det.output.toFixed(2));
+  row();
+  row('INPUT VAT — expenses');
+  row('Date', 'Description', 'Category', 'Amount', 'VAT');
+  for (const r of det.expenses) row(r.exp.date, r.exp.desc, r.exp.category || '', r.exp.amount.toFixed(2), r.vat.toFixed(2));
+  row('', '', '', 'TOTAL INPUT VAT', det.input.toFixed(2));
+  row();
+  row('NET PAYABLE', det.net.toFixed(2));
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'business';
+  a.href = url;
+  a.download = `${slug}-vat-${p.label.replace(/[^a-z0-9]+/gi, '-')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('VAT period downloaded');
+}
+
+/* ============================================================
    EXPENSES
    ============================================================ */
 
@@ -2590,19 +2775,22 @@ function renderExpensesView() {
 
   const cats = ['all', ...(state.settings.expenseCategories || [])];
 
-  const rows = exps.length ? exps.map((e) => `
+  const rows = exps.length ? exps.map((e) => {
+    const iv = inputVatOf(e);
+    return `
     <tr class="row-clickable" data-exp-id="${e.id}">
       <td>${fmtDate(e.date)}</td>
       <td>${escapeHtml(e.desc)}</td>
       <td>${escapeHtml(e.category || '—')}</td>
       <td class="amount">${fmtMoney(e.amount, e.currency)}</td>
-      <td>${e.vat ? '<span class="badge badge-paid" style="font-size:10px;">VAT</span>' : ''}</td>
+      <td class="amount">${iv > 0 ? fmtMoney(iv, e.currency) : '<span class="text-muted">—</span>'}</td>
       <td class="actions">
         <button class="btn btn-sm" data-exp-action="edit" data-id="${e.id}">Edit</button>
         <button class="btn btn-sm btn-ghost danger" data-exp-action="delete" data-id="${e.id}">Delete</button>
       </td>
     </tr>
-  `).join('') : '<tr><td colspan="6" class="empty">No expenses recorded.</td></tr>';
+  `;
+  }).join('') : '<tr><td colspan="6" class="empty">No expenses recorded.</td></tr>';
 
   return `
     <div class="page-head">
@@ -2623,7 +2811,7 @@ function renderExpensesView() {
     <div class="doc-list">
       <table>
         <thead>
-          <tr><th>Date</th><th>Description</th><th>Category</th><th class="amount">Amount</th><th>VAT</th><th></th></tr>
+          <tr><th>Date</th><th>Description</th><th>Category</th><th class="amount">Amount</th><th class="amount">Input VAT</th><th></th></tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
@@ -2685,11 +2873,12 @@ function openExpenseModal(expense) {
                 <option value="other" ${expense.paymentSource === 'other' ? 'selected' : ''}>Other</option>
               </select>
             </div>
-            <div class="field">
+            <div class="field full">
               <label class="checkbox">
                 <input type="checkbox" data-ef="vat" ${expense.vat ? 'checked' : ''} />
-                <span>Includes 15% VAT (claimable as input)</span>
+                <span>Includes VAT (claimable as input tax)</span>
               </label>
+              <div class="text-sm text-mid" id="exp-vat-calc" style="margin-top:6px;"></div>
             </div>
             <div class="field full">
               <label>Notes <span class="text-muted">(optional)</span></label>
@@ -2707,17 +2896,51 @@ function openExpenseModal(expense) {
     </div>
   `;
   showModal(html);
+  const efGet = (f) => document.querySelector(`[data-ef="${f}"]`);
+  // Live input-VAT readout; VAT only applies to base-currency expenses with a rate set
+  function updateVatCalc() {
+    const calcEl = document.getElementById('exp-vat-calc');
+    if (!calcEl) return;
+    const ccy = efGet('currency').value;
+    const amt = Number(efGet('amount').value) || 0;
+    const vatBox = efGet('vat');
+    const applicable = ccy === baseCcy() && vatRate() > 0;
+    vatBox.disabled = !applicable;
+    if (!applicable) {
+      if (vatBox.checked) vatBox.checked = false;
+      calcEl.textContent = vatRate() > 0
+        ? `VAT only applies to ${baseCcy()} expenses (foreign purchases aren't claimable).`
+        : `No VAT rate set for this business (Settings → Company).`;
+      return;
+    }
+    if (vatBox.checked) {
+      const v = calcInputVat(amt, ccy, vatRate());
+      calcEl.innerHTML = `Input VAT (at ${vatRate()}%): <strong>${fmtMoney(v, ccy)}</strong> — stored with this expense for your VAT return.`;
+    } else {
+      calcEl.textContent = `Tick if this ${vatRate()}% VAT-inclusive amount has claimable input tax.`;
+    }
+  }
+  ['amount', 'currency', 'vat'].forEach((f) => {
+    const el = efGet(f);
+    if (el) { el.addEventListener('input', updateVatCalc); el.addEventListener('change', updateVatCalc); }
+  });
+  updateVatCalc();
+
   document.getElementById('exp-save').addEventListener('click', async () => {
-    const get = (f) => document.querySelector(`[data-ef="${f}"]`);
+    const get = efGet;
+    const amount = Number(get('amount').value) || 0;
+    const currency = get('currency').value;
+    const vat = get('vat').checked && currency === baseCcy() && vatRate() > 0;
     const updated = {
       id: expense.id,
       date: get('date').value || todayISO(),
       desc: get('desc').value.trim(),
       category: get('category').value,
-      amount: Number(get('amount').value) || 0,
-      currency: get('currency').value,
+      amount,
+      currency,
       paymentSource: get('paymentSource').value,
-      vat: get('vat').checked,
+      vat,
+      vatAmount: vat ? Math.round(calcInputVat(amount, currency, vatRate()) * 100) / 100 : 0,
       notes: get('notes').value.trim(),
     };
     if (!updated.desc) { toast('Description is required'); return; }
@@ -3656,7 +3879,7 @@ function exportAccountantReport() {
   for (const e of state.expenses.filter((x) => x.date >= periodStart && x.date <= periodEnd).sort((a, b) => a.date.localeCompare(b.date))) {
     const zar = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
     if (zar != null) expZAR += zar;
-    const inputVAT = (e.vat && e.currency === baseCcy() && vatRate() > 0) ? (e.amount * vatRate()) / (100 + vatRate()) : 0;
+    const inputVAT = inputVatOf(e);
     expInputVAT += inputVAT;
     row(e.date, e.desc, e.category || '', e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), e.notes || '');
   }
@@ -5450,6 +5673,17 @@ function bindViewEvents() {
       render();
       toast('FX rates updated');
     });
+  }
+
+  if (currentRoute === 'vat') {
+    const getPeriods = () => vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
+    document.querySelectorAll('[data-vat-basis]').forEach((el) => el.addEventListener('click', () => { financesBasis = el.dataset.vatBasis; render(); }));
+    document.querySelectorAll('[data-vat-count]').forEach((el) => el.addEventListener('click', () => { vatPeriodCount = Number(el.dataset.vatCount); render(); }));
+    const openIdx = (i) => { const p = getPeriods()[i]; if (p) openVatPeriodModal(p); };
+    const exportIdx = (i) => { const p = getPeriods()[i]; if (p) exportVatPeriod(p); };
+    document.querySelectorAll('[data-vat-view]').forEach((el) => el.addEventListener('click', (e) => { e.stopPropagation(); openIdx(+el.dataset.vatView); }));
+    document.querySelectorAll('[data-vat-export]').forEach((el) => el.addEventListener('click', (e) => { e.stopPropagation(); exportIdx(+el.dataset.vatExport); }));
+    document.querySelectorAll('[data-vat-idx]').forEach((row) => row.addEventListener('click', (e) => { if (e.target.closest('button')) return; openIdx(+row.dataset.vatIdx); }));
   }
 
   if (currentRoute === 'finances') {
