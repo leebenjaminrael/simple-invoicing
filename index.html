@@ -1405,7 +1405,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.4.1.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.5.0.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1764,6 +1764,11 @@ function migrateState() {
     if (ent.vatPercent === undefined) ent.vatPercent = 15;
     if (ent.vatCycle === undefined) ent.vatCycle = 'bi-monthly';
     if (ent.taxYearStartMonth === undefined) ent.taxYearStartMonth = 3; // v6.3: configurable tax year (default March)
+    // v6.4: profit tracking — default a direct-cost (COGS) flag on existing expenses.
+    // Subcontractor spend is treated as a direct project cost; everything else as overhead.
+    for (const e of (ent.expenses || [])) {
+      if (e.directCost === undefined) e.directCost = (e.category === 'Subcontractor');
+    }
   }
   state.version = 6;
 }
@@ -1815,6 +1820,41 @@ function recognitionDate(doc, basis) {
   // accrual: any non-draft invoice counts on its invoice date
   if (doc.status === 'draft') return null;
   return doc.date;
+}
+
+const DRAWINGS_CATEGORY = 'Drawings / Salary';
+
+// Profit & Loss for a date range, all ex-VAT and in base currency.
+// Revenue = invoice subtotals (ex output VAT). Expenses = amount minus reclaimable
+// input VAT. Owner drawings are split out (distribution of profit, not a cost).
+// Direct costs (COGS) are expenses flagged directCost; everything else is overhead.
+function profitForPeriod(pStart, pEnd, basis) {
+  let revenue = 0, directCost = 0, overhead = 0, drawings = 0;
+  let missingFx = false;
+  for (const d of state.documents) {
+    if (d.type !== 'invoice') continue;
+    const rd = recognitionDate(d, basis);
+    if (!rd || rd < pStart || rd > pEnd) continue;
+    const sub = toBase(calcTotals(d).subtotal, d.currency);   // ex-VAT
+    if (sub == null) { missingFx = true; continue; }
+    revenue += sub;
+  }
+  for (const e of state.expenses) {
+    if (!e.date || e.date < pStart || e.date > pEnd) continue;
+    const gross = toBase(e.amount, e.currency);
+    if (gross == null) { missingFx = true; continue; }
+    const net = gross - inputVatOf(e);                          // ex input VAT
+    if (e.category === DRAWINGS_CATEGORY) { drawings += net; continue; }
+    if (e.directCost) directCost += net; else overhead += net;
+  }
+  const grossProfit = revenue - directCost;
+  const netProfit = grossProfit - overhead;
+  return {
+    revenue, directCost, overhead, grossProfit, netProfit, drawings, missingFx,
+    expenses: directCost + overhead,
+    grossMargin: revenue > 0 ? grossProfit / revenue : 0,
+    netMargin: revenue > 0 ? netProfit / revenue : 0,
+  };
 }
 
 // Sums revenue by month, ZAR-equivalent, given basis. Returns { 'YYYY-MM': amount, total, missingFx: bool }
@@ -2179,6 +2219,17 @@ function renderDashboard() {
     : 'No FX rates yet — refresh';
 
   const compName = escapeHtml((state.settings.company && state.settings.company.name) || (activeEntity() && activeEntity().name) || '');
+
+  // Profit YTD (current tax year, ex-VAT, drawings excluded). Net = after overheads.
+  const tyDash = taxYearFor(today);
+  const pf = profitForPeriod(tyDash.start, today, financesBasis);
+  const profitColor = pf.netProfit >= 0 ? 'var(--accent-bright)' : '#ff8a7a';
+  const profitSub = pf.missingFx
+    ? 'Partial — FX rates missing for some currencies'
+    : (pf.revenue > 0
+        ? `Net margin ${Math.round(pf.netMargin * 100)}% · ex-VAT`
+        : 'No income recorded yet this year');
+
   return `
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
       <div>
@@ -2201,6 +2252,20 @@ function renderDashboard() {
           <div class="value-wrap">
             <div class="value">${fmtMoney(thisMonthZAR, baseCcy())}</div>
             <div class="sub">${thisMonthMissingFx ? 'Partial — FX rates missing for some currencies' : (thisMonthZAR > 0 ? 'Cash basis · ' + baseCcy() + ' equivalent' : 'No income recorded yet this month')}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Profit YTD — DARK with lime number -->
+      <div class="card-v2 is-dark b-cell">
+        <div class="stat-v2 is-dark">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div class="label">Profit YTD</div>
+            <span class="chip chip-on-dark">${tyDash.label}</span>
+          </div>
+          <div class="value-wrap">
+            <div class="value" style="color:${profitColor};">${fmtMoney(pf.netProfit, baseCcy())}</div>
+            <div class="sub">${profitSub}</div>
           </div>
         </div>
       </div>
@@ -2312,6 +2377,82 @@ function renderDocTableInline(docs) {
 let financesBasis = 'cash';   // 'cash' | 'accrual'
 let convWindow = 12;          // 3 | 6 | 12 | 'all'
 
+// Compact net-profit-by-month chart for a light card. Handles negative months.
+function profitTrendSvg(labels, values, opts = {}) {
+  const W = opts.width || 420, H = opts.height || 180;
+  const PAD_L = 8, PAD_R = 8, PAD_T = 14, PAD_B = 22;
+  const innerW = W - PAD_L - PAD_R, innerH = H - PAD_T - PAD_B;
+  const maxAbs = Math.max(1, ...values.map((v) => Math.abs(v)));
+  const slotW = innerW / values.length;
+  const barW = slotW * 0.62;
+  const zeroY = PAD_T + (innerH * maxAbs) / (maxAbs + maxAbs); // mid when symmetric
+  const scale = (v) => (v / maxAbs) * (innerH / 2);
+  const baseY = PAD_T + innerH / 2;
+  const bars = values.map((v, i) => {
+    const x = PAD_L + slotW * i + (slotW - barW) / 2;
+    const h = Math.abs(scale(v));
+    const y = v >= 0 ? baseY - h : baseY;
+    const fill = v >= 0 ? '#4a7c2f' : '#c0392b';
+    return `<g>
+      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0.5)}" fill="${fill}" rx="2"><title>${labels[i]}: ${fmtMoney(v, baseCcy())}</title></rect>
+      <text x="${x + barW / 2}" y="${H - 6}" font-size="9" fill="rgba(0,0,0,0.5)" text-anchor="middle" font-family="DM Sans, sans-serif">${labels[i]}</text>
+    </g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" width="100%" height="${H}" style="display:block;">
+    <line x1="${PAD_L}" y1="${baseY}" x2="${PAD_L + innerW}" y2="${baseY}" stroke="rgba(0,0,0,0.20)" stroke-width="1" />
+    ${bars}
+  </svg>`;
+}
+
+// Profit & Loss statement block for the Finances tab.
+function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
+  const ccy = baseCcy();
+  const pct = (n) => `${Math.round(n * 100)}%`;
+  const netColor = pl.netProfit >= 0 ? 'var(--accent-bright)' : '#c0392b';
+  const hasData = pl.revenue !== 0 || pl.expenses !== 0;
+  if (!hasData) {
+    return `
+    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;">
+      <div class="section-head" style="margin-top:0;"><h2>Profit &amp; Loss · ${ty.label}</h2></div>
+      <div class="empty" style="padding:18px 0;">No income or expenses recorded yet this tax year.</div>
+    </div>`;
+  }
+  const line = (label, val, opts = {}) => {
+    const { bold, color, indent, border, note } = opts;
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;${border ? 'border-top:1px solid rgba(0,0,0,0.12);margin-top:4px;padding-top:11px;' : ''}">
+      <span style="${indent ? 'padding-left:16px;color:var(--text-mid);' : ''}${bold ? 'font-weight:650;' : ''}">${label}${note ? ` <span class="text-sm text-muted">${note}</span>` : ''}</span>
+      <span class="amount" style="${bold ? 'font-weight:700;font-size:17px;' : ''}${color ? `color:${color};` : ''}">${fmtMoney(val, ccy)}</span>
+    </div>`;
+  };
+  return `
+    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;">
+      <div class="section-head" style="margin-top:0;">
+        <h2>Profit &amp; Loss · ${ty.label}</h2>
+        <span class="text-sm" style="color:var(--text-mid);">Year to date · ${financesBasis} basis · ex-VAT</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:32px;align-items:start;">
+        <div>
+          ${line('Revenue', pl.revenue, { bold: true })}
+          ${line('Direct project costs (COGS)', -pl.directCost, { indent: true })}
+          ${line('Gross profit', pl.grossProfit, { bold: true, border: true, note: pl.revenue > 0 ? `· ${pct(pl.grossMargin)} margin` : '' })}
+          ${line('Overheads', -pl.overhead, { indent: true })}
+          ${line('Net profit', pl.netProfit, { bold: true, border: true, color: netColor, note: pl.revenue > 0 ? `· ${pct(pl.netMargin)} margin` : '' })}
+          ${pl.drawings ? `<div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(0,0,0,0.18);">
+            ${line('Owner drawings / salary', pl.drawings, { note: '· distribution of profit, not a business cost' })}
+          </div>` : ''}
+          ${pl.missingFx ? `<div class="text-sm text-mid" style="margin-top:10px;">Partial — FX rates missing for some currencies.</div>` : ''}
+        </div>
+        <div>
+          <div class="text-sm" style="color:var(--text-mid);margin-bottom:8px;">Net profit by month</div>
+          <div style="overflow-x:auto;">
+            ${profitTrendSvg(monthLabels, profitMonthValues, { width: 420, height: 180 })}
+          </div>
+          <div class="text-sm text-muted" style="margin-top:6px;">Green = profit · red = loss</div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderFinances() {
   const ty = taxYearFor(todayISO());
   const today = todayISO();
@@ -2360,6 +2501,16 @@ function renderFinances() {
 
   // VAT periods
   const vatList = vatPeriods(6).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
+
+  // Profit & Loss (year to date, ex-VAT, drawings shown separately)
+  const pl = profitForPeriod(ty.start, today, financesBasis);
+  // Monthly net-profit trend across the tax year (months after today are 0)
+  const profitMonthValues = ty.months.map((ym) => {
+    if (ym > thisMonthYM) return 0;
+    const mStart = ym + '-01';
+    const mEnd = ym + '-31';
+    return profitForPeriod(mStart, mEnd, financesBasis).netProfit;
+  });
 
   const ytdProgressPct = annualGoal > 0 ? Math.min(100, (ytd / annualGoal) * 100) : null;
 
@@ -2427,8 +2578,10 @@ function renderFinances() {
       <div style="overflow-x:auto;">
         ${svgBarChart(monthLabels, monthValues, { width: 760, height: 260, goalSeries: annualGoal > 0 ? monthlyGoals : null })}
       </div>
-      ${expYear.total > 0 ? `<div class="text-sm" style="color:var(--text-mid);margin-top:10px;">Expenses YTD: ${fmtMoney(expYear.total, baseCcy())} · Net: <span style="color:var(--accent-bright);">${fmtMoney(ytd - expYear.total, baseCcy())}</span></div>` : ''}
     </div>
+
+    <!-- Profit & Loss — cream card -->
+    ${renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty)}
 
     <!-- Pipeline — bento of 3 -->
     <div class="section-head"><h2>Pipeline</h2><span class="text-sm" style="color:var(--text-mid);">Conversion window: ${cr.windowLabel}</span></div>
@@ -2829,6 +2982,7 @@ function openExpenseModal(expense) {
     amount: 0,
     currency: baseCcy(),
     vat: false,
+    directCost: false,
     paymentSource: 'sa',
     notes: '',
   };
@@ -2879,6 +3033,13 @@ function openExpenseModal(expense) {
                 <span>Includes VAT (claimable as input tax)</span>
               </label>
               <div class="text-sm text-mid" id="exp-vat-calc" style="margin-top:6px;"></div>
+            </div>
+            <div class="field full">
+              <label class="checkbox">
+                <input type="checkbox" data-ef="directCost" ${expense.directCost ? 'checked' : ''} />
+                <span>Direct project cost (counts toward gross profit / COGS)</span>
+              </label>
+              <div class="text-sm text-muted" style="margin-top:4px;">Tick for costs tied to delivering work (subcontractors, materials). Leave off for overheads like software or rent.</div>
             </div>
             <div class="field full">
               <label>Notes <span class="text-muted">(optional)</span></label>
@@ -2941,6 +3102,7 @@ function openExpenseModal(expense) {
       paymentSource: get('paymentSource').value,
       vat,
       vatAmount: vat ? Math.round(calcInputVat(amount, currency, vatRate()) * 100) / 100 : 0,
+      directCost: get('directCost').checked,
       notes: get('notes').value.trim(),
     };
     if (!updated.desc) { toast('Description is required'); return; }
@@ -3874,16 +4036,18 @@ function exportAccountantReport() {
 
   // EXPENSES
   row(`EXPENSES`);
-  row('Date', 'Description', 'Category', 'Currency', 'Amount', baseCcy() + ' equiv', 'VAT (input)', 'Notes');
+  row('Date', 'Description', 'Category', 'Type', 'Currency', 'Amount', baseCcy() + ' equiv', 'VAT (input)', baseCcy() + ' ex-VAT', 'Notes');
   let expZAR = 0, expInputVAT = 0;
   for (const e of state.expenses.filter((x) => x.date >= periodStart && x.date <= periodEnd).sort((a, b) => a.date.localeCompare(b.date))) {
     const zar = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
     if (zar != null) expZAR += zar;
     const inputVAT = inputVatOf(e);
     expInputVAT += inputVAT;
-    row(e.date, e.desc, e.category || '', e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), e.notes || '');
+    const exVat = zar == null ? null : zar - inputVAT;
+    const type = e.category === DRAWINGS_CATEGORY ? 'Drawings' : (e.directCost ? 'Direct cost' : 'Overhead');
+    row(e.date, e.desc, e.category || '', type, e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), exVat == null ? '' : exVat.toFixed(2), e.notes || '');
   }
-  row('', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', expZAR.toFixed(2));
+  row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', expZAR.toFixed(2));
   row();
 
   // VAT SUMMARY
@@ -3907,11 +4071,19 @@ function exportAccountantReport() {
   }
   row();
 
-  // P&L SUMMARY
-  row(`P&L SUMMARY (cash basis, ${baseCcy()} equivalent)`);
-  row('Income', incZAR.toFixed(2));
-  row('Expenses', expZAR.toFixed(2));
-  row('Net', (incZAR - expZAR).toFixed(2));
+  // P&L SUMMARY (ex-VAT, gross + net, drawings shown separately)
+  const pl = profitForPeriod(periodStart, periodEnd, 'cash');
+  const pctStr = (n) => `${Math.round(n * 100)}%`;
+  row(`PROFIT & LOSS (cash basis, ex-VAT, ${baseCcy()} equivalent)`);
+  row('Revenue (ex output VAT)', pl.revenue.toFixed(2));
+  row('Less: direct project costs (COGS)', (-pl.directCost).toFixed(2));
+  row('Gross profit', pl.grossProfit.toFixed(2), pl.revenue > 0 ? pctStr(pl.grossMargin) + ' margin' : '');
+  row('Less: overheads', (-pl.overhead).toFixed(2));
+  row('Net profit', pl.netProfit.toFixed(2), pl.revenue > 0 ? pctStr(pl.netMargin) + ' margin' : '');
+  row();
+  row('Owner drawings / salary (distribution of profit, not a cost)', pl.drawings.toFixed(2));
+  row();
+  row('Memo — VAT (not part of profit)');
   row('Output VAT (period invoices)', incVAT.toFixed(2));
   row('Input VAT (period expenses)', expInputVAT.toFixed(2));
 

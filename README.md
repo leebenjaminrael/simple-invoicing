@@ -45,8 +45,8 @@ Running more than one business? **Settings → Businesses → + Add business.** 
 
 ## What it does
 
-- **Dashboard** — this month's income, outstanding, and recent activity at a glance.
-- **Finances** — monthly revenue chart with goals, pipeline, ageing, top clients, VAT summary, and an accountant report export. Cash or accrual basis.
+- **Dashboard** — this month's income, **profit year-to-date**, outstanding, and recent activity at a glance.
+- **Finances** — monthly revenue chart with goals, a **Profit & Loss statement** (gross and net profit, ex-VAT, with a net-profit-by-month trend), pipeline, ageing, top clients, VAT summary, and an accountant report export. Cash or accrual basis.
 - **Documents** — invoices and quotes: create, send, mark paid, convert quote → invoice, export PDF, compose email.
 - **Clients** — your client list with outstanding balances.
 - **Expenses** — categorised, multi-currency expense tracking.
@@ -82,4 +82,5 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 ## Good to know
 
 - **Currency, VAT rate, VAT cycle and tax-year start are all configurable per business** (Settings → Company) — so the app works for most countries out of the box. The defaults are South African (ZAR, 15%, bi-monthly, March year-start); change them per business as needed.
+- **How profit is calculated.** Profit is shown **ex-VAT** (revenue without output VAT, expenses without reclaimable input VAT) — the view your accountant uses. **Gross profit** = revenue minus direct project costs; **net profit** = after overheads. Tick **"Direct project cost"** on an expense (subcontractors, materials) to count it toward gross profit; leave it off for overheads like software or rent. **Owner drawings / salary** are treated as a distribution of profit and shown separately, not subtracted from profit.
 - **Forgot your password?** There's no recovery — the lock screen has a "reset vault" option that wipes the data so you can start over. Keep backups.
