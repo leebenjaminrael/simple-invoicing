@@ -1405,7 +1405,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.5.0.1';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.6.3.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3160,14 +3160,14 @@ function renderReconcile() {
           <button class="btn" id="rec-export-report">Export accountant report</button>
         </div>
       </div>
-      <div class="title-hero-sub">Upload bank or Wise CSVs, auto-match to invoices, create expenses for review.</div>
+      <div class="title-hero-sub">Upload a bank statement, auto-match to invoices, create expenses for review.</div>
 
       <div class="card-v2 is-lime" id="rec-drop" style="padding:48px 40px;text-align:center;cursor:pointer;border:2px dashed rgba(15,14,13,0.18);">
-        <div style="font-family:'DM Serif Display',serif;font-size:28px;margin-bottom:10px;color:#0F0E0D;">Drop a Wise or FNB CSV here</div>
-        <div class="text-sm" style="margin-bottom:18px;color:rgba(15,14,13,0.62);">Or click to choose.<br>Wise: Activity → Download statement → CSV (per-currency or multi-currency).<br>FNB: Online banking → Account → Statement → Download as CSV.</div>
-        <button class="btn" id="rec-pick" style="background:#0F0E0D;color:var(--c-lime);border-color:#0F0E0D;">Choose CSV file</button>
-        <input type="file" id="rec-file" accept=".csv" style="display:none;" />
-        <div class="text-sm" style="margin-top:20px;color:rgba(15,14,13,0.55);">PDFs are not supported — use the CSV export from your bank.</div>
+        <div style="font-family:'DM Serif Display',serif;font-size:28px;margin-bottom:10px;color:#0F0E0D;">Drop a bank statement here</div>
+        <div class="text-sm" style="margin-bottom:18px;color:rgba(15,14,13,0.62);">CSV or PDF · or click to choose.<br>Download a statement from your online banking — most banks offer CSV or PDF.<br>Unknown layout? You'll map the columns once and it's remembered for next time.</div>
+        <button class="btn" id="rec-pick" style="background:#0F0E0D;color:var(--c-lime);border-color:#0F0E0D;">Choose file</button>
+        <input type="file" id="rec-file" accept=".csv,.pdf" style="display:none;" />
+        <div class="text-sm" style="margin-top:20px;color:rgba(15,14,13,0.55);">CSV is the most reliable. PDF works for digital (text) statements — scanned or photographed statements aren't supported.</div>
       </div>
 
       <div class="section-head" style="margin-top:32px;"><h2>Imported statements</h2></div>
@@ -3425,6 +3425,14 @@ function headerFingerprint(headerRow) {
 function parseStatementCsv(text, fileName) {
   const rawRows = parseCSV(text);
   if (rawRows.length < 2) throw new Error('CSV looks empty');
+  return parseStatementRows(rawRows, fileName);
+}
+
+// Format detection + parsing for an already-tabular set of rows (array of cell
+// arrays). Shared by CSV and PDF ingestion — anything that can produce rows can
+// reuse the built-in format detection, saved bank profiles, and column mapper.
+function parseStatementRows(rawRows, fileName) {
+  if (!rawRows || rawRows.length < 2) throw new Error('Statement looks empty');
   const rows = alignRows(rawRows);
   const header = rows[0] || [];
   const norm = header.map((h) => (h || '').trim().toLowerCase());
@@ -3449,6 +3457,415 @@ function parseStatementCsv(text, fileName) {
   err.rows = rows;
   err.fileName = fileName;
   throw err;
+}
+
+/* ----- PDF statement ingestion -----------------------------------------
+   Turns a digital (text-layer) bank-statement PDF into the same row/cell
+   structure CSVs produce, so the existing format detection, saved bank
+   profiles, column mapper and matcher all work unchanged.
+
+   Strategy (positional): read pdf.js text items with their x/y/width, group
+   into visual lines by Y, then detect column boundaries from the vertical
+   whitespace gaps that run down the whole statement body. Each item is binned
+   into the column its x falls in → clean cells. Falls back to splitting on
+   wide gaps per line if column detection is inconclusive. Scanned/image PDFs
+   (no text layer) throw a friendly NO_TEXT error. ------------------------- */
+
+function ensurePdfWorker() {
+  if (!window.pdfjsLib) throw new Error('PDF library failed to load. Please reload the app.');
+  if (window.__pdfWorkerUrl) window.pdfjsLib.GlobalWorkerOptions.workerSrc = window.__pdfWorkerUrl;
+}
+
+// Extract positioned visual lines from a PDF. Returns [{ y, page, items:[{x,width,str}] }]
+async function pdfStatementLines(file) {
+  ensurePdfWorker();
+  const buf = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: buf, isEvalSupported: false }).promise;
+  const lines = [];
+  let sawText = false;
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const lineMap = new Map();
+    for (const item of content.items) {
+      if (!item.str || !item.str.trim()) continue;
+      sawText = true;
+      const y = Math.round(item.transform[5] / 2) * 2; // bucket Y to nearest 2px
+      const arr = lineMap.get(y) || [];
+      arr.push({ x: item.transform[4], width: item.width || 0, str: item.str });
+      lineMap.set(y, arr);
+    }
+    const ys = [...lineMap.keys()].sort((a, b) => b - a); // top → bottom
+    for (const y of ys) {
+      const items = lineMap.get(y).sort((a, b) => a.x - b.x);
+      lines.push({ y, page: p, items });
+    }
+  }
+  if (!sawText) { const e = new Error('NO_TEXT'); e.noText = true; throw e; }
+  return lines;
+}
+
+// Month names for date detection in statements.
+const MONTH_ABBR = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+
+// Find the table header line (the one carrying column titles like Date /
+// Description / Amount / Balance). Returns index or -1. Not capped to the first
+// N rows — real statements can have a long preamble.
+function findTableHeaderLine(lines) {
+  const terms = /^(date|description|amount|balance|debit|credit|money in|money out|withdrawal|deposit|reference|details|narrative|value date|transaction|fee|charges|payment)$/i;
+  let best = -1, bestHits = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const hits = lines[i].items.filter((it) => terms.test((it.str || '').trim())).length;
+    if (hits >= 3 && hits > bestHits) { bestHits = hits; best = i; }
+  }
+  return best;
+}
+
+// Detect column x-boundaries shared across the statement, then bin items into cells.
+function pdfLinesToRows(lines) {
+  // Restrict column detection to the transaction region — the dense preamble
+  // (address, contact block, summary tables) otherwise pollutes the whitespace
+  // gaps and collapses everything into one column.
+  const hdr = findTableHeaderLine(lines);
+  const region = hdr >= 0 ? lines.slice(hdr) : lines;
+  // Only consider "wide" lines (>=3 items) for boundary detection — these are the
+  // transaction/table rows, not titles or single-value summary lines.
+  const tableLines = region.filter((l) => l.items.length >= 3);
+  const sample = tableLines.length >= 3 ? tableLines : region;
+  lines = region;
+  let maxX = 0;
+  for (const l of sample) for (const it of l.items) maxX = Math.max(maxX, it.x + it.width);
+  const W = Math.ceil(maxX) + 2;
+  if (W < 10) return lines.map((l) => l.items.map((i) => i.str)); // degenerate
+
+  // Occupancy histogram: how many sample lines cover each x bucket.
+  const BUCKET = 2;
+  const cols = Math.ceil(W / BUCKET);
+  const occ = new Array(cols).fill(0);
+  for (const l of sample) {
+    for (const it of l.items) {
+      const a = Math.floor(it.x / BUCKET);
+      const b = Math.floor((it.x + Math.max(it.width, 1)) / BUCKET);
+      for (let i = a; i <= b && i < cols; i++) occ[i]++;
+    }
+  }
+  // A column gap = a run of empty buckets at least MIN_GAP px wide.
+  const MIN_GAP = 6; // px of clear vertical whitespace to count as a column break
+  const minGapBuckets = Math.ceil(MIN_GAP / BUCKET);
+  const boundaries = []; // x positions where a new column starts
+  let runStart = -1;
+  for (let i = 0; i < cols; i++) {
+    if (occ[i] === 0) { if (runStart < 0) runStart = i; }
+    else {
+      if (runStart >= 0 && (i - runStart) >= minGapBuckets) boundaries.push(i * BUCKET);
+      runStart = -1;
+    }
+  }
+  // boundaries are column-start x's (excluding the first column at x=0)
+  const starts = [0, ...boundaries];
+  if (starts.length < 2) {
+    // Couldn't find columns — fall back to splitting each line on wide gaps.
+    return lines.map((l) => splitLineByGaps(l.items));
+  }
+  const colOf = (x) => {
+    let c = 0;
+    for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 1) c = i;
+    return c;
+  };
+  const rows = lines.map((l) => {
+    const cells = new Array(starts.length).fill('');
+    for (const it of l.items) {
+      const c = colOf(it.x);
+      cells[c] = cells[c] ? cells[c] + ' ' + it.str : it.str;
+    }
+    return cells.map((c) => c.replace(/\s+/g, ' ').trim());
+  });
+  return dropEmptyColumns(mergeWrappedRows(rows));
+}
+
+// Remove columns that are empty in every row (e.g. the x=0 boundary artifact),
+// keeping all rows aligned to the same set of real columns.
+function dropEmptyColumns(rows) {
+  const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const keep = [];
+  for (let c = 0; c < width; c++) {
+    if (rows.some((r) => (r[c] || '').trim() !== '')) keep.push(c);
+  }
+  if (keep.length === width) return rows;
+  return rows.map((r) => keep.map((c) => r[c] || ''));
+}
+
+// Per-line fallback: split items into cells wherever the horizontal gap between
+// consecutive items is large (≈ 3+ space widths).
+function splitLineByGaps(items) {
+  const cells = [];
+  let cur = '';
+  let prev = null;
+  for (const it of items) {
+    if (prev) {
+      const gap = it.x - (prev.x + prev.width);
+      const charW = (prev.width / Math.max(1, prev.str.length)) || 4;
+      if (gap > charW * 2.5) { cells.push(cur.trim()); cur = ''; }
+      else cur += ' ';
+    }
+    cur += it.str;
+    prev = it;
+  }
+  if (cur.trim()) cells.push(cur.trim());
+  return cells;
+}
+
+// Merge obvious wrapped-description rows: a row with a single populated cell is
+// almost always a continuation of the row above — append it to that cell.
+function mergeWrappedRows(rows) {
+  const out = [];
+  for (const row of rows) {
+    const filledIdx = row.map((c, i) => (c ? i : -1)).filter((i) => i >= 0);
+    if (filledIdx.length === 1 && out.length) {
+      const prev = out[out.length - 1];
+      const i = filledIdx[0];
+      if (prev[i] !== undefined) { prev[i] = (prev[i] + ' ' + row[i]).trim(); continue; }
+    }
+    out.push(row.slice());
+  }
+  return out;
+}
+
+async function pdfToStatementRows(file) {
+  const lines = await pdfStatementLines(file);
+  return pdfLinesToRows(lines);
+}
+
+/* ----- Smart PDF statement parser --------------------------------------
+   Many bank-statement PDFs share a structure that geometry alone handles
+   badly but semantics handle well: a transaction line begins with a date,
+   the two right-most decimal numbers are the amount and the running balance,
+   and the text between is the description. Direction (money in vs out) is
+   read from the running-balance delta — bank-agnostic — with Cr/Dr suffixes
+   as confirmation. This covers FNB and most SA banks (Standard Bank, Absa,
+   Nedbank, Capitec) that use the Cr/Dr convention. Anything it can't parse
+   confidently falls back to the column mapper. --------------------------- */
+
+const CUR_SYMBOL = { 'R': 'ZAR', '$': 'USD', '€': 'EUR', '£': 'GBP' };
+
+// Parse a money value from a string. Handles optional sign (leading - or
+// parentheses, trailing Cr/Dr), an optional currency symbol/code prefix (R, $,
+// €, £, ZAR…), and thousands separators that are commas OR spaces (e.g.
+// "R2 023.48", "-1,234.56", "(89.00)", "55.20 Dr"). Requires 2 decimal places
+// so it never matches card numbers, references or dates. Returns { val (>=0),
+// neg, cur } or null.
+function parseMoney(s) {
+  if (s == null) return null;
+  s = String(s).trim();
+  const numM = s.match(/\d[\d ,]*\.\d{2}(?!\d)/);
+  if (!numM) return null;
+  const val = parseFloat(numM[0].replace(/[ ,]/g, ''));
+  if (!isFinite(val)) return null;
+  const before = s.slice(0, numM.index);
+  const neg = /[-(]\s*[R$€£]?\s*$/.test(before) || /^\s*[-(]/.test(s) || /\b(dr|debit)\b/i.test(s);
+  const curM = s.match(/([R$€£])|\b(ZAR|USD|EUR|GBP|AUD|KES|NGN)\b/i);
+  const cur = curM ? (curM[1] ? CUR_SYMBOL[curM[1]] : curM[2].toUpperCase()) : '';
+  return { val, neg, cur };
+}
+
+// Pull the statement's calendar year(s) so day-month dates ("28 Feb") resolve.
+function detectStatementYears(lines) {
+  const text = lines.map((l) => l.items.map((i) => i.str).join(' ')).join('\n');
+  const period = text.match(/statement period\s*:?\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})\D+(\d{1,2}\s+[A-Za-z]+\s+\d{4})/i);
+  if (period) {
+    const a = parseDateFlexible(period[1]), b = parseDateFlexible(period[2]);
+    if (a && b) return { startISO: a, endISO: b };
+  }
+  const any = text.match(/(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})/);
+  if (any) { const iso = parseDateFlexible(any[1]); if (iso) return { startISO: iso, endISO: iso }; }
+  const yr = (text.match(/\b(20\d{2})\b/) || [])[1];
+  const guess = yr ? `${yr}-01-01` : todayISO();
+  return { startISO: guess, endISO: guess };
+}
+
+// Resolve a day + month-number to a full year given the statement span.
+function yearForMonth(monthNum, span) {
+  const sY = +span.startISO.slice(0, 4), sM = +span.startISO.slice(5, 7);
+  const eY = +span.endISO.slice(0, 4);
+  if (sY === eY) return sY;
+  return monthNum >= sM ? sY : eY; // statement crossing a year boundary
+}
+
+// Read a leading date from a line's first item. Returns { iso } or null.
+// Handles full dates ("30 Apr 2026", "2026-03-28", "28/03/2026") and
+// day-month-only dates ("28 Feb") whose year comes from the statement span.
+function leadingDateOf(firstStr, span) {
+  const s = (firstStr || '').trim();
+  if (/\b\d{4}\b/.test(s) && /^\d{1,2}[\s/-]/.test(s)) {            // dd Mon yyyy / dd/mm/yyyy
+    const iso = parseDateFlexible(s); if (iso) return { iso };
+  }
+  if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(s)) {                  // ISO
+    const iso = parseDateFlexible(s); if (iso) return { iso };
+  }
+  const mY = s.match(/^(\d{1,2})\s*([A-Za-z]{3})[a-z]*\.?\s*['’]?(\d{2})$/); // dd MonYY (Lloyds "04 Sep19", "08Oct19")
+  if (mY) {
+    const mk = mY[2].toLowerCase();
+    if (MONTH_ABBR[mk]) { const iso = parseDateFlexible(`${mY[1]} ${mY[2]} 20${mY[3]}`); if (iso) return { iso }; }
+  }
+  const m = s.match(/^(\d{1,2})\s+([A-Za-z]{3,})$/);               // dd Mon (no year)
+  if (m) {
+    const mk = m[2].slice(0, 3).toLowerCase();
+    if (MONTH_ABBR[mk]) {
+      const iso = parseDateFlexible(`${m[1]} ${m[2]} ${yearForMonth(MONTH_ABBR[mk], span)}`);
+      if (iso) return { iso };
+    }
+  }
+  if (/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(s)) {                // dd-mm-yy
+    const iso = parseDateFlexible(s); if (iso) return { iso };
+  }
+  return null;
+}
+
+function parsePdfStatementTable(lines, fileName) {
+  const span = detectStatementYears(lines);
+  const allText = lines.map((l) => l.items.map((i) => i.str).join(' ')).join('\n');
+
+  const crdrAfter = (items, k) => { const n = items[k + 1]; return n && /^(cr|dr)$/i.test(n.str.trim()) ? n.str.trim().toUpperCase() : ''; };
+
+  // Different banks name the starting balance differently.
+  const OPENING_RE = /opening balance|previous balance|balance brought forward|brought forward|balance b\/?f|opening bal\b/i;
+
+  // Opening balance seeds the running-balance reconstruction (balance mode).
+  // Take the FIRST money value on the line — statements often pack other figures
+  // (service fees etc.) onto the same opening-balance row.
+  let openingBal = null;
+  for (const l of lines) {
+    const t = l.items.map((i) => i.str).join(' ');
+    if (!OPENING_RE.test(t)) continue;
+    for (let k = 0; k < l.items.length; k++) {
+      const p = parseMoney(l.items[k].str);
+      if (p) { const neg = p.neg || crdrAfter(l.items, k) === 'DR'; openingBal = neg ? -p.val : p.val; break; }
+    }
+    if (openingBal !== null) break;
+  }
+
+  const hdr = findTableHeaderLine(lines);
+  const start = hdr >= 0 ? hdr + 1 : 0;
+  const curCount = {};
+
+  // Pass 1: collect dated rows with their money items and description text.
+  const raw = [];
+  for (let i = start; i < lines.length; i++) {
+    const items = lines[i].items;
+    const lineStr = items.map((it) => it.str).join(' ').replace(/\s+/g, ' ').trim();
+    if (!lineStr) continue;
+    if (/^page \d+ of \d+/i.test(lineStr)) continue;
+    if (/closing balance|turnover for statement|statement total|vat analysis/i.test(lineStr)) break;
+    // Opening/brought-forward and totals rows are not transactions.
+    if (OPENING_RE.test(lineStr) || /^\**\s*totals?\b|^\s*total\b/i.test(lineStr)) continue;
+    const d = leadingDateOf(items[0] && items[0].str, span);
+    if (!d) {
+      // Wrapped continuation of the previous row's description.
+      if (raw.length && !items.some((it) => parseMoney(it.str)) && !/^(closing|opening|balance|total|vat|statement|date)/i.test(lineStr)) {
+        const prev = raw[raw.length - 1]; prev.desc = (prev.desc + ' ' + lineStr).trim();
+      }
+      continue;
+    }
+    const monies = [];
+    for (let k = 1; k < items.length; k++) {
+      const p = parseMoney(items[k].str);
+      if (p) { monies.push({ k, ...p }); if (p.cur) curCount[p.cur] = (curCount[p.cur] || 0) + 1; }
+    }
+    if (!monies.length) continue;
+    const desc = items.slice(1, monies[0].k).map((it) => it.str).join(' ')
+      .replace(/^\d{1,2}[-/.][A-Za-z0-9]{2,4}[-/.]\d{2,4}\s+/, '')  // strip a leading "value date" column
+      .replace(/^\d{4}-\d{2}-\d{2}\s+/, '')
+      .replace(/\*{2,}\d+/g, '').replace(/\s+/g, ' ').trim();
+    raw.push({ iso: d.iso, items, monies, desc });
+  }
+
+  // Decide the layout: a running-balance column (two money values per row, the
+  // last being a balance) vs. a single signed amount column.
+  const sortedCounts = raw.map((r) => r.monies.length).sort((a, b) => a - b);
+  const median = sortedCounts.length ? sortedCounts[Math.floor(sortedCounts.length / 2)] : 0;
+  const balanceMode = median >= 2;
+
+  let prevBal = openingBal;
+  let reconciled = 0;
+  const txns = [];
+  for (const r of raw) {
+    let amtVal, balMag = null, sign = null;
+    if (balanceMode && r.monies.length >= 2) {
+      const amt = r.monies[r.monies.length - 2], bal = r.monies[r.monies.length - 1];
+      amtVal = amt.val; balMag = bal.val;
+      const sfx = crdrAfter(r.items, bal.k);
+      if (prevBal !== null) {
+        const up = prevBal + amtVal, down = prevBal - amtVal;
+        const upOk = Math.abs(Math.abs(up) - balMag) < 0.05;
+        const downOk = Math.abs(Math.abs(down) - balMag) < 0.05;
+        if (upOk && !downOk) { sign = 1; prevBal = up; reconciled++; }
+        else if (downOk && !upOk) { sign = -1; prevBal = down; reconciled++; }
+      }
+      if (sign === null) {
+        sign = amt.neg ? -1 : sfx === 'CR' ? 1 : sfx === 'DR' ? -1 : -1;
+        prevBal = (prevBal !== null) ? prevBal + sign * amtVal : (sfx === 'DR' ? -balMag : balMag);
+      }
+    } else {
+      // Single amount column — trust the explicit sign (leading −, or Cr/Dr).
+      const amt = r.monies[r.monies.length - 1];
+      amtVal = amt.val;
+      sign = amt.neg ? -1 : 1;
+    }
+
+    const amount = Math.abs(amtVal) * sign;
+    if (!amount) continue;
+    const kind = classifyFnbTx(r.desc, amount);
+    const sig = `${r.iso}_${amount.toFixed(2)}_${balMag === null ? '' : balMag.toFixed(2)}`;
+    const tx = { id: `pdf-${sig.replace(/[^a-z0-9]/gi, '')}`, date: r.iso, amount, currency: '', description: r.desc, reference: '', kind };
+    if (kind === 'fee') tx.feeCategory = 'Bank fees';
+    if (balMag !== null) tx.balance = prevBal;
+    txns.push(tx);
+  }
+
+  // Currency: majority of detected symbols, else an explicit code, else base.
+  const ccySorted = Object.entries(curCount).sort((a, b) => b[1] - a[1]);
+  let currency = ccySorted.length ? ccySorted[0][0] : null;
+  if (!currency) {
+    const code = allText.match(/\b(ZAR|USD|EUR|GBP|AUD|CAD|INR|KES|NGN)\b/);
+    if (code) currency = code[1];
+    else if (/£/.test(allText)) currency = 'GBP';
+    else if (/₹|\bRs\.?\b/.test(allText)) currency = 'INR';
+    else if (/€/.test(allText)) currency = 'EUR';
+    else currency = (typeof baseCcy === 'function' ? baseCcy() : 'ZAR');
+  }
+  txns.forEach((t) => { t.currency = currency; });
+
+  // Confidence gate. Balance mode must actually reconcile for most rows;
+  // otherwise hand to the column mapper which models arbitrary layouts.
+  if (txns.length < 3) { const e = new Error('PDF_LOW_CONFIDENCE'); e.unknownFormat = true; throw e; }
+  if (balanceMode && reconciled < txns.length * 0.6) { const e = new Error('PDF_LOW_CONFIDENCE'); e.unknownFormat = true; throw e; }
+
+  const result = finalizeStatement(txns, fileName);
+  result.source = 'pdf';
+  result.currency = currency || result.currency;
+  return result;
+}
+
+// Orchestrates PDF ingestion: saved profile → smart parser → column mapper.
+async function parsePdfStatement(file, fileName) {
+  const lines = await pdfStatementLines(file); // throws {noText} for scanned PDFs
+  const rows = pdfLinesToRows(lines);
+  // 1. A previously-mapped layout for this statement? Honour it (profile memory).
+  const header = (alignRows(rows)[0]) || [];
+  const fp = headerFingerprint(header);
+  const profile = (state.settings.bankProfiles || []).find((p) => p.fingerprint === fp);
+  if (profile) return parseWithProfile(alignRows(rows), fileName, profile);
+  // 2. Smart pattern parser (handles FNB and most Cr/Dr statements).
+  try {
+    return parsePdfStatementTable(lines, fileName);
+  } catch (e) {
+    // 3. Fall back to the column mapper with the best rows we have.
+    const err = new Error('UNKNOWN_FORMAT');
+    err.unknownFormat = true;
+    err.rows = rows;
+    err.fileName = fileName;
+    throw err;
+  }
 }
 
 // Parse a CSV using a saved profile mapping. Mapping shape:
@@ -6010,20 +6427,32 @@ function bindReconcileEvents() {
 }
 
 async function handleStatementFile(file) {
-  if (!file.name.toLowerCase().endsWith('.csv')) {
-    alert('Please drop a .csv file. PDF and other formats are not yet supported.');
+  const name = (file.name || '').toLowerCase();
+  const isPdf = name.endsWith('.pdf') || file.type === 'application/pdf';
+  const isCsv = name.endsWith('.csv') || file.type === 'text/csv';
+  if (!isPdf && !isCsv) {
+    alert('Please drop a .csv or .pdf bank statement.');
     return;
   }
   try {
-    const text = await file.text();
-    const parsed = parseWiseCsv(text, file.name);
+    let parsed;
+    if (isPdf) {
+      parsed = await parsePdfStatement(file, file.name);
+    } else {
+      const text = await file.text();
+      parsed = parseStatementCsv(text, file.name);
+    }
     finishStatementParse(parsed);
   } catch (e) {
     if (e && e.unknownFormat) {
       openColumnMapper(e.rows, e.fileName);
       return;
     }
-    alert('Could not parse CSV: ' + e.message);
+    if (e && e.noText) {
+      alert('This PDF has no readable text — it looks scanned or photographed. Please use the CSV export from your bank, or a digital (text) PDF statement.');
+      return;
+    }
+    alert('Could not read statement: ' + e.message);
   }
 }
 
@@ -6048,7 +6477,7 @@ function openColumnMapper(rows, fileName) {
     headerIdx,
     fields: { date: null, amountSigned: null, amountUnsigned: null, direction: null, moneyIn: null, moneyOut: null, description: null, reference: null, balance: null, id: null, currency: null },
     currencyDefault: 'ZAR',
-    profileName: fileName.replace(/\.csv$/i, ''),
+    profileName: fileName.replace(/\.(csv|pdf)$/i, ''),
   };
 
   function renderMapper() {
