@@ -1405,7 +1405,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.5.0.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.5.0.1';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2408,28 +2408,37 @@ function profitTrendSvg(labels, values, opts = {}) {
 function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
   const ccy = baseCcy();
   const pct = (n) => `${Math.round(n * 100)}%`;
-  const netColor = pl.netProfit >= 0 ? 'var(--accent-bright)' : '#c0392b';
+  // This card is cream (light); the theme CSS vars are light-on-dark, so use explicit
+  // dark tones here for readability.
+  const INK = 'rgba(15,14,13,0.95)';      // primary text
+  const INK_MUTED = 'rgba(15,14,13,0.58)'; // secondary labels / captions
+  const INK_FAINT = 'rgba(15,14,13,0.42)'; // notes
+  const GREEN = '#2f7d32';                  // readable profit green on cream
+  const RED = '#c0392b';
+  const netColor = pl.netProfit >= 0 ? GREEN : RED;
+  const heading = `
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px;">
+        <h2 style="margin:0;font-size:22px;color:${INK};">Profit &amp; Loss · ${ty.label}</h2>
+        <span class="text-sm" style="color:${INK_MUTED};">Year to date · ${financesBasis} basis · ex-VAT</span>
+      </div>`;
   const hasData = pl.revenue !== 0 || pl.expenses !== 0;
   if (!hasData) {
     return `
-    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;">
-      <div class="section-head" style="margin-top:0;"><h2>Profit &amp; Loss · ${ty.label}</h2></div>
-      <div class="empty" style="padding:18px 0;">No income or expenses recorded yet this tax year.</div>
+    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;color:${INK};">
+      ${heading}
+      <div style="padding:8px 0;color:${INK_MUTED};">No income or expenses recorded yet this tax year.</div>
     </div>`;
   }
   const line = (label, val, opts = {}) => {
     const { bold, color, indent, border, note } = opts;
-    return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;${border ? 'border-top:1px solid rgba(0,0,0,0.12);margin-top:4px;padding-top:11px;' : ''}">
-      <span style="${indent ? 'padding-left:16px;color:var(--text-mid);' : ''}${bold ? 'font-weight:650;' : ''}">${label}${note ? ` <span class="text-sm text-muted">${note}</span>` : ''}</span>
-      <span class="amount" style="${bold ? 'font-weight:700;font-size:17px;' : ''}${color ? `color:${color};` : ''}">${fmtMoney(val, ccy)}</span>
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;${border ? 'border-top:1px solid rgba(15,14,13,0.14);margin-top:4px;padding-top:11px;' : ''}">
+      <span style="${indent ? `padding-left:16px;color:${INK_MUTED};` : `color:${INK};`}${bold ? 'font-weight:650;' : ''}">${label}${note ? ` <span class="text-sm" style="color:${INK_FAINT};">${note}</span>` : ''}</span>
+      <span class="amount" style="color:${color || INK};${bold ? 'font-weight:700;font-size:17px;' : ''}">${fmtMoney(val, ccy)}</span>
     </div>`;
   };
   return `
-    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;">
-      <div class="section-head" style="margin-top:0;">
-        <h2>Profit &amp; Loss · ${ty.label}</h2>
-        <span class="text-sm" style="color:var(--text-mid);">Year to date · ${financesBasis} basis · ex-VAT</span>
-      </div>
+    <div class="card-v2 is-cream" style="margin-bottom:18px;padding:24px 28px;color:${INK};">
+      ${heading}
       <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:32px;align-items:start;">
         <div>
           ${line('Revenue', pl.revenue, { bold: true })}
@@ -2437,17 +2446,17 @@ function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
           ${line('Gross profit', pl.grossProfit, { bold: true, border: true, note: pl.revenue > 0 ? `· ${pct(pl.grossMargin)} margin` : '' })}
           ${line('Overheads', -pl.overhead, { indent: true })}
           ${line('Net profit', pl.netProfit, { bold: true, border: true, color: netColor, note: pl.revenue > 0 ? `· ${pct(pl.netMargin)} margin` : '' })}
-          ${pl.drawings ? `<div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(0,0,0,0.18);">
+          ${pl.drawings ? `<div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(15,14,13,0.2);">
             ${line('Owner drawings / salary', pl.drawings, { note: '· distribution of profit, not a business cost' })}
           </div>` : ''}
-          ${pl.missingFx ? `<div class="text-sm text-mid" style="margin-top:10px;">Partial — FX rates missing for some currencies.</div>` : ''}
+          ${pl.missingFx ? `<div class="text-sm" style="color:${INK_MUTED};margin-top:10px;">Partial — FX rates missing for some currencies.</div>` : ''}
         </div>
         <div>
-          <div class="text-sm" style="color:var(--text-mid);margin-bottom:8px;">Net profit by month</div>
+          <div class="text-sm" style="color:${INK_MUTED};margin-bottom:8px;font-weight:600;">Net profit by month</div>
           <div style="overflow-x:auto;">
             ${profitTrendSvg(monthLabels, profitMonthValues, { width: 420, height: 180 })}
           </div>
-          <div class="text-sm text-muted" style="margin-top:6px;">Green = profit · red = loss</div>
+          <div class="text-sm" style="color:${INK_FAINT};margin-top:6px;">Green = profit · red = loss</div>
         </div>
       </div>
     </div>`;
