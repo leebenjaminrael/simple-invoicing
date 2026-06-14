@@ -610,6 +610,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .lock-card .brand { font-family: 'DM Serif Display', serif; font-size: 36px; line-height: 1; margin-bottom: 4px; color: var(--text); }
   .lock-card .sub { color: var(--text-mid); margin-bottom: 24px; font-size: 13px; }
   .lock-card .err { color: var(--danger); font-size: 12px; margin-top: 10px; min-height: 16px; }
+  #onboard-screen {
+    position: fixed; inset: 0; background: var(--bg);
+    display: none; align-items: center; justify-content: center; z-index: 120;
+  }
+  #onboard-screen.show { display: flex; }
 
   /* App layout */
   #app { display: none; height: 100vh; }
@@ -1267,6 +1272,33 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     .page-head { flex-direction: column; align-items: flex-start; }
     .page-head .title { font-size: 24px; }
   }
+  /* Floating timer widget — present on all screens (only when unlocked) */
+  #timer-widget { position: fixed; right: 20px; bottom: 20px; z-index: 900; display: none; }
+  #app.unlocked ~ #timer-widget { display: block; }
+  #timer-widget .tw-card {
+    display: flex; align-items: center; gap: 14px;
+    background: #0F0E0D; color: #F5F2EC;
+    border: 1px solid rgba(245,242,236,0.14); border-radius: 14px;
+    padding: 12px 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    min-width: 220px; max-width: 340px;
+  }
+  #timer-widget.is-running .tw-card { border-color: var(--accent-bright); }
+  #timer-widget .tw-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  #timer-widget .tw-proj { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #timer-widget .tw-sub { font-size: 11px; color: rgba(245,242,236,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 20px; letter-spacing: -0.01em; color: var(--accent-bright); font-variant-numeric: tabular-nums; }
+  #timer-widget .tw-btn {
+    border: none; cursor: pointer; border-radius: 9px; width: 38px; height: 38px;
+    display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0;
+  }
+  #timer-widget .tw-stop { background: var(--accent-bright); color: #0F0E0D; }
+  #timer-widget .tw-start { background: var(--accent-bright); color: #0F0E0D; width: auto; padding: 0 16px; gap: 8px; font-weight: 600; font-size: 13px; }
+  #timer-widget .tw-mini { background: rgba(245,242,236,0.10); color: #F5F2EC; }
+  @media (max-width: 720px) {
+    #timer-widget { right: 12px; bottom: 12px; }
+    #timer-widget .tw-card { min-width: 0; }
+    #timer-widget .tw-sub { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -1294,6 +1326,24 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   </div>
 </div>
 
+<div id="onboard-screen">
+  <div class="lock-card">
+    <div class="brand" id="onboard-brand">seed</div>
+    <div class="sub">Welcome — let's get you set up.</div>
+    <form id="onboard-form" autocomplete="on">
+      <label for="ob-name">Your name</label>
+      <input id="ob-name" type="text" autocomplete="name" placeholder="Jane Smith" />
+      <label for="ob-email" style="margin-top:12px;">Email</label>
+      <input id="ob-email" type="email" autocomplete="email" placeholder="jane@example.com" />
+      <div class="err" id="ob-err"></div>
+      <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px;height:40px;" id="ob-btn">Continue</button>
+    </form>
+    <div class="text-sm text-muted" style="margin-top:16px;line-height:1.55;">
+      We store only your name and email — to send you product updates. Your invoices, clients, expenses and all financial data stay encrypted on this device and are never uploaded.
+    </div>
+  </div>
+</div>
+
 <div id="app">
   <aside class="sidebar">
     <div class="brand" id="sidebar-brand">invoicing</div>
@@ -1304,6 +1354,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <button class="nav-item" data-route="vat"><span class="dot"></span> VAT</button>
     <button class="nav-item" data-route="documents"><span class="dot"></span> Documents</button>
     <button class="nav-item" data-route="clients"><span class="dot"></span> Clients</button>
+    <button class="nav-item" data-route="timer"><span class="dot"></span> Timer</button>
     <button class="nav-item" data-route="expenses"><span class="dot"></span> Expenses</button>
     <button class="nav-item" data-route="reconcile"><span class="dot"></span> Reconcile</button>
     <button class="nav-item" data-route="settings"><span class="dot"></span> Settings</button>
@@ -1323,6 +1374,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   <button class="ub-dismiss" id="update-dismiss" title="Dismiss">×</button>
 </div>
 
+<div id="timer-widget"></div>
 <div id="modal-host"></div>
 <div id="toast-host"></div>
 
@@ -1404,6 +1456,10 @@ const SEED_DATA = {
       documents: [],
       expenses: [],
       statements: [],
+      projects: [],
+      timeEntries: [],
+      runningTimer: null,
+      defaultHourlyRate: 0,
       fxRates: {},
       fxFetchedAt: null,
     },
@@ -1418,7 +1474,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.6.3.1';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.8.0.1';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1522,9 +1578,9 @@ function installEntityAccessors() {
       set(v) { const e = activeEntity(); if (e) e[key] = v; },
     });
   };
-  ['clients', 'documents', 'expenses', 'statements'].forEach((k) => defineProxy(state, k));
+  ['clients', 'documents', 'expenses', 'statements', 'projects', 'timeEntries', 'runningTimer'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
-  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
+  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
 }
 
 async function saveState() {
@@ -1557,6 +1613,7 @@ function lockApp() {
   document.getElementById('app').classList.remove('unlocked');
   document.getElementById('lock-screen').style.display = 'flex';
   showLockForm(true);
+  renderTimerWidget(); // clears the widget + stops its tick now that state is null
 }
 
 /* ============================================================
@@ -1782,6 +1839,11 @@ function migrateState() {
     for (const e of (ent.expenses || [])) {
       if (e.directCost === undefined) e.directCost = (e.category === 'Subcontractor');
     }
+    // v6.5: time tracking — projects, time entries, running timer, default rate.
+    if (!ent.projects) ent.projects = [];
+    if (!ent.timeEntries) ent.timeEntries = [];
+    if (ent.runningTimer === undefined) ent.runningTimer = null;
+    if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
   }
   state.version = 6;
 }
@@ -2179,9 +2241,11 @@ function render() {
   else if (currentRoute === 'vat') host.innerHTML = renderVatView();
   else if (currentRoute === 'documents') host.innerHTML = renderDocuments();
   else if (currentRoute === 'clients') host.innerHTML = renderClients();
+  else if (currentRoute === 'timer') host.innerHTML = renderTimer();
   else if (currentRoute === 'expenses') host.innerHTML = renderExpensesView();
   else if (currentRoute === 'reconcile') host.innerHTML = renderReconcile();
   else if (currentRoute === 'settings') host.innerHTML = renderSettings();
+  renderTimerWidget();
   bindViewEvents();
 }
 
@@ -2929,6 +2993,419 @@ function exportVatPeriod(p) {
   a.click();
   URL.revokeObjectURL(url);
   toast('VAT period downloaded');
+}
+
+/* ============================================================
+   TIME TRACKING
+   ============================================================ */
+
+let timerTick = null;
+let timeFilters = { clientId: '', projectId: '', from: '', to: '', status: 'all' };
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+function fmtHours(sec) { return (sec / 3600).toFixed(2); }
+function projectById(id) { return (state.projects || []).find((p) => p.id === id) || null; }
+function projectLabel(id) { const p = projectById(id); return p ? p.name : '—'; }
+function clientHourlyRate(clientId) {
+  const c = (state.clients || []).find((x) => x.id === clientId);
+  const r = c && Number(c.rate);
+  if (r) return r;
+  return Number(state.settings.defaultHourlyRate) || 0;
+}
+function resolveRate(clientId, projectId) {
+  const p = projectById(projectId);
+  if (p && Number(p.rate)) return Number(p.rate);
+  return clientHourlyRate(clientId);
+}
+function findOrCreateProject(clientId, name) {
+  name = (name || '').trim();
+  if (!name) return null;
+  let p = (state.projects || []).find((x) => x.clientId === clientId && x.name.toLowerCase() === name.toLowerCase());
+  if (!p) {
+    p = { id: uid('pj-'), clientId, name, rate: 0, status: 'active', archived: false, createdAt: new Date().toISOString() };
+    state.projects.push(p);
+  }
+  return p;
+}
+
+/* ---- start / stop ---- */
+async function startTimer({ clientId, projectId, description }) {
+  if (state.runningTimer) await stopTimer();
+  state.runningTimer = { clientId: clientId || null, projectId: projectId || null, description: description || '', startedAt: new Date().toISOString() };
+  await saveState();
+  renderTimerWidget();
+  if (currentRoute === 'timer') render();
+}
+async function stopTimer() {
+  const t = state.runningTimer;
+  if (!t) return;
+  const end = new Date();
+  const durationSec = Math.max(0, Math.round((end - new Date(t.startedAt)) / 1000));
+  state.runningTimer = null;
+  if (durationSec >= 1) {
+    state.timeEntries.push({
+      id: uid('te-'), clientId: t.clientId || null, projectId: t.projectId || null,
+      description: t.description || '', start: t.startedAt, end: end.toISOString(),
+      durationSec, rate: resolveRate(t.clientId, t.projectId), billable: true, invoiceId: null,
+    });
+  }
+  await saveState();
+  renderTimerWidget();
+  if (currentRoute === 'timer') render();
+}
+
+/* ---- floating widget ---- */
+function renderTimerWidget() {
+  const el = document.getElementById('timer-widget');
+  if (!el) return;
+  if (!state) { el.innerHTML = ''; el.className = ''; stopTimerTick(); return; }
+  const t = state.runningTimer;
+  if (t) {
+    const elapsed = (Date.now() - new Date(t.startedAt).getTime()) / 1000;
+    const proj = t.projectId ? projectLabel(t.projectId) : (t.description || 'Timer');
+    const cli = t.clientId ? clientName(t.clientId) : (t.description || '');
+    el.className = 'is-running';
+    el.innerHTML = `
+      <div class="tw-card">
+        <div class="tw-main">
+          <div class="tw-proj">${escapeHtml(proj)}</div>
+          <div class="tw-sub">${escapeHtml(cli)}</div>
+          <div class="tw-time" id="tw-time">${fmtDuration(elapsed)}</div>
+        </div>
+        <button class="tw-btn tw-stop" id="tw-stop" title="Stop timer">&#9632;</button>
+      </div>`;
+    document.getElementById('tw-stop').onclick = () => stopTimer();
+    startTimerTick();
+  } else {
+    el.className = '';
+    el.innerHTML = `<div class="tw-card"><button class="tw-btn tw-start" id="tw-start">&#9654; Start timer</button></div>`;
+    document.getElementById('tw-start').onclick = () => openTimerStartModal();
+    stopTimerTick();
+  }
+}
+function startTimerTick() {
+  if (timerTick) return;
+  timerTick = setInterval(() => {
+    const t = state && state.runningTimer;
+    const disp = document.getElementById('tw-time');
+    if (t && disp) disp.textContent = fmtDuration((Date.now() - new Date(t.startedAt).getTime()) / 1000);
+    else if (!t) stopTimerTick();
+  }, 1000);
+}
+function stopTimerTick() { if (timerTick) { clearInterval(timerTick); timerTick = null; } }
+
+/* ---- start-timer modal ---- */
+function clientOptions(selected) {
+  return (state.clients || []).map((c) => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+}
+function projectDatalist(clientId) {
+  const list = (state.projects || []).filter((p) => !p.archived && (!clientId || p.clientId === clientId));
+  return list.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join('');
+}
+function openTimerStartModal() {
+  if (!state.clients || !state.clients.length) { toast('Add a client first'); return; }
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head"><div class="ttl">Start timer</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="field"><label>Client</label><select id="ts-client">${clientOptions(state.clients[0].id)}</select></div>
+          <div class="field"><label>Project</label><input id="ts-project" list="ts-projlist" placeholder="Pick or type a project name" /><datalist id="ts-projlist">${projectDatalist(state.clients[0].id)}</datalist></div>
+          <div class="field"><label>What are you working on? <span class="text-muted">(optional)</span></label><input id="ts-desc" placeholder="e.g. Homepage layout" /></div>
+        </div>
+        <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="ts-start">Start</button>
+        </div>
+      </div>
+    </div>`;
+  showModal(html);
+  document.getElementById('ts-client').addEventListener('change', (e) => {
+    document.getElementById('ts-projlist').innerHTML = projectDatalist(e.target.value);
+  });
+  document.getElementById('ts-start').addEventListener('click', async () => {
+    const clientId = document.getElementById('ts-client').value;
+    const pName = document.getElementById('ts-project').value.trim();
+    const desc = document.getElementById('ts-desc').value.trim();
+    const proj = pName ? findOrCreateProject(clientId, pName) : null;
+    closeModal();
+    await startTimer({ clientId, projectId: proj ? proj.id : null, description: desc });
+  });
+}
+
+/* ---- manual add / edit entry ---- */
+function openTimeEntryModal(entry) {
+  if (!state.clients || !state.clients.length) { toast('Add a client first'); return; }
+  const isNew = !entry;
+  const e = entry || { id: uid('te-'), clientId: state.clients[0].id, projectId: null, description: '', durationSec: 3600, start: new Date().toISOString(), billable: true };
+  const dateVal = (e.start || new Date().toISOString()).slice(0, 10);
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head"><div class="ttl">${isNew ? 'Add time' : 'Edit time'}</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="field"><label>Client</label><select id="te-client">${clientOptions(e.clientId)}</select></div>
+            <div class="field"><label>Date</label><input id="te-date" type="date" value="${dateVal}" /></div>
+            <div class="field"><label>Project</label><input id="te-project" list="te-projlist" value="${escapeHtml(e.projectId ? projectLabel(e.projectId) : '')}" placeholder="Pick or type" /><datalist id="te-projlist">${projectDatalist(e.clientId)}</datalist></div>
+            <div class="field"><label>Hours</label><input id="te-hours" type="number" step="0.25" min="0" value="${(e.durationSec / 3600).toFixed(2)}" /></div>
+          </div>
+          <div class="field full"><label>Description <span class="text-muted">(optional)</span></label><input id="te-desc" value="${escapeHtml(e.description || '')}" /></div>
+          <div class="field full"><label class="checkbox"><input type="checkbox" id="te-billable" ${e.billable !== false ? 'checked' : ''} /><span>Billable</span></label></div>
+        </div>
+        <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="te-save">${isNew ? 'Add' : 'Save'}</button>
+        </div>
+      </div>
+    </div>`;
+  showModal(html);
+  document.getElementById('te-client').addEventListener('change', (ev) => {
+    document.getElementById('te-projlist').innerHTML = projectDatalist(ev.target.value);
+  });
+  document.getElementById('te-save').addEventListener('click', async () => {
+    const clientId = document.getElementById('te-client').value;
+    const pName = document.getElementById('te-project').value.trim();
+    const proj = pName ? findOrCreateProject(clientId, pName) : null;
+    const hours = Number(document.getElementById('te-hours').value) || 0;
+    const date = document.getElementById('te-date').value || todayISO();
+    const description = document.getElementById('te-desc').value.trim();
+    const billable = document.getElementById('te-billable').checked;
+    if (hours <= 0) { toast('Hours must be greater than 0'); return; }
+    const durationSec = Math.round(hours * 3600);
+    const updated = {
+      id: e.id, clientId, projectId: proj ? proj.id : null, description,
+      start: date + 'T09:00:00.000Z', end: null, durationSec,
+      rate: (entry && entry.rate) || resolveRate(clientId, proj ? proj.id : null),
+      billable, invoiceId: (entry && entry.invoiceId) || null,
+    };
+    const idx = state.timeEntries.findIndex((x) => x.id === e.id);
+    if (idx >= 0) state.timeEntries[idx] = updated; else state.timeEntries.push(updated);
+    await saveState();
+    closeModal();
+    render();
+    toast(isNew ? 'Time added' : 'Time saved');
+  });
+}
+
+/* ---- filtering + tab ---- */
+function filteredTimeEntries() {
+  let list = (state.timeEntries || []).slice();
+  const f = timeFilters;
+  if (f.clientId) list = list.filter((e) => e.clientId === f.clientId);
+  if (f.projectId) list = list.filter((e) => e.projectId === f.projectId);
+  if (f.from) list = list.filter((e) => (e.start || '').slice(0, 10) >= f.from);
+  if (f.to) list = list.filter((e) => (e.start || '').slice(0, 10) <= f.to);
+  if (f.status === 'unbilled') list = list.filter((e) => !e.invoiceId);
+  else if (f.status === 'billed') list = list.filter((e) => e.invoiceId);
+  list.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  return list;
+}
+
+function renderTimer() {
+  const entries = filteredTimeEntries();
+  const totalSec = entries.reduce((s, e) => s + (e.durationSec || 0), 0);
+  const totalValue = entries.reduce((s, e) => s + (e.durationSec / 3600) * (Number(e.rate) || 0), 0);
+  const unbilled = entries.filter((e) => !e.invoiceId);
+  const f = timeFilters;
+  const projForClient = (state.projects || []).filter((p) => !f.clientId || p.clientId === f.clientId);
+  const ccy = baseCcy();
+  const running = state.runningTimer;
+
+  const rows = entries.length ? entries.map((e) => {
+    const val = (e.durationSec / 3600) * (Number(e.rate) || 0);
+    const billed = !!e.invoiceId;
+    return `
+      <tr>
+        <td>${fmtDate((e.start || '').slice(0, 10))}</td>
+        <td>${escapeHtml(clientName(e.clientId))}</td>
+        <td>${escapeHtml(e.projectId ? projectLabel(e.projectId) : '—')}</td>
+        <td>${escapeHtml(e.description || '')}</td>
+        <td class="amount">${fmtHours(e.durationSec)}</td>
+        <td class="amount">${fmtMoney(Number(e.rate) || 0, ccy)}</td>
+        <td class="amount">${fmtMoney(val, ccy)}</td>
+        <td>${billed ? `<span style="color:#2f7d32;font-weight:600;">Billed</span>` : `<span class="text-muted">Unbilled</span>`}</td>
+        <td class="actions">
+          ${billed ? '' : `<button class="btn btn-sm btn-ghost" data-te-edit="${e.id}">Edit</button>`}
+          <button class="btn btn-sm btn-ghost danger" data-te-del="${e.id}">Delete</button>
+        </td>
+      </tr>`;
+  }).join('') : '<tr><td colspan="9" class="empty">No time entries for this filter.</td></tr>';
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="title">Timer</div>
+        <div class="sub">${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} · ${fmtHours(totalSec)} hrs · ${fmtMoney(totalValue, ccy)}</div>
+      </div>
+      <div class="page-actions">
+        ${running ? `<span class="text-sm" style="color:var(--accent-bright);">● Timer running</span>` : `<button class="btn" id="tm-start">▶ Start timer</button>`}
+        <button class="btn" id="tm-add">+ Add time</button>
+        <button class="btn" id="tm-export">Export CSV</button>
+      </div>
+    </div>
+
+    <div class="filter-bar" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:16px;">
+      <div class="field" style="margin:0;min-width:160px;"><label>Client</label>
+        <select id="tm-f-client"><option value="">All clients</option>${(state.clients || []).map((c) => `<option value="${c.id}" ${f.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select></div>
+      <div class="field" style="margin:0;min-width:160px;"><label>Project</label>
+        <select id="tm-f-project"><option value="">All projects</option>${projForClient.map((p) => `<option value="${p.id}" ${f.projectId === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>
+      <div class="field" style="margin:0;"><label>From</label><input id="tm-f-from" type="date" value="${f.from}" /></div>
+      <div class="field" style="margin:0;"><label>To</label><input id="tm-f-to" type="date" value="${f.to}" /></div>
+      <div class="field" style="margin:0;min-width:130px;"><label>Status</label>
+        <select id="tm-f-status">
+          <option value="all" ${f.status === 'all' ? 'selected' : ''}>All</option>
+          <option value="unbilled" ${f.status === 'unbilled' ? 'selected' : ''}>Unbilled</option>
+          <option value="billed" ${f.status === 'billed' ? 'selected' : ''}>Billed</option>
+        </select></div>
+      ${(f.from || f.to || f.clientId || f.projectId || f.status !== 'all') ? `<button class="btn btn-sm" id="tm-f-clear">Clear</button>` : ''}
+    </div>
+
+    ${f.clientId && unbilled.length ? `
+      <div class="card-v2 is-lime" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;margin-bottom:16px;">
+        <div style="color:#0F0E0D;"><strong>${unbilled.length}</strong> unbilled ${unbilled.length === 1 ? 'entry' : 'entries'} · ${fmtHours(unbilled.reduce((s, e) => s + e.durationSec, 0))} hrs · ${fmtMoney(unbilled.reduce((s, e) => s + (e.durationSec / 3600) * (Number(e.rate) || 0), 0), ccy)} for ${escapeHtml(clientName(f.clientId))}</div>
+        <button class="btn" id="tm-bill" style="background:#0F0E0D;color:var(--c-lime);border-color:#0F0E0D;">Bill to invoice →</button>
+      </div>` : ''}
+
+    <div class="doc-list">
+      <table>
+        <thead><tr><th>Date</th><th>Client</th><th>Project</th><th>Description</th><th class="amount">Hours</th><th class="amount">Rate</th><th class="amount">Value</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function bindTimerEvents() {
+  const setF = (k, v) => { timeFilters[k] = v; if (k === 'clientId') timeFilters.projectId = ''; render(); };
+  const cl = document.getElementById('tm-f-client'); if (cl) cl.addEventListener('change', (e) => setF('clientId', e.target.value));
+  const pj = document.getElementById('tm-f-project'); if (pj) pj.addEventListener('change', (e) => setF('projectId', e.target.value));
+  const fr = document.getElementById('tm-f-from'); if (fr) fr.addEventListener('change', (e) => setF('from', e.target.value));
+  const to = document.getElementById('tm-f-to'); if (to) to.addEventListener('change', (e) => setF('to', e.target.value));
+  const st = document.getElementById('tm-f-status'); if (st) st.addEventListener('change', (e) => setF('status', e.target.value));
+  const clr = document.getElementById('tm-f-clear'); if (clr) clr.addEventListener('click', () => { timeFilters = { clientId: '', projectId: '', from: '', to: '', status: 'all' }; render(); });
+  const add = document.getElementById('tm-add'); if (add) add.addEventListener('click', () => openTimeEntryModal(null));
+  const start = document.getElementById('tm-start'); if (start) start.addEventListener('click', () => openTimerStartModal());
+  const exp = document.getElementById('tm-export'); if (exp) exp.addEventListener('click', exportTimeReport);
+  const bill = document.getElementById('tm-bill'); if (bill) bill.addEventListener('click', () => openBillTimeModal(timeFilters.clientId));
+  document.querySelectorAll('[data-te-edit]').forEach((b) => b.addEventListener('click', () => {
+    const e = state.timeEntries.find((x) => x.id === b.dataset.teEdit); if (e) openTimeEntryModal(e);
+  }));
+  document.querySelectorAll('[data-te-del]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Delete this time entry?')) return;
+    state.timeEntries = state.timeEntries.filter((x) => x.id !== b.dataset.teDel);
+    await saveState(); render(); toast('Deleted');
+  }));
+}
+
+function exportTimeReport() {
+  const entries = filteredTimeEntries();
+  if (!entries.length) { toast('No entries to export'); return; }
+  const esc = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [['Date', 'Client', 'Project', 'Description', 'Hours', 'Rate', 'Value', 'Billable', 'Status', 'Invoice'].join(',')];
+  for (const e of entries) {
+    const val = (e.durationSec / 3600) * (Number(e.rate) || 0);
+    const inv = e.invoiceId ? (state.documents.find((d) => d.id === e.invoiceId)) : null;
+    lines.push([
+      (e.start || '').slice(0, 10), clientName(e.clientId), e.projectId ? projectLabel(e.projectId) : '',
+      e.description || '', fmtHours(e.durationSec), (Number(e.rate) || 0).toFixed(2), val.toFixed(2),
+      e.billable !== false ? 'Yes' : 'No', e.invoiceId ? 'Billed' : 'Unbilled', inv ? docNumber(inv) : '',
+    ].map(esc).join(','));
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `time-report-${todayISO()}.csv`; a.click();
+  URL.revokeObjectURL(url);
+  toast('Report downloaded');
+}
+
+/* ---- bill time → invoice ---- */
+// Build one invoice line per (project, rate). Returns { lines, entryIds }.
+function buildTimeLines(entries) {
+  const groups = {};
+  for (const e of entries) {
+    const key = (e.projectId || 'none') + '|' + (Number(e.rate) || 0);
+    (groups[key] = groups[key] || { projectId: e.projectId, rate: Number(e.rate) || 0, sec: 0, ids: [] });
+    groups[key].sec += e.durationSec; groups[key].ids.push(e.id);
+  }
+  const lines = []; const entryIds = [];
+  for (const g of Object.values(groups)) {
+    const hours = +(g.sec / 3600).toFixed(2);
+    const name = g.projectId ? projectLabel(g.projectId) : 'Time tracked';
+    lines.push({ id: uid('l-'), desc: name, qty: hours, price: g.rate, vat: true });
+    entryIds.push(...g.ids);
+  }
+  return { lines, entryIds };
+}
+
+function openBillTimeModal(clientId) {
+  const entries = filteredTimeEntries().filter((e) => e.clientId === clientId && !e.invoiceId);
+  if (!entries.length) { toast('No unbilled time for this client'); return; }
+  const drafts = state.documents.filter((d) => d.type === 'invoice' && d.status === 'draft' && d.clientId === clientId);
+  const { lines } = buildTimeLines(entries);
+  const previewRows = lines.map((l) => `<tr><td>${escapeHtml(l.desc)}</td><td class="amount">${l.qty.toFixed(2)}</td><td class="amount">${fmtMoney(l.price, baseCcy())}</td><td class="amount">${fmtMoney(l.qty * l.price, baseCcy())}</td></tr>`).join('');
+  const total = lines.reduce((s, l) => s + l.qty * l.price, 0);
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:560px;">
+        <div class="modal-head"><div class="ttl">Bill time — ${escapeHtml(clientName(clientId))}</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <p class="text-sm text-mid" style="margin-top:0;">${entries.length} unbilled entr${entries.length === 1 ? 'y' : 'ies'} → one invoice line per project:</p>
+          <div class="doc-list"><table><thead><tr><th>Project</th><th class="amount">Hours</th><th class="amount">Rate</th><th class="amount">Amount</th></tr></thead><tbody>${previewRows}</tbody></table></div>
+          <div style="text-align:right;margin-top:8px;font-weight:600;">Total (excl. VAT): ${fmtMoney(total, baseCcy())}</div>
+          <div class="field" style="margin-top:14px;"><label>Add to</label>
+            <select id="bt-target">
+              <option value="new">New invoice</option>
+              ${drafts.map((d) => `<option value="${d.id}">Existing draft ${docNumber(d)}</option>`).join('')}
+            </select></div>
+        </div>
+        <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="bt-go">Create invoice</button>
+        </div>
+      </div>
+    </div>`;
+  showModal(html);
+  document.getElementById('bt-go').addEventListener('click', async () => {
+    const target = document.getElementById('bt-target').value;
+    await billTime(clientId, entries, target);
+  });
+}
+
+async function billTime(clientId, entries, target) {
+  const { lines, entryIds } = buildTimeLines(entries);
+  let docId;
+  if (target && target !== 'new') {
+    const doc = state.documents.find((d) => d.id === target);
+    if (!doc) { toast('Draft not found'); return; }
+    doc.lines = (doc.lines || []).filter((l) => l.desc || l.qty || l.price).concat(lines);
+    docId = doc.id;
+  } else {
+    const today = todayISO();
+    const doc = {
+      id: uid('d-'), type: 'invoice', number: state.settings.nextInv,
+      clientId, currency: baseCcy(),
+      bankId: (state.settings.banking.find((b) => b.currency === baseCcy()) || state.settings.banking[0] || { id: 'sa' }).id,
+      date: today, dueDate: addDays(today, 7), expiry: null,
+      projectTitle: '', poNumber: '', lines,
+      depositPct: 0, terms: STANDARD_TERMS_INVOICE, notes: '', includeNotes: false,
+      status: 'draft', paidDate: null, sourceQuoteId: null,
+    };
+    state.documents.push(doc);
+    state.settings.nextInv = state.settings.nextInv + 1;
+    docId = doc.id;
+  }
+  // Stamp entries as billed.
+  for (const e of state.timeEntries) if (entryIds.includes(e.id)) e.invoiceId = docId;
+  await saveState();
+  closeModal();
+  toast('Invoice created from time');
+  openDocEditor(docId);
 }
 
 /* ============================================================
@@ -4730,6 +5207,10 @@ function openClientModal(client) {
               <label>VAT number</label>
               <input data-cf="vat" value="${escapeHtml(client.vat)}" />
             </div>
+            <div class="field">
+              <label>Hourly rate <span class="text-muted">(for time tracking)</span></label>
+              <input data-cf="rate" type="number" step="any" min="0" value="${client.rate || ''}" placeholder="${state.settings.defaultHourlyRate || 0}" />
+            </div>
           </div>
         </div>
         <div class="modal-foot">
@@ -4749,6 +5230,7 @@ function openClientModal(client) {
       contact: get('contact'),
       email: get('email'),
       vat: get('vat'),
+      rate: Number(document.querySelector('[data-cf="rate"]').value) || 0,
     };
     if (!updated.name) { toast('Name is required'); return; }
     const idx = state.clients.findIndex((c) => c.id === client.id);
@@ -5280,6 +5762,8 @@ function openDocPreview(docId) {
   $('prev-delete').addEventListener('click', async () => {
     if (!confirm('Permanently delete ' + docNumber(d) + '?')) return;
     state.documents = state.documents.filter((x) => x.id !== d.id);
+    // Release any time entries that were billed on this invoice back to unbilled.
+    for (const te of (state.timeEntries || [])) if (te.invoiceId === d.id) te.invoiceId = null;
     await saveState();
     closeModal();
     render();
@@ -5722,6 +6206,10 @@ function renderSettings() {
             ${['January','February','March','April','May','June','July','August','September','October','November','December'].map((mn, i) => `<option value="${i + 1}" ${(i + 1) === taxYearStartMonth() ? 'selected' : ''}>${mn}</option>`).join('')}
           </select>
         </div>
+        <div class="field">
+          <label>Default hourly rate <span class="text-muted">(time tracking fallback)</span></label>
+          <input data-cs="defaultHourlyRate" type="number" step="any" min="0" value="${state.settings.defaultHourlyRate || 0}" />
+        </div>
       </div>
       <div class="text-sm text-mid" style="margin-top:10px;">Base currency is what this business's dashboard and finance reports convert everything into — its new invoices default to it too. VAT applies to invoices in the base currency at the rate above (foreign-currency sales are treated as zero-rated); set 0% if this business isn't VAT/tax registered. Each business can use different values.</div>
     </div>
@@ -5876,7 +6364,8 @@ function bindSettingsEvents() {
       if (f === 'nextInv' || f === 'nextQt' || f === 'autoLockMinutes') v = Number(v) || 0;
       if (f === 'vatPercent') v = Math.max(0, Number(v) || 0);
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
-      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth'].includes(f)) state.settings[f] = v;
+      if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
+      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -6361,6 +6850,8 @@ function bindViewEvents() {
   if (currentRoute === 'reconcile') {
     bindReconcileEvents();
   }
+
+  if (currentRoute === 'timer') bindTimerEvents();
 
   if (currentRoute === 'settings') bindSettingsEvents();
 }
@@ -7710,10 +8201,77 @@ function downloadBackupSilent() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* ============================================================
+   ONBOARDING — collect name + email once (sent to a form endpoint)
+   ============================================================ */
+
+// Formspree endpoint (AJAX/JSON). Leave blank to collect locally and auto-send
+// on the next load once configured.
+const ONBOARDING_ENDPOINT = 'https://formspree.io/f/mqeowqga';
+const ONBOARD_KEY = 'seed-onboarding-v1';
+
+function getOnboarding() {
+  try { return JSON.parse(localStorage.getItem(ONBOARD_KEY) || 'null'); } catch (e) { return null; }
+}
+function setOnboarding(obj) {
+  try { localStorage.setItem(ONBOARD_KEY, JSON.stringify(obj)); } catch (e) {}
+}
+
+// POST the lead to the configured endpoint. Returns true on success.
+async function sendOnboarding(payload) {
+  if (!ONBOARDING_ENDPOINT) return false; // not configured yet → keep as pending
+  try {
+    const res = await fetch(ONBOARDING_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ _subject: `New signup: ${payload.name || payload.email || ''}`, ...payload }),
+    });
+    return res.ok;
+  } catch (e) { return false; }
+}
+
+// If a previous submission couldn't reach the endpoint, retry quietly on load.
+async function retryPendingOnboarding() {
+  const o = getOnboarding();
+  if (o && o.submitted && o.pending) {
+    const ok = await sendOnboarding({ name: o.name, email: o.email, appVersion: APP_VERSION, date: o.at });
+    if (ok) setOnboarding({ ...o, pending: false });
+  }
+}
+
+function showOnboarding() {
+  const screen = document.getElementById('onboard-screen');
+  screen.classList.add('show');
+  const brandEl = document.getElementById('lock-brand');
+  document.getElementById('onboard-brand').textContent = (brandEl && brandEl.textContent) || 'seed';
+  const err = document.getElementById('ob-err');
+  setTimeout(() => document.getElementById('ob-name').focus(), 50);
+  document.getElementById('onboard-form').onsubmit = async (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    const name = document.getElementById('ob-name').value.trim();
+    const email = document.getElementById('ob-email').value.trim();
+    if (!name) { err.textContent = 'Please enter your name.'; return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { err.textContent = 'Please enter a valid email address.'; return; }
+    const btn = document.getElementById('ob-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    const at = new Date().toISOString();
+    const ok = await sendOnboarding({ name, email, appVersion: APP_VERSION, date: at });
+    setOnboarding({ submitted: true, name, email, at, pending: !ok });
+    screen.classList.remove('show');
+    showLockForm(!!localStorage.getItem(STORAGE_KEY)); // proceed to set-password / unlock
+  };
+}
+
 (function boot() {
   initPwa();
-  const blob = localStorage.getItem(STORAGE_KEY);
-  showLockForm(!!blob);
+  retryPendingOnboarding();
+  const o = getOnboarding();
+  if (!o || !o.submitted) {
+    showOnboarding();        // required for new AND existing users until completed
+  } else {
+    showLockForm(!!localStorage.getItem(STORAGE_KEY));
+  }
 })();
 </script>
 </body>
