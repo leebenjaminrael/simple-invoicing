@@ -1457,6 +1457,7 @@ const SEED_DATA = {
       expenses: [],
       statements: [],
       projects: [],
+      tasks: [],
       timeEntries: [],
       runningTimer: null,
       defaultHourlyRate: 0,
@@ -1474,7 +1475,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.8.0.1';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.8.1.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1578,7 +1579,7 @@ function installEntityAccessors() {
       set(v) { const e = activeEntity(); if (e) e[key] = v; },
     });
   };
-  ['clients', 'documents', 'expenses', 'statements', 'projects', 'timeEntries', 'runningTimer'].forEach((k) => defineProxy(state, k));
+  ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
   ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
 }
@@ -1839,8 +1840,9 @@ function migrateState() {
     for (const e of (ent.expenses || [])) {
       if (e.directCost === undefined) e.directCost = (e.category === 'Subcontractor');
     }
-    // v6.5: time tracking — projects, time entries, running timer, default rate.
+    // v6.5: time tracking — projects, tasks, time entries, running timer, default rate.
     if (!ent.projects) ent.projects = [];
+    if (!ent.tasks) ent.tasks = [];
     if (!ent.timeEntries) ent.timeEntries = [];
     if (ent.runningTimer === undefined) ent.runningTimer = null;
     if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
@@ -3031,11 +3033,33 @@ function findOrCreateProject(clientId, name) {
   }
   return p;
 }
+function taskById(id) { return (state.tasks || []).find((t) => t.id === id) || null; }
+function taskLabel(id) { const t = taskById(id); return t ? t.name : ''; }
+// Match a project by client + name without creating it (for live task lookups).
+function findProject(clientId, name) {
+  name = (name || '').trim();
+  if (!name) return null;
+  return (state.projects || []).find((x) => x.clientId === clientId && x.name.toLowerCase() === name.toLowerCase()) || null;
+}
+function findOrCreateTask(projectId, name) {
+  name = (name || '').trim();
+  if (!projectId || !name) return null;
+  let t = (state.tasks || []).find((x) => x.projectId === projectId && x.name.toLowerCase() === name.toLowerCase());
+  if (!t) {
+    t = { id: uid('tk-'), projectId, name, createdAt: new Date().toISOString() };
+    state.tasks.push(t);
+  }
+  return t;
+}
+function taskDatalist(projectId) {
+  return (state.tasks || []).filter((t) => t.projectId === projectId)
+    .map((t) => `<option value="${escapeHtml(t.name)}"></option>`).join('');
+}
 
 /* ---- start / stop ---- */
-async function startTimer({ clientId, projectId, description }) {
+async function startTimer({ clientId, projectId, taskId, description }) {
   if (state.runningTimer) await stopTimer();
-  state.runningTimer = { clientId: clientId || null, projectId: projectId || null, description: description || '', startedAt: new Date().toISOString() };
+  state.runningTimer = { clientId: clientId || null, projectId: projectId || null, taskId: taskId || null, description: description || '', startedAt: new Date().toISOString() };
   await saveState();
   renderTimerWidget();
   if (currentRoute === 'timer') render();
@@ -3048,7 +3072,7 @@ async function stopTimer() {
   state.runningTimer = null;
   if (durationSec >= 1) {
     state.timeEntries.push({
-      id: uid('te-'), clientId: t.clientId || null, projectId: t.projectId || null,
+      id: uid('te-'), clientId: t.clientId || null, projectId: t.projectId || null, taskId: t.taskId || null,
       description: t.description || '', start: t.startedAt, end: end.toISOString(),
       durationSec, rate: resolveRate(t.clientId, t.projectId), billable: true, invoiceId: null,
     });
@@ -3066,7 +3090,8 @@ function renderTimerWidget() {
   const t = state.runningTimer;
   if (t) {
     const elapsed = (Date.now() - new Date(t.startedAt).getTime()) / 1000;
-    const proj = t.projectId ? projectLabel(t.projectId) : (t.description || 'Timer');
+    const projOnly = t.projectId ? projectLabel(t.projectId) : (t.description || 'Timer');
+    const proj = t.taskId ? `${projOnly} · ${taskLabel(t.taskId)}` : projOnly;
     const cli = t.clientId ? clientName(t.clientId) : (t.description || '');
     el.className = 'is-running';
     el.innerHTML = `
@@ -3115,7 +3140,8 @@ function openTimerStartModal() {
         <div class="modal-body">
           <div class="field"><label>Client</label><select id="ts-client">${clientOptions(state.clients[0].id)}</select></div>
           <div class="field"><label>Project</label><input id="ts-project" list="ts-projlist" placeholder="Pick or type a project name" /><datalist id="ts-projlist">${projectDatalist(state.clients[0].id)}</datalist></div>
-          <div class="field"><label>What are you working on? <span class="text-muted">(optional)</span></label><input id="ts-desc" placeholder="e.g. Homepage layout" /></div>
+          <div class="field"><label>Task</label><input id="ts-task" list="ts-tasklist" placeholder="Pick or type a task" /><datalist id="ts-tasklist"></datalist></div>
+          <div class="field"><label>Note <span class="text-muted">(optional)</span></label><input id="ts-desc" placeholder="e.g. Homepage hero section" /></div>
         </div>
         <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
           <button class="btn" data-close>Cancel</button>
@@ -3124,16 +3150,25 @@ function openTimerStartModal() {
       </div>
     </div>`;
   showModal(html);
+  const refreshTasks = () => {
+    const cid = document.getElementById('ts-client').value;
+    const pj = findProject(cid, document.getElementById('ts-project').value);
+    document.getElementById('ts-tasklist').innerHTML = pj ? taskDatalist(pj.id) : '';
+  };
   document.getElementById('ts-client').addEventListener('change', (e) => {
     document.getElementById('ts-projlist').innerHTML = projectDatalist(e.target.value);
+    refreshTasks();
   });
+  document.getElementById('ts-project').addEventListener('input', refreshTasks);
   document.getElementById('ts-start').addEventListener('click', async () => {
     const clientId = document.getElementById('ts-client').value;
     const pName = document.getElementById('ts-project').value.trim();
+    const tName = document.getElementById('ts-task').value.trim();
     const desc = document.getElementById('ts-desc').value.trim();
     const proj = pName ? findOrCreateProject(clientId, pName) : null;
+    const task = (proj && tName) ? findOrCreateTask(proj.id, tName) : null;
     closeModal();
-    await startTimer({ clientId, projectId: proj ? proj.id : null, description: desc });
+    await startTimer({ clientId, projectId: proj ? proj.id : null, taskId: task ? task.id : null, description: desc });
   });
 }
 
@@ -3152,10 +3187,13 @@ function openTimeEntryModal(entry) {
             <div class="field"><label>Client</label><select id="te-client">${clientOptions(e.clientId)}</select></div>
             <div class="field"><label>Date</label><input id="te-date" type="date" value="${dateVal}" /></div>
             <div class="field"><label>Project</label><input id="te-project" list="te-projlist" value="${escapeHtml(e.projectId ? projectLabel(e.projectId) : '')}" placeholder="Pick or type" /><datalist id="te-projlist">${projectDatalist(e.clientId)}</datalist></div>
-            <div class="field"><label>Hours</label><input id="te-hours" type="number" step="0.25" min="0" value="${(e.durationSec / 3600).toFixed(2)}" /></div>
+            <div class="field"><label>Task</label><input id="te-task" list="te-tasklist" value="${escapeHtml(e.taskId ? taskLabel(e.taskId) : '')}" placeholder="Pick or type" /><datalist id="te-tasklist">${e.projectId ? taskDatalist(e.projectId) : ''}</datalist></div>
           </div>
-          <div class="field full"><label>Description <span class="text-muted">(optional)</span></label><input id="te-desc" value="${escapeHtml(e.description || '')}" /></div>
-          <div class="field full"><label class="checkbox"><input type="checkbox" id="te-billable" ${e.billable !== false ? 'checked' : ''} /><span>Billable</span></label></div>
+          <div class="form-grid">
+            <div class="field"><label>Hours</label><input id="te-hours" type="number" step="0.25" min="0" value="${(e.durationSec / 3600).toFixed(2)}" /></div>
+            <div class="field"><label class="checkbox" style="margin-top:24px;"><input type="checkbox" id="te-billable" ${e.billable !== false ? 'checked' : ''} /><span>Billable</span></label></div>
+          </div>
+          <div class="field full"><label>Note <span class="text-muted">(optional)</span></label><input id="te-desc" value="${escapeHtml(e.description || '')}" /></div>
         </div>
         <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
           <button class="btn" data-close>Cancel</button>
@@ -3164,13 +3202,22 @@ function openTimeEntryModal(entry) {
       </div>
     </div>`;
   showModal(html);
+  const refreshTeTasks = () => {
+    const cid = document.getElementById('te-client').value;
+    const pj = findProject(cid, document.getElementById('te-project').value);
+    document.getElementById('te-tasklist').innerHTML = pj ? taskDatalist(pj.id) : '';
+  };
   document.getElementById('te-client').addEventListener('change', (ev) => {
     document.getElementById('te-projlist').innerHTML = projectDatalist(ev.target.value);
+    refreshTeTasks();
   });
+  document.getElementById('te-project').addEventListener('input', refreshTeTasks);
   document.getElementById('te-save').addEventListener('click', async () => {
     const clientId = document.getElementById('te-client').value;
     const pName = document.getElementById('te-project').value.trim();
     const proj = pName ? findOrCreateProject(clientId, pName) : null;
+    const tName = document.getElementById('te-task').value.trim();
+    const task = (proj && tName) ? findOrCreateTask(proj.id, tName) : null;
     const hours = Number(document.getElementById('te-hours').value) || 0;
     const date = document.getElementById('te-date').value || todayISO();
     const description = document.getElementById('te-desc').value.trim();
@@ -3178,7 +3225,7 @@ function openTimeEntryModal(entry) {
     if (hours <= 0) { toast('Hours must be greater than 0'); return; }
     const durationSec = Math.round(hours * 3600);
     const updated = {
-      id: e.id, clientId, projectId: proj ? proj.id : null, description,
+      id: e.id, clientId, projectId: proj ? proj.id : null, taskId: task ? task.id : null, description,
       start: date + 'T09:00:00.000Z', end: null, durationSec,
       rate: (entry && entry.rate) || resolveRate(clientId, proj ? proj.id : null),
       billable, invoiceId: (entry && entry.invoiceId) || null,
@@ -3223,7 +3270,7 @@ function renderTimer() {
       <tr>
         <td>${fmtDate((e.start || '').slice(0, 10))}</td>
         <td>${escapeHtml(clientName(e.clientId))}</td>
-        <td>${escapeHtml(e.projectId ? projectLabel(e.projectId) : '—')}</td>
+        <td>${escapeHtml(e.projectId ? projectLabel(e.projectId) : '—')}${e.taskId ? `<div class="text-sm text-muted">${escapeHtml(taskLabel(e.taskId))}</div>` : ''}</td>
         <td>${escapeHtml(e.description || '')}</td>
         <td class="amount">${fmtHours(e.durationSec)}</td>
         <td class="amount">${fmtMoney(Number(e.rate) || 0, ccy)}</td>
@@ -3306,12 +3353,13 @@ function exportTimeReport() {
   const entries = filteredTimeEntries();
   if (!entries.length) { toast('No entries to export'); return; }
   const esc = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  const lines = [['Date', 'Client', 'Project', 'Description', 'Hours', 'Rate', 'Value', 'Billable', 'Status', 'Invoice'].join(',')];
+  const lines = [['Date', 'Client', 'Project', 'Task', 'Description', 'Hours', 'Rate', 'Value', 'Billable', 'Status', 'Invoice'].join(',')];
   for (const e of entries) {
     const val = (e.durationSec / 3600) * (Number(e.rate) || 0);
     const inv = e.invoiceId ? (state.documents.find((d) => d.id === e.invoiceId)) : null;
     lines.push([
       (e.start || '').slice(0, 10), clientName(e.clientId), e.projectId ? projectLabel(e.projectId) : '',
+      e.taskId ? taskLabel(e.taskId) : '',
       e.description || '', fmtHours(e.durationSec), (Number(e.rate) || 0).toFixed(2), val.toFixed(2),
       e.billable !== false ? 'Yes' : 'No', e.invoiceId ? 'Billed' : 'Unbilled', inv ? docNumber(inv) : '',
     ].map(esc).join(','));
