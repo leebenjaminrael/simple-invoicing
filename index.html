@@ -615,6 +615,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     display: none; align-items: center; justify-content: center; z-index: 120;
   }
   #onboard-screen.show { display: flex; }
+  .lines textarea.line-desc { width: 100%; resize: vertical; min-height: 34px; line-height: 1.4; overflow: hidden; }
+  .preview .items td .desc { white-space: pre-wrap; }
 
   /* App layout */
   #app { display: none; height: 100vh; }
@@ -1475,7 +1477,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.8.1.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.9.0.0';        // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1684,14 +1686,21 @@ function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
   return c ? c.name : '—';
 }
-function calcLine(line) {
+// Subtotal of the normal (non-percentage) lines — the base a % line applies to.
+function lineBaseSubtotal(doc) {
+  return (doc.lines || []).reduce((s, l) => s + (l && l.type === 'percent' ? 0 : (Number(l.qty) || 0) * (Number(l.price) || 0)), 0);
+}
+function calcLine(line, doc) {
+  if (line && line.type === 'percent') {
+    return ((Number(line.percent) || 0) / 100) * (doc ? lineBaseSubtotal(doc) : 0);
+  }
   return (Number(line.qty) || 0) * (Number(line.price) || 0);
 }
 function calcTotals(doc) {
-  const subtotal = doc.lines.reduce((sum, l) => sum + calcLine(l), 0);
+  const subtotal = doc.lines.reduce((sum, l) => sum + calcLine(l, doc), 0);
   const rate = docHasVat(doc.currency) ? vatRate() / 100 : 0;
   let vat = 0;
-  if (rate > 0) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l) * rate : 0), 0);
+  if (rate > 0) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l, doc) * rate : 0), 0);
   const total = subtotal + vat;
   const depositPct = Number(doc.depositPct) || 0;
   const deposit = total * (depositPct / 100);
@@ -5337,16 +5346,27 @@ function renderDocEditor() {
   const d = editingDoc;
   const t = calcTotals(d);
   const isZAR = docHasVat(d.currency);
-  const linesHtml = d.lines.map((l, i) => `
+  const linesHtml = d.lines.map((l, i) => {
+    const descCell = `<td><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Description">${escapeHtml(l.desc || '')}</textarea></td>`;
+    const vatCell = isZAR ? `<td class="vat-cell"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
+    const amtCell = `<td class="amount-cell">${fmtMoney(calcLine(l, d), d.currency)}</td>`;
+    const delCell = `<td class="row-actions"><span class="row-del" data-line-del="${i}">×</span></td>`;
+    if (l.type === 'percent') {
+      return `
+    <tr data-line-idx="${i}" data-line-type="percent">
+      ${descCell}
+      <td colspan="2"><div style="display:flex;align-items:center;gap:6px;"><input data-lf="percent" class="num-input" type="number" step="any" value="${l.percent != null ? l.percent : 0}" style="width:72px;" /><span class="text-sm text-muted">% of subtotal</span></div></td>
+      ${vatCell}${amtCell}${delCell}
+    </tr>`;
+    }
+    return `
     <tr data-line-idx="${i}">
-      <td><input data-lf="desc" value="${escapeHtml(l.desc)}" placeholder="Description" /></td>
+      ${descCell}
       <td><input data-lf="qty" class="num-input" type="number" step="any" value="${l.qty}" /></td>
       <td><input data-lf="price" class="num-input" type="number" step="any" value="${l.price}" /></td>
-      ${isZAR ? `<td class="vat-cell"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : ''}
-      <td class="amount-cell">${fmtMoney(calcLine(l), d.currency)}</td>
-      <td class="row-actions"><span class="row-del" data-line-del="${i}">×</span></td>
-    </tr>
-  `).join('');
+      ${vatCell}${amtCell}${delCell}
+    </tr>`;
+  }).join('');
 
   const clientOpts = state.clients.map((c) => `<option value="${c.id}" ${c.id === d.clientId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
   const bankOpts = state.settings.banking.map((b) => `<option value="${b.id}" ${b.id === d.bankId ? 'selected' : ''}>${escapeHtml(b.label)}</option>`).join('');
@@ -5368,6 +5388,7 @@ function renderDocEditor() {
         <div class="sub">${docNumber(d)}</div>
       </div>
       <div class="page-actions">
+        <span id="ed-autosave" class="text-sm text-muted" style="align-self:center;min-width:54px;"></span>
         <button class="btn" id="ed-cancel">Cancel</button>
         <button class="btn" id="ed-preview">Preview</button>
         <button class="btn btn-primary" id="ed-save">Save</button>
@@ -5451,6 +5472,7 @@ function renderDocEditor() {
         </table>
         <div class="lines-foot">
           <button class="btn btn-sm" id="line-add">+ Add line</button>
+          <button class="btn btn-sm" id="line-add-pct">+ % / discount line</button>
           ${state.settings.savedLineItems && state.settings.savedLineItems.length === 0 ? '<span class="text-sm text-muted">Tip: save frequent line items in Settings.</span>' : ''}
         </div>
       </div>
@@ -5540,22 +5562,34 @@ function bindEditorEvents() {
       } else if (f === 'includeNotes') {
         // re-render not needed; just store
       }
+      scheduleAutoSave();
     });
   });
 
+  // Refresh every row's amount cell — % lines depend on the other lines' subtotal.
+  const refreshLineAmounts = () => {
+    host.querySelectorAll('[data-line-idx]').forEach((r) => {
+      const i = +r.dataset.lineIdx;
+      const cell = r.querySelector('.amount-cell');
+      if (cell) cell.textContent = fmtMoney(calcLine(editingDoc.lines[i], editingDoc), editingDoc.currency);
+    });
+  };
   host.querySelectorAll('[data-line-idx]').forEach((row) => {
     const idx = +row.dataset.lineIdx;
     row.querySelectorAll('[data-lf]').forEach((el) => {
       const f = el.dataset.lf;
       const evt = el.type === 'checkbox' ? 'change' : 'input';
       el.addEventListener(evt, () => {
-        const val = el.type === 'checkbox' ? el.checked : (f === 'qty' || f === 'price' ? Number(el.value) : el.value);
+        const val = el.type === 'checkbox' ? el.checked : ((f === 'qty' || f === 'price' || f === 'percent') ? Number(el.value) : el.value);
         editingDoc.lines[idx][f] = val;
-        // Update totals box and amount cell live without full re-render
-        row.querySelector('.amount-cell').textContent = fmtMoney(calcLine(editingDoc.lines[idx]), editingDoc.currency);
+        if (f === 'desc') autoGrow(el);
+        refreshLineAmounts();
         updateTotalsBox();
+        scheduleAutoSave();
       });
     });
+    const ta = row.querySelector('textarea.line-desc');
+    if (ta) autoGrow(ta);
     row.querySelector('[data-line-del]').addEventListener('click', () => {
       if (editingDoc.lines.length === 1) {
         editingDoc.lines = [{ id: uid('l-'), desc: '', qty: 1, price: 0, vat: true }];
@@ -5563,6 +5597,7 @@ function bindEditorEvents() {
         editingDoc.lines.splice(idx, 1);
       }
       renderDocEditor();
+      scheduleAutoSave();
     });
   });
 
@@ -5570,12 +5605,20 @@ function bindEditorEvents() {
   if (lineAdd) lineAdd.addEventListener('click', () => {
     editingDoc.lines.push({ id: uid('l-'), desc: '', qty: 1, price: 0, vat: true });
     renderDocEditor();
+    scheduleAutoSave();
+  });
+  const lineAddPct = host.querySelector('#line-add-pct');
+  if (lineAddPct) lineAddPct.addEventListener('click', () => {
+    editingDoc.lines.push({ id: uid('l-'), type: 'percent', desc: 'Admin fee', percent: 10, vat: true });
+    renderDocEditor();
+    scheduleAutoSave();
   });
 
   host.querySelectorAll('[data-deposit]').forEach((el) => {
     el.addEventListener('click', () => {
       editingDoc.depositPct = +el.dataset.deposit;
       renderDocEditor();
+      scheduleAutoSave();
     });
   });
 
@@ -5602,6 +5645,7 @@ function bindEditorEvents() {
   }
 
   host.querySelector('#ed-cancel').addEventListener('click', () => {
+    if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
     editingDoc = null;
     setRoute('documents');
   });
@@ -5628,7 +5672,49 @@ function updateTotalsBox() {
   `;
 }
 
+// Auto-grow a description textarea to fit its content.
+function autoGrow(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.max(34, ta.scrollHeight) + 'px';
+}
+
+// Debounced auto-save of the open document.
+let autoSaveTimer = null;
+function setAutoSaveStatus(s) {
+  const el = document.getElementById('ed-autosave');
+  if (el) el.textContent = s === 'saving' ? 'Saving…' : s === 'saved' ? 'Saved ✓' : '';
+}
+function scheduleAutoSave() {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  setAutoSaveStatus('saving');
+  autoSaveTimer = setTimeout(doAutoSave, 800);
+}
+async function doAutoSave() {
+  autoSaveTimer = null;
+  const d = editingDoc;
+  if (!d) return;
+  // Don't persist an empty new doc (would reserve a number + show a blank draft).
+  const hasContent = d.clientId || (d.lines || []).some((l) =>
+    (l.desc && l.desc.trim()) || Number(l.qty) || Number(l.price) || (l.type === 'percent' && Number(l.percent)));
+  if (!hasContent) { setAutoSaveStatus(''); return; }
+  if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, 7);
+  if (d.type === 'quote' && !d.expiry) d.expiry = addDays(d.date, 30);
+  const idx = state.documents.findIndex((x) => x.id === d.id);
+  if (idx >= 0) {
+    state.documents[idx] = { ...d };
+  } else {
+    state.documents.push({ ...d });
+    if (d.type === 'invoice') state.settings.nextInv = d.number + 1;
+    else state.settings.nextQt = d.number + 1;
+  }
+  delete editingDoc._isNew;
+  await saveState();
+  setAutoSaveStatus('saved');
+}
+
 async function saveDocFromEditor(redirect) {
+  if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
   const d = editingDoc;
   if (!d.clientId) { toast('Please select a client'); return; }
   if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, 7);
@@ -5665,15 +5751,17 @@ function openDocPreview(docId) {
   const isZAR = docHasVat(d.currency);
   const isInv = d.type === 'invoice';
   const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
-  const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price).map((l) => `
+  const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
+    const isPct = l.type === 'percent';
+    return `
     <tr>
-      <td>${escapeHtml(l.desc)}</td>
-      <td class="text-right">${l.qty}</td>
-      <td class="text-right">${fmtMoney(Number(l.price) || 0, d.currency)}</td>
+      <td><span class="desc">${escapeHtml(l.desc || '').replace(/\n/g, '<br>')}</span></td>
+      <td class="text-right">${isPct ? (Number(l.percent) || 0) + '%' : escapeHtml(String(l.qty))}</td>
+      <td class="text-right">${isPct ? '' : fmtMoney(Number(l.price) || 0, d.currency)}</td>
       ${isZAR ? `<td class="text-right">${l.vat ? vatRate() + '%' : '—'}</td>` : ''}
-      <td class="text-right">${fmtMoney(calcLine(l), d.currency)}</td>
-    </tr>
-  `).join('');
+      <td class="text-right">${fmtMoney(calcLine(l, d), d.currency)}</td>
+    </tr>`;
+  }).join('');
   const cols = isZAR ? 5 : 4;
 
   let logoHtml = '';
@@ -5694,6 +5782,7 @@ function openDocPreview(docId) {
             ${isInv && d.status !== 'paid' ? `<button class="btn btn-sm" id="prev-mark-paid">Mark paid</button>` : ''}
             ${!isInv && d.status !== 'converted' ? `<button class="btn btn-sm" id="prev-convert">Convert to invoice</button>` : ''}
             <button class="btn btn-sm" id="prev-email">Compose email</button>
+            <button class="btn btn-sm" id="prev-share">Share / email PDF</button>
             <button class="btn btn-sm btn-primary" id="prev-pdf">Download PDF</button>
             <button class="btn btn-sm btn-ghost danger" id="prev-delete">Delete</button>
             <span class="modal-close" data-close>×</span>
@@ -5806,6 +5895,7 @@ function openDocPreview(docId) {
     closeModal();
   });
   $('prev-email').addEventListener('click', () => composeEmail(d));
+  { const sb = $('prev-share'); if (sb) sb.addEventListener('click', () => shareDoc(d)); }
   $('prev-pdf').addEventListener('click', () => generatePdf(d));
   $('prev-delete').addEventListener('click', async () => {
     if (!confirm('Permanently delete ' + docNumber(d) + '?')) return;
@@ -5920,7 +6010,7 @@ async function rasterizeLogoForPdf(dataUrl, maxPx = 320) {
   });
 }
 
-async function generatePdf(d) {
+async function buildPdfDoc(d) {
   const { jsPDF } = window.jspdf;
   const t = calcTotals(d);
   const c = state.clients.find((x) => x.id === d.clientId) || { name: '—', addr: '', vat: '' };
@@ -5950,7 +6040,7 @@ async function generatePdf(d) {
       if (ratio > LOGO_MAX_W / LOGO_MAX_H) { lw = LOGO_MAX_W; lh = lw / ratio; }
       else { lh = LOGO_MAX_H; lw = lh * ratio; }
       doc.addImage(conv.dataUrl, 'JPEG', PAGE_W - M - lw, y, lw, lh);
-      logoBottom = y + lh + 6;
+      logoBottom = y + lh + 16;   // breathing room below logo to match the in-app preview
     } catch (e) {
       console.warn('Logo render error', e);
     }
@@ -6052,12 +6142,13 @@ async function generatePdf(d) {
   const head = isZAR
     ? [['Description', 'Qty', 'Unit price', 'VAT', 'Amount ' + d.currency]]
     : [['Description', 'Qty', 'Unit price', 'Amount ' + d.currency]];
-  const body = d.lines.filter((l) => l.desc || l.qty || l.price).map((l) => {
+  const body = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
+    const isPct = l.type === 'percent';
     const baseRow = [
       l.desc || '',
-      String(l.qty),
-      fmtMoney(Number(l.price) || 0, d.currency),
-      fmtMoney(calcLine(l), d.currency),
+      isPct ? (Number(l.percent) || 0) + '%' : String(l.qty),
+      isPct ? '' : fmtMoney(Number(l.price) || 0, d.currency),
+      fmtMoney(calcLine(l, d), d.currency),
     ];
     if (isZAR) baseRow.splice(3, 0, l.vat ? vatRate() + '%' : '—');
     return baseRow;
@@ -6145,8 +6236,36 @@ async function generatePdf(d) {
   doc.text(footerLines, PAGE_W / 2, footY, { align: 'center' });
 
   const filename = `${docNumber(d)}-${(c.name || 'Client').replace(/[^a-z0-9]+/gi, '-')}.pdf`;
+  return { doc, filename };
+}
+
+async function generatePdf(d) {
+  const { doc, filename } = await buildPdfDoc(d);
   doc.save(filename);
   toast('PDF downloaded');
+}
+
+// Share the PDF via the native share sheet (attaches the file on supported
+// devices, e.g. phones); falls back to download + open the email composer.
+async function shareDoc(d) {
+  let built;
+  try { built = await buildPdfDoc(d); } catch (e) { toast('Could not build PDF'); return; }
+  const file = new File([built.doc.output('blob')], built.filename, { type: 'application/pdf' });
+  const fromName = (state.settings.company && state.settings.company.name) || state.settings.brandName || '';
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({
+        title: `${docNumber(d)} from ${fromName}`,
+        text: `Please find attached ${d.type === 'invoice' ? 'invoice' : 'quote'} ${docNumber(d)}${d.projectTitle ? ' for ' + d.projectTitle : ''}.`,
+        files: [file],
+      });
+      return;
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  // Fallback (most desktops): download the PDF and open the email composer.
+  built.doc.save(built.filename);
+  toast('PDF downloaded — attach it to the email');
+  composeEmail(d);
 }
 
 function drawBlock(doc, M, PAGE_W, y, title, body) {
@@ -6169,7 +6288,8 @@ function composeEmail(d) {
   const c = state.clients.find((x) => x.id === d.clientId) || {};
   const t = calcTotals(d);
   const num = docNumber(d);
-  const subject = `${num} from Seed`;
+  const fromName = (state.settings.company && state.settings.company.name) || (state.settings && state.settings.brandName) || 'us';
+  const subject = `${num} from ${fromName}`;
   const dateLabel = d.type === 'invoice' ? `due ${fmtDate(d.dueDate)}` : `valid until ${fmtDate(d.expiry)}`;
   const co = (state.settings && state.settings.company) || {};
   const signOff = (co.attention || '').split(' ')[0] || '';
