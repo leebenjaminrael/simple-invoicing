@@ -635,6 +635,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   #onboard-screen.show { display: flex; }
   .lines textarea.line-desc { width: 100%; resize: vertical; min-height: 34px; line-height: 1.4; overflow: hidden; }
   .preview .items td .desc { white-space: pre-wrap; }
+  /* A11y: visible keyboard focus on every interactive element */
+  :focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; border-radius: 4px; }
+  [role="button"], .tab, .opt, .row-clickable, [data-route-link] { cursor: pointer; }
+  /* Mobile: 16px inputs stop iOS from auto-zooming on focus */
+  @media (max-width: 720px) {
+    input, textarea, select { font-size: 16px; }
+  }
+  /* Respect reduced-motion preference */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  }
 
   /* App layout */
   #app { display: none; height: 100vh; }
@@ -1506,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.10.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2296,7 +2307,32 @@ function render() {
   else if (currentRoute === 'settings') host.innerHTML = renderSettings();
   renderTimerWidget();
   bindViewEvents();
+  enhanceA11y(host);
 }
+
+// Make custom clickable elements keyboard-accessible + labelled, without
+// editing every template: add tabindex/role and aria-labels after each render.
+const A11Y_CLICKABLE = '.tab, .opt, .row-clickable, [data-route-link], [data-deposit], [data-basis], [data-vat-basis], [data-conv], [data-saved-line], [data-exp-cat]';
+function enhanceA11y(scope) {
+  scope = scope || document;
+  scope.querySelectorAll(A11Y_CLICKABLE).forEach((el) => {
+    if (el.tagName === 'BUTTON' || el.tagName === 'A') return;
+    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    if (!el.hasAttribute('role')) el.setAttribute('role', 'button');
+  });
+  // Icon-only buttons → accessible names
+  scope.querySelectorAll('[data-close], .modal-close').forEach((el) => {
+    if (!el.getAttribute('aria-label') && el.textContent.trim().length <= 2) el.setAttribute('aria-label', 'Close');
+  });
+  scope.querySelectorAll('.row-del').forEach((el) => { if (!el.getAttribute('aria-label')) el.setAttribute('aria-label', 'Remove line'); });
+}
+// Activate keyboard-focusable custom controls with Enter / Space.
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches(A11Y_CLICKABLE)) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
 
 /* ============================================================
    DASHBOARD
@@ -3148,7 +3184,7 @@ function renderTimerWidget() {
           <div class="tw-sub">${escapeHtml(cli)}</div>
           <div class="tw-time" id="tw-time">${fmtDuration(elapsed)}</div>
         </div>
-        <button class="tw-btn tw-stop" id="tw-stop" title="Stop timer">&#9632;</button>
+        <button class="tw-btn tw-stop" id="tw-stop" title="Stop timer" aria-label="Stop timer">&#9632;</button>
       </div>`;
     document.getElementById('tw-stop').onclick = () => stopTimer();
     startTimerTick();
@@ -6931,12 +6967,14 @@ function openChangePasswordModal() {
    ============================================================ */
 
 function showModal(html) {
-  document.getElementById('modal-host').innerHTML = html;
+  const mh = document.getElementById('modal-host');
+  mh.innerHTML = html;
   document.querySelectorAll('[data-close]').forEach((el) => el.addEventListener('click', closeModal));
   document.getElementById('modal-overlay').addEventListener('click', (e) => {
     if (e.target.id === 'modal-overlay') closeModal();
   });
   document.addEventListener('keydown', escClose);
+  enhanceA11y(mh);
 }
 function closeModal() {
   document.getElementById('modal-host').innerHTML = '';
