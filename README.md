@@ -48,9 +48,10 @@ Running more than one business? **Settings → Businesses → + Add business.** 
 - **Dashboard** — this month's income, **profit year-to-date**, outstanding, and recent activity at a glance.
 - **Finances** — monthly revenue chart with goals, a **Profit & Loss statement** (gross and net profit, ex-VAT, with a net-profit-by-month trend), pipeline, ageing, top clients, VAT summary, and an accountant report export. Cash or accrual basis.
 - **Documents** — invoices and quotes: create, send, mark paid, convert quote → invoice, export PDF, compose email.
-- **Clients** — your client list with outstanding balances.
+- **Clients** — your client list with outstanding balances and a default hourly rate.
+- **Timer** — track time against a client + project with a floating start/stop timer that's on every screen and survives reloads. Filter by client, project, date range and billed status; export a CSV report; and bill unbilled time straight onto a new or existing invoice (one line per project).
 - **Expenses** — categorised, multi-currency expense tracking.
-- **Reconcile** — drop a bank or Wise **CSV** statement; it auto-matches payments to invoices, flags fees and transfers, and suggests expenses. Unknown bank format? A one-time column-mapping wizard remembers it for next time.
+- **Reconcile** — drop a bank statement as **CSV or PDF**; it auto-matches payments to invoices, flags fees and transfers, and suggests expenses. Unknown layout? A one-time column-mapping wizard remembers it for next time. (PDF works for digital/text statements; scanned or photographed statements aren't supported — use CSV.)
 
 ---
 
@@ -63,7 +64,8 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 ## Your data & privacy
 
 - Stored **only in your browser**, on your device, encrypted with **AES-GCM** (key derived from your password via PBKDF2).
-- **Never uploaded.** There is no backend. The only network calls are fetching exchange rates and loading the app itself — never your financial data.
+- **Your financial data is never uploaded.** There is no backend for it. The only network calls are fetching exchange rates, checking for app updates, and loading the app itself.
+- **One exception — sign-up:** the first time you open the app you're asked for your **name and email**, which are sent once to keep you posted on updates. That's the *only* personal data that leaves your device; your invoices, clients, expenses and everything financial stay encrypted locally.
 - Data is **per device and per browser.** Your Mac and your phone keep separate copies (see Backups to move data between them).
 
 ---
