@@ -1517,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.10.4.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -5487,6 +5487,7 @@ function renderDocEditor() {
         <span id="ed-autosave" class="text-sm text-muted" style="align-self:center;min-width:54px;"></span>
         <button class="btn" id="ed-cancel">Cancel</button>
         <button class="btn" id="ed-preview">Preview</button>
+        <button class="btn" id="ed-download">Download PDF</button>
         <button class="btn btn-primary" id="ed-save">Save</button>
       </div>
     </div>
@@ -5756,6 +5757,11 @@ function bindEditorEvents() {
   host.querySelector('#ed-preview').addEventListener('click', () => {
     saveDocFromEditor(false);
     openDocPreview(editingDoc.id);
+  });
+  host.querySelector('#ed-download').addEventListener('click', async () => {
+    if (!editingDoc.clientId) { toast('Please select a client first'); return; }
+    await saveDocFromEditor(false);   // persist the current draft (no redirect)
+    await generatePdf(editingDoc);    // download the PDF straight from the editor
   });
   host.querySelector('#ed-save').addEventListener('click', () => {
     saveDocFromEditor(true);
