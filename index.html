@@ -1517,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.4.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.10.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8587,7 +8587,7 @@ function hideBackupBanner() { const b = document.getElementById('backup-banner')
 // Formspree endpoint (AJAX/JSON). Leave blank to collect locally and auto-send
 // on the next load once configured.
 const ONBOARDING_ENDPOINT = 'https://formspree.io/f/mqeowqga';
-const ONBOARD_KEY = 'seed-onboarding-v1';
+const ONBOARD_KEY = 'seed-onboarding-v2'; // bump to re-ask everyone (incl. already-cleared users) once
 
 function getOnboarding() {
   try { return JSON.parse(localStorage.getItem(ONBOARD_KEY) || 'null'); } catch (e) { return null; }
@@ -8620,9 +8620,18 @@ async function retryPendingOnboarding() {
 
 function showOnboarding() {
   const screen = document.getElementById('onboard-screen');
+  // Hardening: fully remove the lock screen so its password form can't be used
+  // to slip past the (required) onboarding gate.
+  const lock = document.getElementById('lock-screen');
+  if (lock) lock.style.display = 'none';
   screen.classList.add('show');
   const brandEl = document.getElementById('lock-brand');
   document.getElementById('onboard-brand').textContent = (brandEl && brandEl.textContent) || 'seed';
+  // Pre-fill from any prior record (current or legacy v1) so returning users just click.
+  let prior = getOnboarding();
+  if (!prior || !prior.email) { try { prior = JSON.parse(localStorage.getItem('seed-onboarding-v1') || 'null'); } catch (e) {} }
+  if (prior && prior.name) document.getElementById('ob-name').value = prior.name;
+  if (prior && prior.email) document.getElementById('ob-email').value = prior.email;
   const err = document.getElementById('ob-err');
   setTimeout(() => document.getElementById('ob-name').focus(), 50);
   document.getElementById('onboard-form').onsubmit = async (e) => {
@@ -8638,7 +8647,8 @@ function showOnboarding() {
     const ok = await sendOnboarding({ name, email, appVersion: APP_VERSION, date: at });
     setOnboarding({ submitted: true, name, email, at, pending: !ok });
     screen.classList.remove('show');
-    showLockForm(!!localStorage.getItem(STORAGE_KEY)); // proceed to set-password / unlock
+    if (lock) lock.style.display = 'flex';                // reveal the lock screen now
+    showLockForm(!!localStorage.getItem(STORAGE_KEY));    // proceed to set-password / unlock
   };
 }
 
