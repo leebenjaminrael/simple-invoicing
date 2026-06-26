@@ -1502,6 +1502,7 @@ const SEED_DATA = {
       tasks: [],
       timeEntries: [],
       runningTimer: null,
+      payeeRules: {},
       defaultHourlyRate: 0,
       fxRates: {},
       fxFetchedAt: null,
@@ -1517,7 +1518,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.11.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1630,7 +1631,7 @@ function installEntityAccessors() {
       set(v) { const e = activeEntity(); if (e) e[key] = v; },
     });
   };
-  ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer'].forEach((k) => defineProxy(state, k));
+  ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer', 'payeeRules'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
   ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
 }
@@ -1911,6 +1912,7 @@ function migrateState() {
     // v6.5: time tracking — projects, tasks, time entries, running timer, default rate.
     if (!ent.projects) ent.projects = [];
     if (!ent.tasks) ent.tasks = [];
+    if (!ent.payeeRules) ent.payeeRules = {};
     if (!ent.timeEntries) ent.timeEntries = [];
     if (ent.runningTimer === undefined) ent.runningTimer = null;
     if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
@@ -3885,6 +3887,17 @@ function renderReconcile() {
       </div>
     </div>
 
+    <div id="rec-bulk-bar" style="display:none;position:sticky;top:8px;z-index:20;align-items:center;gap:10px;flex-wrap:wrap;background:#0F0E0D;border:1px solid var(--accent-bright);border-radius:12px;padding:11px 14px;margin-bottom:16px;color:#F5F2EC;box-shadow:0 6px 24px rgba(0,0,0,0.3);">
+      <span id="rec-sel-count" style="font-weight:600;white-space:nowrap;"></span>
+      <span style="opacity:0.4;">·</span>
+      <select id="rec-bulk-cat" style="max-width:180px;">${(state.settings.expenseCategories || []).map((c) => `<option>${escapeHtml(c)}</option>`).join('')}</select>
+      <button class="btn btn-sm" id="rec-bulk-cat-apply">Set category</button>
+      <button class="btn btn-sm" id="rec-bulk-vat-on">VAT on</button>
+      <button class="btn btn-sm" id="rec-bulk-vat-off">VAT off</button>
+      <button class="btn btn-sm" id="rec-bulk-skip">Skip</button>
+      <button class="btn btn-sm btn-ghost" id="rec-bulk-clear" style="margin-left:auto;color:#F5F2EC;">Clear</button>
+    </div>
+
     ${renderRecGroup('Invoices to mark paid', groups['invoice-paid'], 'invoice-paid')}
     ${renderRecGroup('Expenses (review categories)', groups.expense, 'expense')}
     ${renderRecGroup('FX & bank fees', groups['fx-fee'], 'fx-fee')}
@@ -3909,9 +3922,10 @@ function renderRecGroup(title, matches, kind) {
     <div class="card" style="margin-bottom:18px;">
       <div class="section-head" style="margin-top:0;"><h2>${title}</h2><span class="text-sm text-mid">${matches.length} item${matches.length === 1 ? '' : 's'}</span></div>
       <div class="doc-list" style="border:0;overflow-x:auto;">
-        <table style="min-width:820px;">
+        <table style="min-width:860px;">
           <thead>
             <tr>
+              <th style="width:34px;">${kind === 'imported' ? '' : '<input type="checkbox" data-rec-selall title="Select all in this group" />'}</th>
               <th style="width:90px;">Date</th>
               <th>Description</th>
               <th class="amount" style="width:120px;">Amount</th>
@@ -3925,6 +3939,7 @@ function renderRecGroup(title, matches, kind) {
               if (kind === 'imported') {
                 return `
                   <tr>
+                    <td></td>
                     <td>${fmtDate(tx.date)}</td>
                     <td><div style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description || '')}">${escapeHtml(tx.description || '')}</div>${tx.reference ? `<div class="text-sm text-mid">Ref: ${escapeHtml(tx.reference)}</div>` : ''}</td>
                     <td class="amount">${sign}${fmtMoney(Math.abs(tx.amount), tx.currency)}</td>
@@ -3955,7 +3970,9 @@ function renderRecGroup(title, matches, kind) {
                 }).join('');
                 subControl = `<select data-rec-doc="${m.id}" style="max-width:240px;">${docOpts || '<option>No invoices</option>'}</select>`;
               } else if (m.action === 'expense' || m.action === 'fx-fee') {
-                subControl = `<select data-rec-cat="${m.id}" style="max-width:200px;">${cats.map((c) => `<option ${c === m.category ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>`;
+                const canVat = m.action === 'expense' && m.tx.currency === baseCcy() && vatRate() > 0;
+                const vatCtl = canVat ? `<label class="checkbox" style="white-space:nowrap;" title="Claim input VAT"><input type="checkbox" data-rec-vat="${m.id}" ${m.vat ? 'checked' : ''} /><span class="text-sm">VAT</span></label>` : '';
+                subControl = `<select data-rec-cat="${m.id}" style="max-width:190px;">${cats.map((c) => `<option ${c === m.category ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>${vatCtl}<button class="btn btn-sm btn-ghost" data-rec-like="${m.id}" title="Select all similar transactions">like</button>`;
               } else if (m.action === 'internal-transfer') {
                 subControl = `<span class="text-mid text-sm">Logged, no effect</span>`;
               } else if (m.action === 'skip') {
@@ -3963,12 +3980,14 @@ function renderRecGroup(title, matches, kind) {
               } else {
                 subControl = '';
               }
+              const rememberedTag = m.status === 'remembered' ? ` <span class="text-sm" style="color:var(--accent-bright);" title="Auto-filled from a previous choice">• remembered</span>` : '';
               return `
                 <tr>
+                  <td><input type="checkbox" data-rec-sel="${m.id}" ${m._sel ? 'checked' : ''} /></td>
                   <td>${fmtDate(tx.date)}</td>
-                  <td><div style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description || '')}">${escapeHtml(tx.description || '')}</div>${tx.reference ? `<div class="text-sm text-mid">Ref: ${escapeHtml(tx.reference)}</div>` : ''}</td>
+                  <td><div style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description || '')}">${escapeHtml(tx.description || '')}</div>${tx.reference ? `<div class="text-sm text-mid">Ref: ${escapeHtml(tx.reference)}${rememberedTag}</div>` : (rememberedTag ? `<div class="text-sm">${rememberedTag}</div>` : '')}</td>
                   <td class="amount" style="color:${tx.amount >= 0 ? 'var(--accent)' : 'var(--dark)'};">${sign}${fmtMoney(Math.abs(tx.amount), tx.currency)}</td>
-                  <td><div style="display:flex;gap:6px;align-items:flex-start;">${actionSelect}${subControl}</div></td>
+                  <td><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${actionSelect}${subControl}</div></td>
                 </tr>
               `;
             }).join('')}
@@ -4965,7 +4984,45 @@ function buildMatches(parsedStatement) {
     // amount === 0 — skip
     matches.push({ id: newMatch(), tx, status: 'auto', action: 'skip' });
   }
+  // Apply learned rules (category + VAT) to expense suggestions, and default VAT off.
+  for (const m of matches) {
+    if (m.action !== 'expense') continue;
+    const canVat = m.currency === baseCcy() && vatRate() > 0;
+    const rule = payeeRuleFor(m.tx.description);
+    if (rule) {
+      if (rule.category) m.category = rule.category;
+      m.vat = canVat ? !!rule.vat : false;
+      m.status = 'remembered';
+    } else {
+      m.vat = false;
+    }
+  }
   return matches;
+}
+
+// A normalised "merchant signature" used both to group identical transactions
+// and to remember how a payee was categorised. Strips bank prefixes, card masks,
+// numbers, dates and locations down to the core merchant words.
+function payeeKey(desc) {
+  let s = (desc || '').toLowerCase();
+  s = s.replace(/^(pos purchase|card payment|debit card|debit order|sent money to|magtape debit|magtape credit|online|payshap[^a-z]*|fnb app[^a-z]*|internet (pmt|trf)( to| from)?|byc debit|rtc[^a-z]*|eft)\s+/i, '');
+  s = s.replace(/yoco\s*\*?\s*/i, '');                 // Yoco is a processor — keep the actual merchant
+  s = s.replace(/\*+\d+/g, ' ');                       // card masks ***0069
+  s = s.replace(/\b\d[\d,./:-]*\b/g, ' ');             // numbers, dates, refs
+  s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' '); // month names
+  s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
+  s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.split(' ').filter(Boolean).slice(0, 3).join(' ');
+}
+function payeeRuleFor(desc) {
+  const key = payeeKey(desc);
+  return key && state.payeeRules ? state.payeeRules[key] : null;
+}
+function learnPayeeRule(desc, category, vat) {
+  const key = payeeKey(desc);
+  if (!key) return;
+  state.payeeRules = state.payeeRules || {};
+  state.payeeRules[key] = { category, vat: !!vat };
 }
 
 function guessCategoryFromDesc(desc) {
@@ -5029,18 +5086,25 @@ async function applyReconcile() {
         }
       }
     } else if (m.action === 'expense' || m.action === 'fx-fee') {
+      const amount = Math.abs(m.tx.amount);
+      const category = m.category || (m.action === 'fx-fee' ? 'FX fees' : 'Other');
+      const vat = !!m.vat && m.tx.currency === baseCcy() && vatRate() > 0;
       state.expenses.push({
         id: 'e-' + Math.random().toString(36).slice(2, 10),
         date: m.tx.date,
         desc: m.descGuess || m.tx.description || 'Imported',
-        category: m.category || (m.action === 'fx-fee' ? 'FX fees' : 'Other'),
-        amount: Math.abs(m.tx.amount),
+        category,
+        amount,
         currency: m.tx.currency,
-        vat: false,
+        vat,
+        vatAmount: vat ? Math.round(calcInputVat(amount, m.tx.currency, vatRate()) * 100) / 100 : 0,
+        directCost: category === 'Subcontractor',
         paymentSource: s.account || 'usd',
         notes: m.tx.reference ? `Ref: ${m.tx.reference}` : '',
         sourceTxId: m.tx.id,
       });
+      // Remember this payee's categorisation for next time (expense rows only).
+      if (m.action === 'expense') learnPayeeRule(m.tx.description, category, vat);
       expensesCreated++;
     } else if (m.action === 'internal-transfer') {
       transfersLogged++;
@@ -7245,6 +7309,55 @@ function bindReconcileEvents() {
     const m = reconcileSession.matches.find((x) => x.id === b.dataset.recSkip);
     if (m) { m.action = 'skip'; render(); }
   }));
+
+  // --- Selection + bulk actions ---
+  const recMatch = (id) => reconcileSession.matches.find((x) => x.id === id);
+  const selectedMatches = () => reconcileSession.matches.filter((m) => m._sel && m.status !== 'imported');
+  function updateRecBulkBar() {
+    const bar = document.getElementById('rec-bulk-bar');
+    if (!bar) return;
+    const n = selectedMatches().length;
+    bar.style.display = n ? 'flex' : 'none';
+    const cnt = document.getElementById('rec-sel-count');
+    if (cnt) cnt.textContent = `${n} selected`;
+  }
+  document.querySelectorAll('[data-rec-sel]').forEach((cb) => cb.addEventListener('change', () => {
+    const m = recMatch(cb.dataset.recSel); if (m) m._sel = cb.checked; updateRecBulkBar();
+  }));
+  document.querySelectorAll('[data-rec-selall]').forEach((cb) => cb.addEventListener('change', () => {
+    cb.closest('table').querySelectorAll('[data-rec-sel]').forEach((row) => {
+      row.checked = cb.checked; const m = recMatch(row.dataset.recSel); if (m) m._sel = cb.checked;
+    });
+    updateRecBulkBar();
+  }));
+  document.querySelectorAll('[data-rec-vat]').forEach((cb) => cb.addEventListener('change', () => {
+    const m = recMatch(cb.dataset.recVat); if (m) m.vat = cb.checked;
+  }));
+  document.querySelectorAll('[data-rec-like]').forEach((b) => b.addEventListener('click', () => {
+    const m = recMatch(b.dataset.recLike); if (!m) return;
+    const key = payeeKey(m.tx.description); let count = 0;
+    for (const x of reconcileSession.matches) {
+      if (x.status !== 'imported' && x.action !== 'unmatched' && payeeKey(x.tx.description) === key) { x._sel = true; count++; }
+    }
+    render();
+    toast(`Selected ${count} similar`);
+  }));
+  // Bulk bar
+  const onClick = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  onClick('rec-bulk-cat-apply', () => {
+    const cat = document.getElementById('rec-bulk-cat').value;
+    selectedMatches().forEach((m) => { if (m.action === 'expense' || m.action === 'fx-fee') m.category = cat; });
+    render();
+  });
+  const setBulkVat = (on) => {
+    selectedMatches().forEach((m) => { if (m.action === 'expense' && m.tx.currency === baseCcy() && vatRate() > 0) m.vat = on; });
+    render();
+  };
+  onClick('rec-bulk-vat-on', () => setBulkVat(true));
+  onClick('rec-bulk-vat-off', () => setBulkVat(false));
+  onClick('rec-bulk-skip', () => { selectedMatches().forEach((m) => { m.action = 'skip'; }); render(); });
+  onClick('rec-bulk-clear', () => { reconcileSession.matches.forEach((m) => { m._sel = false; }); render(); });
+  updateRecBulkBar();
 }
 
 async function handleStatementFile(file) {
