@@ -1517,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.10.5.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1725,7 +1725,8 @@ function inputVatOf(e) {
 function fmtMoney(n, currency) {
   const num = Number(n) || 0;
   const sym = SYM[currency] || currency + ' ';
-  return sym + num.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // 1,234.56 — comma thousands, point before cents
+  return sym + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function docNumber(d) {
   const padded = String(d.number).padStart(4, '0');
@@ -2222,7 +2223,7 @@ function svgBarChart(labels, values, opts = {}) {
     const reachedGoal = goalForMonth && v >= goalForMonth;
     const fill = reachedGoal ? '#C7F659' : 'rgba(245,242,236,0.62)';
     return `<g>
-      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3"><title>${labels[i]}: R${Math.round(v).toLocaleString('en-ZA')}</title></rect>
+      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3"><title>${labels[i]}: R${Math.round(v).toLocaleString('en-US')}</title></rect>
       <text x="${x + barW / 2}" y="${H - PAD_B + 14}" font-size="10" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Sans, sans-serif">${labels[i]}</text>
       ${v > 0 ? `<text x="${x + barW / 2}" y="${y - 4}" font-size="9" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Mono, monospace">${formatChartTick(v)}</text>` : ''}
     </g>`;
