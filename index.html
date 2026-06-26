@@ -1517,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.10.5.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.10.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1706,9 +1706,18 @@ const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'KES'];
 function baseCcy() { return (state && state.settings && state.settings.baseCurrency) || 'ZAR'; }
 // This business's VAT rate as a percentage number (e.g. 15). 0 = not VAT registered.
 function vatRate() { const v = state && state.settings ? Number(state.settings.vatPercent) : NaN; return isNaN(v) ? 15 : v; }
-// VAT applies to documents in the business's base currency, when a rate is set
-// (foreign-currency sales are treated as zero-rated / exports).
-function docHasVat(currency) { return currency === baseCcy() && vatRate() > 0; }
+// Does VAT apply to a document? Accepts a doc object (preferred) or a currency
+// string (legacy). The business must be VAT-registered (rate > 0). A document
+// can override the default with `chargeVat` (e.g. a USD invoice to a client's SA
+// office); otherwise it auto-applies to base-currency documents only.
+function docHasVat(d) {
+  if (vatRate() <= 0) return false;
+  if (d && typeof d === 'object') {
+    if (typeof d.chargeVat === 'boolean') return d.chargeVat;
+    return (d.currency || '') === baseCcy();
+  }
+  return d === baseCcy();
+}
 // Input VAT claimable on an expense. VAT-inclusive amount → VAT = amount × rate/(100+rate).
 // Uses the amount stored at entry time (locked) when present; falls back to a live
 // calc at the current rate for older records that predate the stored field.
@@ -1748,7 +1757,7 @@ function calcLine(line, doc) {
 }
 function calcTotals(doc) {
   const subtotal = doc.lines.reduce((sum, l) => sum + calcLine(l, doc), 0);
-  const rate = docHasVat(doc.currency) ? vatRate() / 100 : 0;
+  const rate = docHasVat(doc) ? vatRate() / 100 : 0;
   let vat = 0;
   if (rate > 0) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l, doc) * rate : 0), 0);
   const total = subtotal + vat;
@@ -2154,7 +2163,7 @@ function vatForPeriod(pStart, pEnd, basis) {
   let input = 0;
   for (const d of state.documents) {
     if (d.type !== 'invoice') continue;
-    if (!docHasVat(d.currency)) continue;
+    if (!docHasVat(d)) continue;
     const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
     if (!rd) continue;
     if (rd < pStart || rd > pEnd) continue;
@@ -2918,7 +2927,7 @@ function vatPeriodDetail(pStart, pEnd, basis) {
   const invoices = [];
   let output = 0;
   for (const d of state.documents) {
-    if (d.type !== 'invoice' || !docHasVat(d.currency)) continue;
+    if (d.type !== 'invoice' || !docHasVat(d)) continue;
     const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
@@ -5090,7 +5099,7 @@ function exportAccountantReport() {
     const t = calcTotals(d);
     const zar = toBase(t.total, d.currency);
     if (zar != null) incZAR += zar;
-    incVAT += docHasVat(d.currency) ? t.vat : 0;
+    incVAT += docHasVat(d) ? t.vat : 0;
     row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.subtotal.toFixed(2), t.vat.toFixed(2), t.total.toFixed(2), zar == null ? '' : zar.toFixed(2));
   }
   row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', '', '', '', incZAR.toFixed(2));
@@ -5442,7 +5451,7 @@ function openDocEditor(docId, defaultType) {
 function renderDocEditor() {
   const d = editingDoc;
   const t = calcTotals(d);
-  const isZAR = docHasVat(d.currency);
+  const isZAR = docHasVat(d);
   const linesHtml = d.lines.map((l, i) => {
     const descCell = `<td><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Description">${escapeHtml(l.desc || '')}</textarea></td>`;
     const vatCell = isZAR ? `<td class="vat-cell"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
@@ -5532,6 +5541,15 @@ function renderDocEditor() {
             ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === d.currency ? 'selected' : ''}>${c}</option>`).join('')}
           </select>
         </div>
+        ${vatRate() > 0 ? `
+        <div class="field">
+          <label>VAT</label>
+          <label class="checkbox" style="margin-top:8px;">
+            <input type="checkbox" id="ed-vat-toggle" ${docHasVat(d) ? 'checked' : ''} />
+            <span>Charge VAT (${vatRate()}%)</span>
+          </label>
+          ${d.currency !== baseCcy() && docHasVat(d) ? `<div class="text-sm text-muted" style="margin-top:4px;">Charging ${vatRate()}% VAT on a ${d.currency} document (e.g. a client with a local ${baseCcy()} obligation).</div>` : ''}
+        </div>` : ''}
         <div class="field">
           <label>Banking account</label>
           <select data-df="bankId">${bankOpts}</select>
@@ -5672,6 +5690,13 @@ function bindEditorEvents() {
     });
   });
 
+  const vatToggle = host.querySelector('#ed-vat-toggle');
+  if (vatToggle) vatToggle.addEventListener('change', () => {
+    editingDoc.chargeVat = vatToggle.checked;   // explicit per-document override
+    renderDocEditor();                          // re-render to show/hide VAT column + update totals
+    scheduleAutoSave();
+  });
+
   // Refresh every row's amount cell — % lines depend on the other lines' subtotal.
   const refreshLineAmounts = () => {
     host.querySelectorAll('[data-line-idx]').forEach((r) => {
@@ -5771,7 +5796,7 @@ function bindEditorEvents() {
 
 function updateTotalsBox() {
   const t = calcTotals(editingDoc);
-  const isZAR = docHasVat(editingDoc.currency);
+  const isZAR = docHasVat(editingDoc);
   const box = document.querySelector('.totals-box');
   if (!box) return;
   box.innerHTML = `
@@ -5859,7 +5884,7 @@ function openDocPreview(docId) {
   const c = state.clients.find((x) => x.id === d.clientId) || { name: '—', addr: '', vat: '' };
   const bank = state.settings.banking.find((b) => b.id === d.bankId) || { details: '' };
   const co = state.settings.company || COMPANY_DEFAULT;
-  const isZAR = docHasVat(d.currency);
+  const isZAR = docHasVat(d);
   const isInv = d.type === 'invoice';
   const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
   const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
@@ -6127,7 +6152,7 @@ async function buildPdfDoc(d) {
   const c = state.clients.find((x) => x.id === d.clientId) || { name: '—', addr: '', vat: '' };
   const bank = state.settings.banking.find((b) => b.id === d.bankId) || { details: '' };
   const co = state.settings.company || COMPANY_DEFAULT;
-  const isZAR = docHasVat(d.currency);
+  const isZAR = docHasVat(d);
   const isInv = d.type === 'invoice';
   const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
 
