@@ -1310,30 +1310,30 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   /* Floating timer widget — present on all screens (only when unlocked) */
   #timer-widget { position: fixed; right: 20px; bottom: 20px; z-index: 900; display: none; }
   #app.unlocked ~ #timer-widget { display: block; }
-  #timer-widget .tw-card {
-    display: flex; align-items: center; gap: 14px;
+  /* Collapsed to a clock icon; expands left (on hover, or tap on touch) to reveal controls */
+  #timer-widget .tw {
+    display: inline-flex; align-items: center; justify-content: flex-end;
     background: #0F0E0D; color: #F5F2EC;
-    border: 1px solid rgba(245,242,236,0.14); border-radius: 14px;
-    padding: 12px 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-    min-width: 220px; max-width: 340px;
+    border: 1px solid rgba(245,242,236,0.14); border-radius: 999px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.35); cursor: pointer;
+    transition: border-color 200ms ease;
   }
-  #timer-widget.is-running .tw-card { border-color: var(--accent-bright); }
-  #timer-widget .tw-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-  #timer-widget .tw-proj { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #timer-widget .tw-sub { font-size: 11px; color: rgba(245,242,236,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 20px; letter-spacing: -0.01em; color: var(--accent-bright); font-variant-numeric: tabular-nums; }
-  #timer-widget .tw-btn {
-    border: none; cursor: pointer; border-radius: 9px; width: 38px; height: 38px;
-    display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0;
+  #timer-widget .tw-icon { width: 52px; height: 52px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #timer-widget .tw-icon svg { width: 23px; height: 23px; display: block; }
+  #timer-widget.is-idle .tw { background: var(--accent-bright); border-color: var(--accent-bright); color: #0F0E0D; }
+  #timer-widget.is-running .tw { border-color: var(--accent-bright); }
+  #timer-widget.is-running .tw-icon { color: var(--accent-bright); }
+  #timer-widget .tw-reveal {
+    display: flex; align-items: center; gap: 10px;
+    max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap;
+    transition: max-width 280ms ease, opacity 180ms ease, padding 280ms ease;
   }
-  #timer-widget .tw-stop { background: var(--accent-bright); color: #0F0E0D; }
-  #timer-widget .tw-start { background: var(--accent-bright); color: #0F0E0D; width: auto; padding: 0 16px; gap: 8px; font-weight: 600; font-size: 13px; }
-  #timer-widget .tw-mini { background: rgba(245,242,236,0.10); color: #F5F2EC; }
-  @media (max-width: 720px) {
-    #timer-widget { right: 12px; bottom: 12px; }
-    #timer-widget .tw-card { min-width: 0; }
-    #timer-widget .tw-sub { display: none; }
-  }
+  #timer-widget .tw:hover .tw-reveal, #timer-widget.tw-open .tw-reveal { max-width: 320px; opacity: 1; padding-left: 16px; }
+  #timer-widget .tw-start-label { font-weight: 600; font-size: 13px; white-space: nowrap; }
+  #timer-widget .tw-proj { font-size: 13px; font-weight: 600; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 18px; color: var(--accent-bright); font-variant-numeric: tabular-nums; padding-right: 4px; }
+  #timer-widget .tw-stop { border: none; cursor: pointer; width: 34px; height: 34px; border-radius: 999px; background: var(--accent-bright); color: #0F0E0D; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  @media (max-width: 720px) { #timer-widget { right: 12px; bottom: 12px; } }
 </style>
 </head>
 <body>
@@ -1517,7 +1517,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.11.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.11.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3204,28 +3204,36 @@ function renderTimerWidget() {
   const el = document.getElementById('timer-widget');
   if (!el) return;
   if (!state) { el.innerHTML = ''; el.className = ''; stopTimerTick(); return; }
+  const clockSvg = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.516,6.998l0.83,0.83l0.83-0.83l-2.491-2.491l-0.83,0.83l0.83,0.83l-1.268,1.268c-1.411-1.236-3.216-2.025-5.202-2.157V4.662h0.587c0.648,0,1.174-0.527,1.174-1.174V2.314c0-0.648-0.527-1.174-1.174-1.174h-2.348c-0.648,0-1.174,0.527-1.174,1.174v1.174c0,0.648,0.527,1.174,1.174,1.174h0.587v0.617c-4.581,0.304-8.218,4.119-8.218,8.776c0,4.856,3.95,8.805,8.805,8.805s8.805-3.95,8.805-8.805c0-2.217-0.83-4.239-2.187-5.789L19.516,6.998z M10.455,3.488l-0.001-1.174h0.001h2.348v1.174H10.455z M19.261,14.055c0,4.208-3.423,7.631-7.631,7.631s-7.631-3.424-7.631-7.631c0-4.208,3.423-7.631,7.631-7.631S19.261,9.847,19.261,14.055z"/><path d="M12.216,13.043V8.771h-1.174v4.272c-0.349,0.203-0.587,0.578-0.587,1.011c0,0.648,0.526,1.174,1.174,1.174s1.174-0.526,1.174-1.174C12.803,13.621,12.566,13.247,12.216,13.043z"/></svg>';
   const t = state.runningTimer;
   if (t) {
     const elapsed = (Date.now() - new Date(t.startedAt).getTime()) / 1000;
     const projOnly = t.projectId ? projectLabel(t.projectId) : (t.description || 'Timer');
     const proj = t.taskId ? `${projOnly} · ${taskLabel(t.taskId)}` : projOnly;
-    const cli = t.clientId ? clientName(t.clientId) : (t.description || '');
     el.className = 'is-running';
     el.innerHTML = `
-      <div class="tw-card">
-        <div class="tw-main">
-          <div class="tw-proj">${escapeHtml(proj)}</div>
-          <div class="tw-sub">${escapeHtml(cli)}</div>
-          <div class="tw-time" id="tw-time">${fmtDuration(elapsed)}</div>
-        </div>
-        <button class="tw-btn tw-stop" id="tw-stop" title="Stop timer" aria-label="Stop timer">&#9632;</button>
+      <div class="tw" id="tw-pill" role="group" aria-label="Running timer — ${escapeHtml(proj)}">
+        <span class="tw-reveal">
+          <span class="tw-proj">${escapeHtml(proj)}</span>
+          <button class="tw-stop" id="tw-stop" title="Stop timer" aria-label="Stop timer">&#9632;</button>
+        </span>
+        <span class="tw-time" id="tw-time">${fmtDuration(elapsed)}</span>
+        <span class="tw-icon">${clockSvg}</span>
       </div>`;
-    document.getElementById('tw-stop').onclick = () => stopTimer();
+    // Tap the pill/icon toggles the reveal on touch (hover handles desktop).
+    document.getElementById('tw-pill').onclick = (e) => { if (!e.target.closest('#tw-stop')) el.classList.toggle('tw-open'); };
+    document.getElementById('tw-stop').onclick = (e) => { e.stopPropagation(); stopTimer(); };
     startTimerTick();
   } else {
-    el.className = '';
-    el.innerHTML = `<div class="tw-card"><button class="tw-btn tw-start" id="tw-start">&#9654; Start timer</button></div>`;
-    document.getElementById('tw-start').onclick = () => openTimerStartModal();
+    el.className = 'is-idle';
+    el.innerHTML = `
+      <div class="tw" id="tw-fab" role="button" tabindex="0" aria-label="Start timer">
+        <span class="tw-reveal"><span class="tw-start-label">Start timer</span></span>
+        <span class="tw-icon">${clockSvg}</span>
+      </div>`;
+    const fab = document.getElementById('tw-fab');
+    fab.onclick = () => openTimerStartModal();
+    fab.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTimerStartModal(); } };
     stopTimerTick();
   }
 }
