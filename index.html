@@ -1110,6 +1110,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .badge-quote { color: #C4B5FD; border-color: #C4B5FD; }
   .badge-converted { color: var(--text-muted); border-color: var(--text-muted); }
   .badge-expired { color: var(--danger); border-color: var(--danger); }
+  .badge-declined { color: var(--text-muted); border-color: var(--text-muted); text-decoration: line-through; }
 
   /* Forms */
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -1260,6 +1261,32 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     animation: toastIn 200ms ease;
   }
   @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+  /* First-run setup checklist (dashboard) */
+  .setup-card { margin: 4px 0 18px; }
+  .setup-steps { display: flex; flex-direction: column; margin-top: 10px; }
+  .setup-step {
+    display: flex; align-items: center; gap: 12px;
+    background: none; border: 0; cursor: pointer; text-align: left;
+    padding: 9px 4px; font-size: 13px; color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+  .setup-step:last-child { border-bottom: 0; }
+  .setup-step:hover { color: var(--accent-bright); }
+  .setup-step.is-done { color: var(--text-muted); text-decoration: line-through; }
+  .setup-step.is-done:hover { color: var(--text-muted); }
+  .setup-tick {
+    width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%;
+    border: 1px solid var(--border); display: inline-flex;
+    align-items: center; justify-content: center; font-size: 11px;
+  }
+  .setup-step.is-done .setup-tick { background: var(--accent-bright); color: var(--bg); border-color: var(--accent-bright); }
+
+  .toast-with-undo { display: flex; align-items: center; gap: 14px; }
+  .toast-undo {
+    background: none; border: 0; cursor: pointer; padding: 2px 4px;
+    color: var(--accent-bright, #B9F040); font-size: 13px; font-weight: 600;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
 
   /* Version label in sidebar */
   .app-version { font-size: 10px; color: var(--muted); padding: 8px 10px 0; letter-spacing: 0.03em; }
@@ -1518,7 +1545,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.11.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.12.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1633,7 +1660,7 @@ function installEntityAccessors() {
   };
   ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer', 'payeeRules'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
-  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt'].forEach((k) => defineProxy(state.settings, k));
+  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'invoicePrefix', 'quotePrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed'].forEach((k) => defineProxy(state.settings, k));
 }
 
 async function saveState() {
@@ -1739,8 +1766,12 @@ function fmtMoney(n, currency) {
   return sym + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function docNumber(d) {
-  const padded = String(d.number).padStart(4, '0');
-  return (d.type === 'invoice' ? 'INV-' : 'QT-') + padded;
+  // Prefix + padding are per-business settings (fallbacks cover vaults created
+  // before v6.6 and the create-vault path, which skips migrateState).
+  const s = (state && state.settings) || {};
+  const prefix = d.type === 'invoice' ? (s.invoicePrefix ?? 'INV-') : (s.quotePrefix ?? 'QT-');
+  const digits = Number(s.numberDigits) || 4;
+  return prefix + String(d.number).padStart(digits, '0');
 }
 function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
@@ -1781,6 +1812,27 @@ function toast(msg, ms = 2200) {
   el.textContent = msg;
   host.appendChild(el);
   setTimeout(() => el.remove(), ms);
+}
+
+/* Toast with an Undo button — used by delete flows instead of confirm dialogs. */
+function toastUndo(msg, onUndo, ms = 10000) {
+  const host = document.getElementById('toast-host');
+  const el = document.createElement('div');
+  el.className = 'toast toast-with-undo';
+  const txt = document.createElement('span');
+  txt.textContent = msg;
+  const btn = document.createElement('button');
+  btn.className = 'toast-undo';
+  btn.textContent = 'Undo';
+  el.appendChild(txt);
+  el.appendChild(btn);
+  host.appendChild(el);
+  const timer = setTimeout(() => el.remove(), ms);
+  btn.addEventListener('click', async () => {
+    clearTimeout(timer);
+    el.remove();
+    await onUndo();
+  });
 }
 
 /* ============================================================
@@ -1916,6 +1968,10 @@ function migrateState() {
     if (!ent.timeEntries) ent.timeEntries = [];
     if (ent.runningTimer === undefined) ent.runningTimer = null;
     if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
+    // v6.6: customisable document numbering (prefix + zero-padding width).
+    if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
+    if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
+    if (ent.numberDigits === undefined) ent.numberDigits = 4;
   }
   state.version = 6;
 }
@@ -2350,6 +2406,41 @@ document.addEventListener('keydown', (e) => {
    DASHBOARD
    ============================================================ */
 
+/* ----- First-run setup checklist (dashboard) ----- */
+function setupChecklistSteps() {
+  const co = state.settings.company || {};
+  const banking = state.settings.banking || [];
+  // Placeholder banking details like "[Account name]" don't count as filled in.
+  const bankDone = banking.some((b) => b.details && b.details.trim() && !b.details.includes('['));
+  return [
+    { key: 'company', label: 'Add your company details', done: !!(co.name && co.name.trim()), route: 'settings' },
+    { key: 'logo', label: 'Upload your logo — it appears on PDFs', done: !!state.settings.logo, route: 'settings' },
+    { key: 'banking', label: 'Add your banking details', done: bankDone, route: 'settings' },
+    { key: 'client', label: 'Add your first client', done: (state.clients || []).length > 0, route: 'clients' },
+    { key: 'invoice', label: 'Create your first invoice', done: state.documents.some((d) => d.type === 'invoice'), action: 'new-invoice' },
+  ];
+}
+
+function renderSetupChecklist() {
+  if (state.settings.setupDismissed) return '';
+  const steps = setupChecklistSteps();
+  const remaining = steps.filter((s) => !s.done).length;
+  if (!remaining) return '';   // all done — checklist retires itself
+  const rows = steps.map((s) => `
+    <button class="setup-step ${s.done ? 'is-done' : ''}" data-setup-step="${s.key}">
+      <span class="setup-tick">${s.done ? '✓' : ''}</span>
+      <span>${s.label}</span>
+    </button>`).join('');
+  return `
+    <div class="card setup-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-mid);">Get set up · ${steps.length - remaining}/${steps.length}</div>
+        <button class="btn btn-sm btn-ghost" id="setup-dismiss" title="Hide this checklist for this business">Hide</button>
+      </div>
+      <div class="setup-steps">${rows}</div>
+    </div>`;
+}
+
 function renderDashboard() {
   const docs = state.documents.slice();
   const invoices = docs.filter((d) => d.type === 'invoice');
@@ -2425,6 +2516,8 @@ function renderDashboard() {
       </div>
     </div>
     <div class="title-hero-sub">${compName} · ${fmtDate(today)}</div>
+
+    ${renderSetupChecklist()}
 
     <div class="bento dash">
       <!-- Hero: This month so far — LIME -->
@@ -3804,12 +3897,17 @@ function openExpenseModal(expense) {
   });
   const del = document.getElementById('exp-delete');
   if (del) del.addEventListener('click', async () => {
-    if (!confirm('Delete this expense?')) return;
+    const removed = state.expenses.find((x) => x.id === expense.id);
+    if (!removed) return;
     state.expenses = state.expenses.filter((x) => x.id !== expense.id);
     await saveState();
     closeModal();
     render();
-    toast('Expense deleted');
+    toastUndo(`Deleted ${removed.desc || 'expense'}`, async () => {
+      state.expenses.push(removed);
+      await saveState();
+      render();
+    });
   });
 }
 
@@ -5326,19 +5424,27 @@ function renderDocTable(docs, opts = {}) {
     if (d.status === 'draft') {
       actions.push(`<button class="btn btn-sm" data-action="marksent" data-id="${d.id}" title="Mark as sent">→ Sent</button>`);
     }
+    if (isInv && d.status === 'overdue') {
+      actions.push(`<button class="btn btn-sm" data-action="remind" data-id="${d.id}" title="Send a payment reminder email">✉ Remind</button>`);
+    }
     if (isInv && d.status !== 'paid' && d.status !== 'draft') {
       actions.push(`<button class="btn btn-sm" data-action="markpaid" data-id="${d.id}" title="Mark paid today">✓ Paid</button>`);
+    }
+    if (!isInv && d.status === 'sent') {
+      actions.push(`<button class="btn btn-sm" data-action="accept" data-id="${d.id}" title="Client accepted this quote">✓ Accept</button>`);
+      actions.push(`<button class="btn btn-sm btn-ghost" data-action="decline" data-id="${d.id}" title="Client declined this quote">✗ Decline</button>`);
     }
     actions.push(`<button class="btn btn-sm" data-action="view" data-id="${d.id}">View</button>`);
     if (!opts.compact) {
       actions.push(`<button class="btn btn-sm btn-ghost" data-action="edit" data-id="${d.id}">Edit</button>`);
-      if (!isInv && d.status !== 'converted') {
+      actions.push(`<button class="btn btn-sm btn-ghost" data-action="clone" data-id="${d.id}" title="Copy into a new draft with today's date">Duplicate</button>`);
+      if (!isInv && d.status !== 'converted' && d.status !== 'declined') {
         actions.push(`<button class="btn btn-sm" data-action="convert" data-id="${d.id}">Convert</button>`);
       }
     }
     return `
       <tr class="row-clickable" data-row-id="${d.id}">
-        <td class="num">${num}</td>
+        <td class="num">${num}${d.repeatMonthly ? ' <span title="Repeats monthly" style="opacity:0.6;">↻</span>' : ''}</td>
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
@@ -5658,10 +5764,19 @@ function renderDocEditor() {
           <select data-df="status">
             ${(d.type === 'invoice'
                 ? ['draft','sent','paid','overdue']
-                : ['draft','sent','accepted','converted','expired']
+                : ['draft','sent','accepted','declined','converted','expired']
               ).map((s) => `<option value="${s}" ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
         </div>
+        ${d.type === 'invoice' ? `
+        <div class="field">
+          <label>Repeat</label>
+          <label class="checkbox" style="margin-top:8px;">
+            <input type="checkbox" id="ed-repeat-toggle" ${d.repeatMonthly ? 'checked' : ''} />
+            <span>Repeat monthly</span>
+          </label>
+          ${d.repeatMonthly ? `<div class="text-sm text-muted" style="margin-top:4px;">Each month, on unlock, you'll be offered a fresh draft of this invoice.</div>` : ''}
+        </div>` : ''}
       </div>
     </div>
 
@@ -5789,6 +5904,13 @@ function bindEditorEvents() {
   if (vatToggle) vatToggle.addEventListener('change', () => {
     editingDoc.chargeVat = vatToggle.checked;   // explicit per-document override
     renderDocEditor();                          // re-render to show/hide VAT column + update totals
+    scheduleAutoSave();
+  });
+
+  const repeatToggle = host.querySelector('#ed-repeat-toggle');
+  if (repeatToggle) repeatToggle.addEventListener('change', () => {
+    editingDoc.repeatMonthly = repeatToggle.checked;
+    renderDocEditor();                          // re-render to show/hide the explainer note
     scheduleAutoSave();
   });
 
@@ -6013,6 +6135,7 @@ function openDocPreview(docId) {
             ${isInv && d.status !== 'paid' ? `<button class="btn btn-sm" id="prev-mark-paid">Mark paid</button>` : ''}
             ${!isInv && d.status !== 'converted' ? `<button class="btn btn-sm" id="prev-convert">Convert to invoice</button>` : ''}
             <button class="btn btn-sm" id="prev-email">Compose email</button>
+            ${isInv && d.status === 'overdue' ? `<button class="btn btn-sm" id="prev-remind">Send reminder</button>` : ''}
             <button class="btn btn-sm" id="prev-share">Share / email PDF</button>
             <button class="btn btn-sm btn-primary" id="prev-pdf">Download PDF</button>
             <button class="btn btn-sm btn-ghost danger" id="prev-delete">Delete</button>
@@ -6103,20 +6226,8 @@ function openDocPreview(docId) {
   const $ = (id) => document.getElementById(id);
   $('prev-edit').addEventListener('click', () => { closeModal(); openDocEditor(d.id); });
   $('prev-clone').addEventListener('click', async () => {
-    const clone = JSON.parse(JSON.stringify(d));
-    clone.id = uid('d-');
-    clone.number = d.type === 'invoice' ? state.settings.nextInv : state.settings.nextQt;
-    if (d.type === 'invoice') state.settings.nextInv = clone.number + 1;
-    else state.settings.nextQt = clone.number + 1;
-    clone.date = todayISO();
-    if (clone.type === 'invoice') clone.dueDate = addDays(clone.date, 7);
-    if (clone.type === 'quote') clone.expiry = addDays(clone.date, 30);
-    clone.status = 'draft';
-    clone.paidDate = null;
-    clone.sourceQuoteId = null;
-    state.documents.push(clone);
-    await saveState();
-    toast('Cloned ' + docNumber(clone));
+    const clone = await cloneDocument(d.id);
+    if (!clone) return;
     closeModal();
     openDocEditor(clone.id);
   });
@@ -6126,17 +6237,26 @@ function openDocPreview(docId) {
     closeModal();
   });
   $('prev-email').addEventListener('click', () => composeEmail(d));
+  if ($('prev-remind')) $('prev-remind').addEventListener('click', () => composeReminderEmail(d));
   { const sb = $('prev-share'); if (sb) sb.addEventListener('click', () => shareDoc(d)); }
   $('prev-pdf').addEventListener('click', () => generatePdf(d));
   $('prev-delete').addEventListener('click', async () => {
-    if (!confirm('Permanently delete ' + docNumber(d) + '?')) return;
+    const removed = state.documents.find((x) => x.id === d.id);
+    if (!removed) return;
+    // Release any time entries that were billed on this invoice back to unbilled
+    // (remember them so Undo can re-link).
+    const billedTimeIds = (state.timeEntries || []).filter((te) => te.invoiceId === d.id).map((te) => te.id);
     state.documents = state.documents.filter((x) => x.id !== d.id);
-    // Release any time entries that were billed on this invoice back to unbilled.
     for (const te of (state.timeEntries || [])) if (te.invoiceId === d.id) te.invoiceId = null;
     await saveState();
     closeModal();
     render();
-    toast('Deleted');
+    toastUndo(`Deleted ${docNumber(removed)}`, async () => {
+      state.documents.push(removed);
+      for (const te of (state.timeEntries || [])) if (billedTimeIds.includes(te.id)) te.invoiceId = removed.id;
+      await saveState();
+      render();
+    });
   });
 }
 
@@ -6174,6 +6294,84 @@ function openMarkPaidModal(docId) {
   });
 }
 
+/* Duplicate a document into a fresh draft: today's date, next number, clean
+   payment/recurrence state. Used by the list "Duplicate" action, the preview
+   modal's Clone button, and recurring-invoice generation. */
+async function cloneDocument(docId, opts = {}) {
+  const d = state.documents.find((x) => x.id === docId);
+  if (!d) return null;
+  const clone = JSON.parse(JSON.stringify(d));
+  clone.id = uid('d-');
+  clone.number = d.type === 'invoice' ? state.settings.nextInv : state.settings.nextQt;
+  if (d.type === 'invoice') state.settings.nextInv = clone.number + 1;
+  else state.settings.nextQt = clone.number + 1;
+  clone.date = todayISO();
+  if (clone.type === 'invoice') clone.dueDate = addDays(clone.date, 7);
+  if (clone.type === 'quote') clone.expiry = addDays(clone.date, 30);
+  clone.status = 'draft';
+  clone.paidDate = null;
+  clone.sourceQuoteId = null;
+  clone.repeatMonthly = false;     // duplicating a recurring invoice must not fork the series
+  Object.assign(clone, opts);
+  state.documents.push(clone);
+  await saveState();
+  toast('Created ' + docNumber(clone));
+  return clone;
+}
+
+/* ----- Recurring invoices -----
+   An invoice with repeatMonthly=true is the live end of its series. When a new
+   month starts, we offer to generate a fresh draft; the flag moves to the new
+   draft so each series only ever has one active recurring invoice. */
+function dueRecurringInvoices() {
+  const curYM = todayISO().slice(0, 7);
+  return state.documents.filter((d) => d.type === 'invoice' && d.repeatMonthly && (d.date || '').slice(0, 7) < curYM);
+}
+
+function maybeOfferRecurring() {
+  const due = dueRecurringInvoices();
+  if (!due.length) return;
+  const rows = due.map((d) => {
+    const t = calcTotals(d);
+    return `
+      <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);">
+        <span>${escapeHtml(clientName(d.clientId))}${d.projectTitle ? ' — ' + escapeHtml(d.projectTitle) : ''}</span>
+        <span class="nowrap">${fmtMoney(t.total, d.currency)}</span>
+      </div>`;
+  }).join('');
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head">
+          <div class="ttl">Recurring invoice${due.length === 1 ? '' : 's'} due</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="margin-bottom:8px;">A new month has started — create fresh draft${due.length === 1 ? '' : 's'} for:</div>
+          ${rows}
+          <div class="text-sm text-muted" style="margin-top:10px;">Drafts are created for you to review and send — nothing goes out automatically.</div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Not now</button>
+          <button class="btn btn-primary" id="rec-gen-all">Create draft${due.length === 1 ? '' : 's'}</button>
+        </div>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  document.getElementById('rec-gen-all').addEventListener('click', async () => {
+    let created = 0;
+    for (const d of due) {
+      const c = await cloneDocument(d.id, { repeatMonthly: true }); // flag moves to the new draft
+      if (c) { d.repeatMonthly = false; created++; }
+    }
+    await saveState();
+    closeModal();
+    setRoute('documents');
+    toast(`${created} draft${created === 1 ? '' : 's'} created`);
+  });
+}
+
 async function markDocAsSent(docId) {
   const d = state.documents.find((x) => x.id === docId);
   if (!d) return;
@@ -6181,6 +6379,15 @@ async function markDocAsSent(docId) {
   await saveState();
   render();
   toast(`${docNumber(d)} marked as sent`);
+}
+
+async function setQuoteStatus(docId, status) {
+  const d = state.documents.find((x) => x.id === docId);
+  if (!d || d.type !== 'quote') return;
+  d.status = status;
+  await saveState();
+  render();
+  toast(`${docNumber(d)} ${status}`);
 }
 
 async function convertQuoteToInvoice(quoteId) {
@@ -6530,6 +6737,20 @@ function composeEmail(d) {
   window.location.href = url;
 }
 
+function composeReminderEmail(d) {
+  const c = state.clients.find((x) => x.id === d.clientId) || {};
+  const t = calcTotals(d);
+  const num = docNumber(d);
+  const co = (state.settings && state.settings.company) || {};
+  const orgName = co.name || (state.settings && state.settings.brandName) || '';
+  const signOff = (co.attention || '').split(' ')[0] || '';
+  const days = d.dueDate ? Math.max(0, Math.floor((Date.now() - new Date(d.dueDate + 'T00:00:00').getTime()) / 86400000)) : 0;
+  const overdueLabel = days > 0 ? `was due on ${fmtDate(d.dueDate)} — ${days} day${days === 1 ? '' : 's'} ago` : `was due on ${fmtDate(d.dueDate)}`;
+  const subject = `Payment reminder: ${num}${orgName ? ' — ' + orgName : ''}`;
+  const body = `Hi${c.contact ? ' ' + c.contact.split(' ')[0] : ''},\n\nJust a friendly reminder that invoice ${num}${d.projectTitle ? ' for ' + d.projectTitle : ''} (${fmtMoney(t.due, d.currency)}) ${overdueLabel}.\n\nIf you've already made the payment, please ignore this — otherwise I'd appreciate it if you could settle it when you get a chance. Happy to resend the invoice or answer any questions.\n\nKind regards${signOff ? ',\n' + signOff : ''}${orgName ? '\n' + orgName : ''}`;
+  window.location.href = `mailto:${c.email || ''}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 /* ============================================================
    SETTINGS
    ============================================================ */
@@ -6633,7 +6854,11 @@ function renderSettings() {
       <div class="form-grid">
         <div class="field"><label>Next invoice number</label><input data-cs="nextInv" type="number" value="${state.settings.nextInv}" /></div>
         <div class="field"><label>Next quote number</label><input data-cs="nextQt" type="number" value="${state.settings.nextQt}" /></div>
+        <div class="field"><label>Invoice prefix</label><input data-cs="invoicePrefix" value="${escapeHtml(state.settings.invoicePrefix ?? 'INV-')}" placeholder="INV-" /></div>
+        <div class="field"><label>Quote prefix</label><input data-cs="quotePrefix" value="${escapeHtml(state.settings.quotePrefix ?? 'QT-')}" placeholder="QT-" /></div>
+        <div class="field"><label>Number length <span class="text-muted">(zero-padded digits)</span></label><input data-cs="numberDigits" type="number" min="1" max="8" value="${Number(state.settings.numberDigits) || 4}" /></div>
       </div>
+      <div class="text-sm text-mid" style="margin-top:10px;">Next invoice will be numbered <strong>${escapeHtml(docNumber({ type: 'invoice', number: state.settings.nextInv }))}</strong>. Continuing from another tool? Set the prefix and next number to match your existing scheme.</div>
     </div>
 
     <div class="settings-section">
@@ -6769,7 +6994,8 @@ function bindSettingsEvents() {
       if (f === 'vatPercent') v = Math.max(0, Number(v) || 0);
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
       if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
-      if (['nextInv','nextQt','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
+      if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
+      if (['nextInv','nextQt','invoicePrefix','quotePrefix','numberDigits','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -6779,6 +7005,7 @@ function bindSettingsEvents() {
       await saveState();
       toast('Saved');
       if (f === 'autoLockMinutes') resetLockTimer();
+      if (['invoicePrefix','quotePrefix','numberDigits','nextInv','nextQt'].includes(f)) render(); // refresh the numbering example
       if (f === 'brandName' || f === 'appTitle') applyBrand();
       if (f === 'name') { renderEntitySwitcher(); applyBrand(); }
       if (f === 'baseCurrency') {
@@ -7140,6 +7367,10 @@ function bindViewEvents() {
       else if (action === 'markpaid') openMarkPaidModal(id);
       else if (action === 'marksent') markDocAsSent(id);
       else if (action === 'convert') convertQuoteToInvoice(id);
+      else if (action === 'clone') cloneDocument(id).then((c) => { if (c) { render(); openDocEditor(c.id); } });
+      else if (action === 'remind') { const d = state.documents.find((x) => x.id === id); if (d) composeReminderEmail(d); }
+      else if (action === 'accept') setQuoteStatus(id, 'accepted');
+      else if (action === 'decline') setQuoteStatus(id, 'declined');
     });
   });
   document.querySelectorAll('[data-route-link]').forEach((el) => {
@@ -7181,10 +7412,16 @@ function bindViewEvents() {
         } else if (action === 'delete') {
           const used = state.documents.some((d) => d.clientId === id);
           if (used) { alert('Cannot delete: this client is referenced by existing documents.'); return; }
-          if (!confirm('Delete this client?')) return;
+          const removed = state.clients.find((x) => x.id === id);
+          if (!removed) return;
           state.clients = state.clients.filter((x) => x.id !== id);
           await saveState();
           render();
+          toastUndo(`Deleted ${removed.name}`, async () => {
+            state.clients.push(removed);
+            await saveState();
+            render();
+          });
         }
       });
     });
@@ -7197,6 +7434,18 @@ function bindViewEvents() {
       await fetchFxRates(true);
       render();
       toast('FX rates updated');
+    });
+    document.querySelectorAll('[data-setup-step]').forEach((el) => el.addEventListener('click', () => {
+      const step = setupChecklistSteps().find((s) => s.key === el.dataset.setupStep);
+      if (!step) return;
+      if (step.action === 'new-invoice') openDocEditor(null, 'invoice');
+      else setRoute(step.route);
+    }));
+    const sd = document.getElementById('setup-dismiss');
+    if (sd) sd.addEventListener('click', async () => {
+      state.settings.setupDismissed = true;
+      await saveState();
+      render();
     });
   }
 
@@ -7261,10 +7510,16 @@ function bindViewEvents() {
         if (!exp) return;
         if (action === 'edit') openExpenseModal(exp);
         else if (action === 'delete') {
-          if (!confirm('Delete this expense?')) return;
+          const removed = state.expenses.find((x) => x.id === id);
+          if (!removed) return;
           state.expenses = state.expenses.filter((x) => x.id !== id);
           await saveState();
           render();
+          toastUndo(`Deleted ${removed.desc || 'expense'}`, async () => {
+            state.expenses.push(removed);
+            await saveState();
+            render();
+          });
         }
       });
     });
@@ -8507,6 +8762,7 @@ function enterApp() {
   renderEntitySwitcher();
   setRoute('dashboard');
   resetLockTimer();
+  setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
   setTimeout(showBackupReminder, 1200); // gentle, after the app settles
 }
 

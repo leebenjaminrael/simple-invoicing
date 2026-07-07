@@ -33,6 +33,8 @@ You can use it straight from the link above, but installing it gives you a real 
 
 ## First-time setup
 
+The dashboard shows a **"Get set up" checklist** that walks you through these steps and ticks itself off as you go.
+
 1. **Set a master password** (at least 8 characters). This encrypts your data. **Write it down somewhere safe — there is no way to recover it if you forget it.**
 2. **Settings → Brand:** your app name (shown in the sidebar, lock screen and browser tab).
 3. **Settings → Company:** your business details — name, address, email, phone, **VAT number**, **base currency**, **VAT %**, **VAT cycle** (Monthly / Bi-monthly / Quarterly / Bi-annual / Annual), and **tax-year start month**. Enter a VAT number and invoices are labelled "TAX INVOICE"; leave it blank and they say "INVOICE". Set VAT % to `0` if you're not registered.
@@ -47,7 +49,7 @@ Running more than one business? **Settings → Businesses → + Add business.** 
 
 - **Dashboard** — this month's income, **profit year-to-date**, outstanding, and recent activity at a glance.
 - **Finances** — monthly revenue chart with goals, a **Profit & Loss statement** (gross and net profit, ex-VAT, with a net-profit-by-month trend), pipeline, ageing, top clients, VAT summary, and an accountant report export. Cash or accrual basis.
-- **Documents** — invoices and quotes: create, send, mark paid, convert quote → invoice, export PDF, compose email.
+- **Documents** — invoices and quotes: create, send, mark paid, duplicate, convert quote → invoice, export PDF, compose email. Overdue invoices get a one-click **payment reminder** email; quotes track accepted/declined and expire automatically. Set an invoice to **repeat monthly** and you'll be offered a fresh draft each month. Document numbering (prefix + padding, e.g. `INV-2026-001`) is customisable per business.
 - **Clients** — your client list with outstanding balances and a default hourly rate.
 - **Timer** — track time against a client + project with a floating start/stop timer that's on every screen and survives reloads. Filter by client, project, date range and billed status; export a CSV report; and bill unbilled time straight onto a new or existing invoice (one line per project).
 - **Expenses** — categorised, multi-currency expense tracking.
