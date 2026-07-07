@@ -6,6 +6,7 @@
      so the key protection here is connect-src — even if a script were injected, it
      can only reach these endpoints, not exfiltrate your decrypted vault elsewhere. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io; worker-src blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
+<meta name="referrer" content="no-referrer" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Invoicing</title>
 <!-- PWA: installable app + offline (only active when hosted over http/https; harmless on file://) -->
@@ -1353,7 +1354,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px;height:40px;" id="lock-btn">Unlock</button>
     </form>
     <div class="text-sm text-muted" style="margin-top:16px;line-height:1.55;">
-      Your data is encrypted at rest with AES-GCM (key derived via PBKDF2, 200k rounds). If you lose this password, the data cannot be recovered.
+      Your data is encrypted at rest with AES-GCM (key derived via PBKDF2, 600k rounds). If you lose this password, the data cannot be recovered.
     </div>
     <div style="margin-top:14px;text-align:center;">
       <button type="button" id="lock-reset" style="background:none;border:0;color:var(--mid);font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;">Forgot password — reset vault</button>
@@ -1517,7 +1518,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.11.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.11.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -6722,7 +6723,7 @@ function renderSettings() {
 
     <div class="settings-section">
       <h3>Backup</h3>
-      <div class="text-sm text-mid" style="margin-bottom:12px;">Export all data as JSON, or restore from a previous backup. The backup file is unencrypted — keep it safe.</div>
+      <div class="text-sm text-mid" style="margin-bottom:12px;">Export all data, or restore from a previous backup. Backup files are encrypted with your master password — you'll need it (as it was at backup time) to restore. Older unencrypted backups still restore fine.</div>
       <div class="row-flex">
         <button class="btn" id="backup-export">Download backup (JSON)</button>
         <button class="btn" id="backup-import">Restore from backup</button>
@@ -6883,7 +6884,20 @@ function bindSettingsEvents() {
     const text = await file.text();
     try {
       // Drop prototype-polluting keys defensively while parsing untrusted JSON.
-      const data = JSON.parse(text, (k, v) => (k === '__proto__' || k === 'constructor' || k === 'prototype') ? undefined : v);
+      const antiPollution = (k, v) => (k === '__proto__' || k === 'constructor' || k === 'prototype') ? undefined : v;
+      let data = JSON.parse(text, antiPollution);
+      if (data && typeof data === 'object' && data.ct && data.salt && data.iv) {
+        // Encrypted backup — try the current vault password first, then ask.
+        let decrypted = null;
+        try { decrypted = await decryptData(text, currentPassword); } catch (e2) {
+          const pw = prompt('This backup is encrypted. Enter the master password it was created with:');
+          if (pw == null) return;
+          try { decrypted = await decryptData(text, pw); } catch (e3) {
+            alert('Wrong password for this backup.'); return;
+          }
+        }
+        data = JSON.parse(JSON.stringify(decrypted), antiPollution);
+      }
       if (!data || typeof data !== 'object') throw new Error('not a valid backup file');
       const isObj = (x) => x && typeof x === 'object';
       const validOld = Array.isArray(data.clients) && Array.isArray(data.documents) && isObj(data.settings);
@@ -8433,6 +8447,12 @@ document.getElementById('lock-reset').addEventListener('click', () => {
   location.reload();
 });
 
+/* Throttle repeated wrong-password attempts (in-memory; PBKDF2 at 600k
+   iterations is the real brute-force barrier — this stops casual rapid
+   guessing at the keyboard). */
+let unlockFails = 0;
+let unlockLockedUntil = 0;
+
 document.getElementById('lock-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pwd = document.getElementById('lock-pwd').value;
@@ -8440,6 +8460,10 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
   const blob = localStorage.getItem(STORAGE_KEY);
   const err = document.getElementById('lock-err');
   err.textContent = '';
+  if (Date.now() < unlockLockedUntil) {
+    err.textContent = `Too many attempts — wait ${Math.ceil((unlockLockedUntil - Date.now()) / 1000)}s.`;
+    return;
+  }
   if (!blob) {
     if (pwd.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return; }
     if (pwd !== pwd2) { err.textContent = 'Passwords do not match.'; return; }
@@ -8455,16 +8479,28 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
       migrateState();
       installEntityAccessors();
       currentPassword = pwd;
+      unlockFails = 0;
+      unlockLockedUntil = 0;
       await saveState();
       enterApp();
       fetchFxRates();
     } catch (e) {
-      err.textContent = 'Wrong password.';
+      unlockFails++;
+      if (unlockFails >= 3) {
+        const waitSec = Math.min(2 ** (unlockFails - 3) * 5, 60);
+        unlockLockedUntil = Date.now() + waitSec * 1000;
+        err.textContent = `Wrong password. Try again in ${waitSec}s.`;
+      } else {
+        err.textContent = 'Wrong password.';
+      }
     }
   }
 });
 
 function enterApp() {
+  // Don't leave the password sitting in the DOM while the app is open.
+  document.getElementById('lock-pwd').value = '';
+  document.getElementById('lock-pwd-2').value = '';
   document.getElementById('lock-screen').style.display = 'none';
   document.getElementById('app').classList.add('unlocked');
   applyBrand();
@@ -8628,7 +8664,7 @@ function initPwa() {
   const dismissBtn = document.getElementById('update-dismiss');
   if (reloadBtn) reloadBtn.addEventListener('click', async () => {
     // Safety net: download a backup before reloading to the new version
-    try { if (state && currentPassword) downloadBackupSilent(); } catch (e) {}
+    try { if (state && currentPassword) await downloadBackupSilent(); } catch (e) {}
     setTimeout(() => location.reload(), 400);
   });
   if (dismissBtn) dismissBtn.addEventListener('click', () => {
@@ -8702,9 +8738,18 @@ async function refreshStorageStatus() {
 }
 
 // Download a JSON backup without any UI prompt (used as a pre-update safety net)
-function downloadBackupSilent() {
-  if (!state) return;
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+/* Backups are encrypted with the current master password (same AES-GCM vault
+   format, plus a `format` tag so restore can tell them apart from old
+   plain-JSON backups — which still restore fine). */
+async function backupFileText() {
+  const encBlob = JSON.parse(await encryptData(state, currentPassword));
+  encBlob.format = 'seed-backup-encrypted';
+  return JSON.stringify(encBlob, null, 2);
+}
+
+async function downloadBackupSilent() {
+  if (!state || !currentPassword) return;
+  const blob = new Blob([await backupFileText()], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -8728,9 +8773,9 @@ function backupReminderDue() {
   if (!m.at) return true;                       // never backed up
   return (Date.now() - new Date(m.at).getTime()) > BACKUP_REMIND_DAYS * 86400000;
 }
-function exportBackup() {
-  if (!state) return;
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+async function exportBackup() {
+  if (!state || !currentPassword) return;
+  const blob = new Blob([await backupFileText()], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = `seed-backup-${todayISO()}.json`; a.click();

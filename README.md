@@ -74,7 +74,7 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 
 **Settings → Backup → Download backup (JSON).**
 
-- The backup file is **not encrypted** — keep it somewhere safe (password manager, encrypted drive, private cloud folder).
+- Backup files are **encrypted with your master password** — restoring one needs the password that was set when the backup was made. (Older, unencrypted backups still restore fine.)
 - Restore via **Settings → Backup → Restore from backup**.
 - This is also how you **move your data to another device**: download a backup on one, restore it on the other.
 - Tip: take a backup before doing anything big (large imports, switching devices).
