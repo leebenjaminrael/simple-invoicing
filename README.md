@@ -79,6 +79,7 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 - Backup files are **encrypted with your master password** — restoring one needs the password that was set when the backup was made. (Older, unencrypted backups still restore fine.)
 - Restore via **Settings → Backup → Restore from backup**.
 - This is also how you **move your data to another device**: download a backup on one, restore it on the other.
+- Worked on **two devices separately**? Use **Merge from backup** instead of Restore — it combines them: records that only exist in the backup are added, and where both devices changed the same record, the newer edit wins (duplicate invoice numbers are automatically renumbered).
 - Tip: take a backup before doing anything big (large imports, switching devices).
 
 ---
