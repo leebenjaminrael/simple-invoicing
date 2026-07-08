@@ -1555,7 +1555,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.13.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.13.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1770,11 +1770,112 @@ function installEntityAccessors() {
   ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'invoicePrefix', 'quotePrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed'].forEach((k) => defineProxy(state.settings, k));
 }
 
+/* ============================================================
+   RECORD-LEVEL CHANGE TRACKING — sync plumbing (v1.13.1)
+
+   Future multi-device sync needs to answer "what changed since we last
+   synced?" per record, and to remember deletions. Rather than instrument
+   every mutation site, we diff at the single choke point every mutation
+   already flows through: saveState().
+
+   Each entity carries `sync = { rev, tombstones }`:
+   - rev:        'documents:<id>' → { h: <content hash>, t: <ms epoch of last change> }
+                 plus pseudo-records 'meta:settings' (entity settings/company/
+                 banking/numbering/goals) and 'meta:payeeRules'.
+   - tombstones: '<array>:<id>' → ms epoch of deletion (pruned after ~180 days).
+
+   t = 0 means "existed before tracking began" (baseline) — a future merge
+   treats those as ancient rather than freshly changed. fxRates and
+   runningTimer are deliberately untracked: device-local, pointless to sync.
+   The maps live inside the vault, so backups carry history and tombstones.
+   ============================================================ */
+const SYNC_TRACKED_ARRAYS = ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries'];
+const TOMBSTONE_KEEP_MS = 180 * 86400000;
+
+// Fast non-cryptographic content hash (FNV-1a). We're detecting change, not
+// defending against forgery — the whole structure is inside the AES vault.
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+
+// Stable per-device identity for future sync pairing. Lives OUTSIDE the vault
+// on purpose: restoring a backup onto another device must not clone it.
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('seed-device-id');
+    if (!id) { id = 'dev-' + crypto.randomUUID(); localStorage.setItem('seed-device-id', id); }
+    return id;
+  } catch (e) { return 'dev-volatile'; }
+}
+
+function entitySettingsFingerprint(ent) {
+  const { name, company, logo, banking, nextInv, nextQt, invoicePrefix, quotePrefix, numberDigits,
+          baseCurrency, vatPercent, vatCycle, taxYearStartMonth, goals, savedLineItems, defaultHourlyRate } = ent;
+  return JSON.stringify({ name, company, logo, banking, nextInv, nextQt, invoicePrefix, quotePrefix, numberDigits,
+                          baseCurrency, vatPercent, vatCycle, taxYearStartMonth, goals, savedLineItems, defaultHourlyRate });
+}
+
+function trackChanges(s) {
+  const now = Date.now();
+  for (const ent of (s.entities || [])) {
+    if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
+    const rev = ent.sync.rev;
+    const tomb = ent.sync.tombstones;
+    // First run on this entity: hash everything without stamping it "changed
+    // now" — pre-tracking records are baseline (t=0), not fresh edits.
+    const baseline = Object.keys(rev).length === 0;
+    const stamp = (key, str) => {
+      const h = fnv1a(str);
+      const prev = rev[key];
+      if (!prev) rev[key] = { h, t: baseline ? 0 : now };
+      else if (prev.h !== h) { prev.h = h; prev.t = now; }
+      if (tomb[key]) delete tomb[key];   // resurrected (e.g. delete → Undo)
+    };
+    const seen = new Set();
+    for (const arr of SYNC_TRACKED_ARRAYS) {
+      for (const r of (ent[arr] || [])) {
+        if (!r || !r.id) continue;
+        const key = arr + ':' + r.id;
+        seen.add(key);
+        stamp(key, JSON.stringify(r));
+      }
+    }
+    seen.add('meta:settings');   stamp('meta:settings', entitySettingsFingerprint(ent));
+    seen.add('meta:payeeRules'); stamp('meta:payeeRules', JSON.stringify(ent.payeeRules || {}));
+    // Anything hashed before but absent now was deleted → tombstone it.
+    for (const key of Object.keys(rev)) {
+      if (!seen.has(key)) { delete rev[key]; if (!key.startsWith('meta:')) tomb[key] = now; }
+    }
+    for (const [k, t] of Object.entries(tomb)) { if (now - t > TOMBSTONE_KEEP_MS) delete tomb[k]; }
+  }
+  // Vault-level: global settings pseudo-record + whole-entity tombstones.
+  if (!s.syncMeta || !s.syncMeta.rev) s.syncMeta = { rev: {}, entities: {}, entityTombstones: {} };
+  const sm = s.syncMeta;
+  {
+    const g = s.settings || {};
+    const str = JSON.stringify({ brandName: g.brandName, appTitle: g.appTitle, expenseCategories: g.expenseCategories, bankProfiles: g.bankProfiles, autoLockMinutes: g.autoLockMinutes });
+    const h = fnv1a(str);
+    const prev = sm.rev['meta:globalSettings'];
+    if (!prev) sm.rev['meta:globalSettings'] = { h, t: Object.keys(sm.entities || {}).length === 0 ? 0 : now };
+    else if (prev.h !== h) { prev.h = h; prev.t = now; }
+  }
+  const liveIds = new Set((s.entities || []).map((e) => e.id));
+  for (const id of Object.keys(sm.entities || {})) {
+    if (!liveIds.has(id)) { sm.entityTombstones[id] = now; delete sm.entities[id]; }
+  }
+  for (const id of liveIds) { if (!sm.entities[id]) sm.entities[id] = now; }
+}
+
 let quotaWarned = false; // one nudge per session is enough
 
 async function saveState() {
   if (!state || !currentPassword) return;
   applyAutoOverdue(state);
+  // Change tracking runs after auto-overdue (so status flips are stamped) and
+  // is fenced: a tracker bug must never be able to block a save.
+  try { trackChanges(state); } catch (e) {}
   const blob = await encryptData(state, currentPassword);
   let where;
   try {
@@ -2119,6 +2220,9 @@ function migrateState() {
     if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
     if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
     if (ent.numberDigits === undefined) ent.numberDigits = 4;
+    // v6.7: record-level change tracking (sync plumbing) — maps are also
+    // created lazily by trackChanges(), this just keeps shapes predictable.
+    if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
   }
   state.version = 6;
 }
