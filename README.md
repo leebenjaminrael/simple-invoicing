@@ -68,7 +68,7 @@ Updates are automatic. When a new version is published you'll see a small **"upd
 - Stored **only in your browser**, on your device, encrypted with **AES-GCM** (key derived from your password via PBKDF2).
 - **Your financial data is never uploaded.** There is no backend for it. The only network calls are fetching exchange rates, checking for app updates, and loading the app itself.
 - **One exception — sign-up:** the first time you open the app you're asked for your **name and email**, which are sent once to keep you posted on updates. That's the *only* personal data that leaves your device; your invoices, clients, expenses and everything financial stay encrypted locally.
-- Data is **per device and per browser.** Your Mac and your phone keep separate copies (see Backups to move data between them).
+- Data is **per device and per browser** — but you can now keep devices in step with **Settings → Device sync**: a direct, encrypted device-to-device connection (works best on the same Wi-Fi). Your data goes straight between your devices and never touches a server. Records merge intelligently — the newer edit of each record wins, and duplicate invoice numbers are renumbered automatically.
 
 ---
 
