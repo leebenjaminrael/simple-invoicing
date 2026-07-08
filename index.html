@@ -1748,6 +1748,199 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { mergeVaults };
 }
 </script>
+<script>/* ============================================================
+   DEVICE SYNC TRANSPORT — serverless WebRTC pairing (v1.15)
+
+   Connects two devices directly with a WebRTC DataChannel. There is no
+   signaling server: the SDP offer/answer are exchanged BY THE USER as
+   compact codes (copy/paste, AirDrop, message-to-self, or the #sync= deep
+   link). The code carries the DTLS fingerprint, so the channel is
+   end-to-end encrypted between exactly the two devices that exchanged
+   codes — no relay, no server, nothing to trust but the code handoff.
+
+   Protocol on the channel (JSON messages):
+     hello  {deviceId, brand, appVersion, entities, documents}
+     ready  {}                    — user pressed "Merge now" on that side
+     sb     {bytes, chunks}       — state transfer begins
+     c      {i, d}                — state chunk (string slice)
+     se     {}                    — state transfer complete
+   When BOTH sides are ready, each sends its full vault state; each side
+   then runs mergeVaults(local, remote) locally. The merge engine is
+   deterministic and symmetric, so both devices converge on an identical
+   result without ever exchanging the merged vault.
+
+   Depends only on: mergeVaults (merge.js) — callers wire the UI.
+   ============================================================ */
+
+const SYNC_CHUNK = 16 * 1024;
+const SYNC_ICE = [{ urls: 'stun:stun.l.google.com:19302' }]; // helps across networks; same-LAN works without it
+
+function syncB64uEncode(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function syncB64uDecode(str) {
+  const b = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
+  return out;
+}
+
+/* SDP → compact code (gzip when the browser supports it). */
+async function encodeSignal(obj) {
+  const json = JSON.stringify(obj);
+  if (typeof CompressionStream !== 'undefined') {
+    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+    const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    return 'gz.' + syncB64uEncode(bytes);
+  }
+  return 'raw.' + syncB64uEncode(new TextEncoder().encode(json));
+}
+async function decodeSignal(code) {
+  code = (code || '').trim();
+  const dot = code.indexOf('.');
+  if (dot < 1) throw new Error('that does not look like a sync code');
+  const kind = code.slice(0, dot);
+  const bytes = syncB64uDecode(code.slice(dot + 1));
+  let json;
+  if (kind === 'gz') {
+    if (typeof DecompressionStream === 'undefined') throw new Error('this browser cannot read compressed codes — update it and retry');
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    json = await new Response(stream).text();
+  } else if (kind === 'raw') {
+    json = new TextDecoder().decode(bytes);
+  } else {
+    throw new Error('unrecognised sync code');
+  }
+  return JSON.parse(json);
+}
+
+/* Wait until ICE gathering finishes so the code contains all candidates
+   (bounded — some networks trickle forever). */
+function syncAwaitIce(pc, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const done = () => { cleanup(); resolve(); };
+    const onChange = () => { if (pc.iceGatheringState === 'complete') done(); };
+    const timer = setTimeout(done, timeoutMs);
+    const cleanup = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', onChange); };
+    pc.addEventListener('icegatheringstatechange', onChange);
+  });
+}
+
+/* One sync session. Role 'host' shows the first code; 'join' consumes it.
+   Callbacks: onStatus(text), onPeer(hello), onBothReady(), onRemoteState(state),
+   onError(err). Call .destroy() when done. */
+function createSyncSession(role, callbacks) {
+  const cb = callbacks || {};
+  const pc = new RTCPeerConnection({ iceServers: SYNC_ICE });
+  const s = {
+    role, pc, channel: null,
+    localReady: false, remoteReady: false, stateSent: false,
+    incoming: null, destroyed: false,
+  };
+
+  const status = (t) => { try { if (cb.onStatus) cb.onStatus(t); } catch (e) {} };
+  const fail = (e) => { if (!s.destroyed) { try { if (cb.onError) cb.onError(e); } catch (e2) {} } };
+
+  pc.addEventListener('connectionstatechange', () => {
+    if (pc.connectionState === 'failed') fail(new Error('connection failed — check both devices are online (same Wi-Fi works best) and try fresh codes'));
+    if (pc.connectionState === 'disconnected') status('Connection lost.');
+  });
+
+  function wireChannel(ch) {
+    s.channel = ch;
+    ch.onopen = () => {
+      status('Connected.');
+      send({ type: 'hello', ...(cb.helloPayload ? cb.helloPayload() : {}) });
+    };
+    ch.onerror = () => fail(new Error('channel error'));
+    ch.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'hello') { try { if (cb.onPeer) cb.onPeer(msg); } catch (e) {} }
+      else if (msg.type === 'ready') { s.remoteReady = true; maybeExchange(); }
+      else if (msg.type === 'sb') { s.incoming = { chunks: new Array(msg.chunks), got: 0, total: msg.chunks }; }
+      else if (msg.type === 'c') {
+        if (!s.incoming) return;
+        s.incoming.chunks[msg.i] = msg.d;
+        s.incoming.got++;
+        if (s.incoming.total > 20 && s.incoming.got % 10 === 0) status(`Receiving… ${Math.round(s.incoming.got / s.incoming.total * 100)}%`);
+      } else if (msg.type === 'se') {
+        try {
+          const full = s.incoming.chunks.join('');
+          s.incoming = null;
+          const state = JSON.parse(full);
+          if (cb.onRemoteState) cb.onRemoteState(state);
+        } catch (e) { fail(new Error('could not read the other device\'s data: ' + e.message)); }
+      }
+    };
+  }
+
+  function send(obj) {
+    if (s.channel && s.channel.readyState === 'open') s.channel.send(JSON.stringify(obj));
+  }
+
+  async function sendBig(obj) {
+    const json = JSON.stringify(obj);
+    const chunks = Math.ceil(json.length / SYNC_CHUNK);
+    send({ type: 'sb', bytes: json.length, chunks });
+    for (let i = 0; i < chunks; i++) {
+      // Backpressure: don't flood the channel buffer on big vaults.
+      while (s.channel.bufferedAmount > 4 * 1024 * 1024) {
+        await new Promise((r) => setTimeout(r, 50));
+        if (s.destroyed) return;
+      }
+      send({ type: 'c', i, d: json.slice(i * SYNC_CHUNK, (i + 1) * SYNC_CHUNK) });
+    }
+    send({ type: 'se' });
+  }
+
+  function maybeExchange() {
+    if (s.localReady && s.remoteReady && !s.stateSent) {
+      s.stateSent = true;
+      try { if (cb.onBothReady) cb.onBothReady(); } catch (e) {}
+      status('Exchanging data…');
+      Promise.resolve(cb.localState ? cb.localState() : null)
+        .then((st) => { if (st) return sendBig(st); })
+        .catch(fail);
+    }
+  }
+
+  s.markReady = () => { s.localReady = true; send({ type: 'ready' }); maybeExchange(); };
+
+  /* --- role-specific signaling --- */
+  s.createOfferCode = async () => {
+    wireChannel(pc.createDataChannel('seed-sync'));
+    await pc.setLocalDescription(await pc.createOffer());
+    await syncAwaitIce(pc);
+    return encodeSignal({ v: 1, kind: 'offer', sdp: pc.localDescription.sdp });
+  };
+  s.acceptOfferCode = async (code) => {
+    const sig = await decodeSignal(code);
+    if (sig.kind !== 'offer') throw new Error('that is a reply code — paste it on the device that showed the FIRST code');
+    pc.addEventListener('datachannel', (ev) => wireChannel(ev.channel));
+    await pc.setRemoteDescription({ type: 'offer', sdp: sig.sdp });
+    await pc.setLocalDescription(await pc.createAnswer());
+    await syncAwaitIce(pc);
+    return encodeSignal({ v: 1, kind: 'answer', sdp: pc.localDescription.sdp });
+  };
+  s.acceptAnswerCode = async (code) => {
+    const sig = await decodeSignal(code);
+    if (sig.kind !== 'answer') throw new Error('that is a start code — paste the REPLY code from the other device');
+    await pc.setRemoteDescription({ type: 'answer', sdp: sig.sdp });
+    status('Connecting…');
+  };
+
+  s.destroy = () => {
+    s.destroyed = true;
+    try { if (s.channel) s.channel.close(); } catch (e) {}
+    try { pc.close(); } catch (e) {}
+  };
+  return s;
+}
+</script>
 <script>
 /* ============================================================
    SEED INVOICING — single-file local app
@@ -1846,7 +2039,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.14.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.15.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7534,6 +7727,15 @@ function renderSettings() {
     </div>
 
     <div class="settings-section">
+      <h3>Device sync</h3>
+      <div class="text-sm text-mid" style="margin-bottom:12px;">Sync this device directly with your other one (phone, laptop) over a private encrypted connection — your data goes straight between the two devices and <strong>never touches a server</strong>. Works best with both on the same Wi-Fi. Open this screen on <strong>both</strong> devices: press Start on one, Join on the other, and pass the codes across (AirDrop, message to yourself, or copy-paste).</div>
+      <div class="row-flex">
+        <button class="btn btn-primary" id="sync-start">Start sync — show code</button>
+        <button class="btn" id="sync-join">Join sync — I have a code</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>Backup</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">Export all data, or restore from a previous backup. Backup files are encrypted with your master password — you'll need it (as it was at backup time) to restore. Older unencrypted backups still restore fine.</div>
       <div class="row-flex">
@@ -7770,6 +7972,11 @@ function bindSettingsEvents() {
   const fb = host.querySelector('#feedback-open');
   if (fb) fb.addEventListener('click', () => openFeedbackModal());
 
+  const syncStart = host.querySelector('#sync-start');
+  if (syncStart) syncStart.addEventListener('click', () => openSyncModal('host'));
+  const syncJoin = host.querySelector('#sync-join');
+  if (syncJoin) syncJoin.addEventListener('click', () => openSyncModal('join'));
+
   const cp = host.querySelector('#change-password');
   if (cp) cp.addEventListener('click', () => openChangePasswordModal());
 
@@ -7972,6 +8179,8 @@ function showModal(html) {
   enhanceA11y(mh);
 }
 function closeModal() {
+  // Cancelling the sync modal must tear the connection down too.
+  if (activeSyncSession) { try { activeSyncSession.destroy(); } catch (e) {} activeSyncSession = null; }
   document.getElementById('modal-host').innerHTML = '';
   document.removeEventListener('keydown', escClose);
 }
@@ -9395,7 +9604,13 @@ function enterApp() {
   renderEntitySwitcher();
   setRoute('dashboard');
   resetLockTimer();
-  setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
+  if (pendingSyncCode) {
+    // Arrived via a #sync= link — go straight into the join flow.
+    const code = pendingSyncCode; pendingSyncCode = null;
+    setTimeout(() => { setRoute('settings'); openSyncModal('join', code); }, 400);
+  } else {
+    setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
+  }
   setTimeout(showBackupReminder, 1200); // gentle, after the app settles
   checkForUpdate();                     // unlock is a natural "am I stale?" moment
 }
@@ -9658,6 +9873,142 @@ async function decodeBackupText(text) {
   return data;
 }
 
+/* ----- Device sync UI (transport in sync.js, merge in merge.js) ----- */
+let activeSyncSession = null;
+
+function copyText(text, msg) {
+  navigator.clipboard.writeText(text).then(() => toast(msg)).catch(() => toast('Copy failed — select and copy manually'));
+}
+
+async function applySyncMerge(remoteState) {
+  const { merged, report } = mergeVaults(JSON.parse(JSON.stringify(state)), remoteState);
+  state = merged;
+  migrateState();
+  installEntityAccessors();
+  await saveState();
+  applyBrand();
+  renderEntitySwitcher();
+  render();
+  return report;
+}
+
+function openSyncModal(role, prefillCode) {
+  if (activeSyncSession) { try { activeSyncSession.destroy(); } catch (e) {} activeSyncSession = null; }
+  const ta = 'width:100%;resize:vertical;font-family:\'DM Mono\',monospace;font-size:11px;word-break:break-all;';
+  const hostSteps = `
+    <div class="field"><label>Step 1 — send this code to your other device</label>
+      <textarea id="sync-offer-out" rows="4" readonly style="${ta}">Generating…</textarea>
+      <div class="row-flex" style="margin-top:6px;">
+        <button class="btn btn-sm" id="sync-copy-code">Copy code</button>
+        <button class="btn btn-sm" id="sync-copy-link">Copy as link</button>
+      </div>
+      <div class="text-sm text-muted" style="margin-top:6px;">AirDrop or message it to yourself. On the other device: Settings → Device sync → <strong>Join</strong> (the link opens it prefilled).</div>
+    </div>
+    <div class="field" style="margin-top:14px;"><label>Step 2 — paste the reply code from the other device</label>
+      <textarea id="sync-answer-in" rows="4" style="${ta}"></textarea>
+      <button class="btn btn-sm" id="sync-connect" style="margin-top:6px;">Connect</button>
+    </div>`;
+  const joinSteps = `
+    <div class="field"><label>Paste the code from your other device</label>
+      <textarea id="sync-offer-in" rows="4" style="${ta}"></textarea>
+      <button class="btn btn-sm" id="sync-gen-reply" style="margin-top:6px;">Generate reply code</button>
+    </div>
+    <div class="field" id="sync-answer-wrap" style="display:none;margin-top:14px;"><label>Send this reply code back, then wait — it connects automatically</label>
+      <textarea id="sync-answer-out" rows="4" readonly style="${ta}"></textarea>
+      <button class="btn btn-sm" id="sync-copy-answer" style="margin-top:6px;">Copy code</button>
+    </div>`;
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head">
+          <div class="ttl">Sync devices</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">
+          ${role === 'host' ? hostSteps : joinSteps}
+          <div id="sync-peer" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+            Connected to <strong id="sync-peer-name"></strong> · <span id="sync-peer-info" class="text-sm text-mid"></span>
+            <div class="row-flex" style="margin-top:10px;align-items:center;">
+              <button class="btn btn-primary" id="sync-merge-now">Merge now</button>
+              <span class="text-sm text-muted">Both devices must press this.</span>
+            </div>
+          </div>
+          <div id="sync-status" class="text-sm text-mid" style="margin-top:10px;"></div>
+          <div id="sync-err" class="err"></div>
+          <div class="text-sm text-muted" style="margin-top:10px;">Only share codes between your own devices — the code is what secures the connection.</div>
+        </div>
+        <div class="modal-foot"><button class="btn" data-close>Cancel</button></div>
+      </div>
+    </div>
+  `);
+  const $ = (id) => document.getElementById(id);
+  const setStatus = (t) => { const el = $('sync-status'); if (el) el.textContent = t; };
+  const setErr = (t) => { const el = $('sync-err'); if (el) el.textContent = t; };
+
+  const sess = createSyncSession(role, {
+    helloPayload: () => ({
+      deviceId: getDeviceId(),
+      brand: (state.settings.brandName || 'invoicing'),
+      appVersion: APP_VERSION,
+      entities: state.entities.length,
+      documents: state.entities.reduce((n, e) => n + (e.documents || []).length, 0),
+    }),
+    localState: () => JSON.parse(JSON.stringify(state)),
+    onStatus: setStatus,
+    onError: (e) => setErr(e.message || String(e)),
+    onPeer: (h) => {
+      if (!$('sync-peer')) return;
+      $('sync-peer').style.display = 'block';
+      $('sync-peer-name').textContent = h.brand || 'device';
+      $('sync-peer-info').textContent = `${h.entities} business${h.entities === 1 ? '' : 'es'} · ${h.documents} document${h.documents === 1 ? '' : 's'} · v${h.appVersion}`;
+      setStatus('Ready when you are.');
+    },
+    onRemoteState: async (remote) => {
+      try {
+        setStatus('Merging…');
+        const report = await applySyncMerge(remote);
+        activeSyncSession = null;
+        // Give the channel a moment to flush our outgoing state to the peer
+        // before tearing the connection down.
+        setTimeout(() => { try { sess.destroy(); } catch (e) {} }, 3000);
+        showMergeReport(report);
+        toast('Sync complete');
+      } catch (e) { setErr('Merge failed: ' + (e.message || e)); }
+    },
+  });
+  activeSyncSession = sess;
+
+  $('sync-merge-now').addEventListener('click', (e) => {
+    e.currentTarget.disabled = true;
+    e.currentTarget.textContent = 'Waiting for the other device…';
+    sess.markReady();
+  });
+
+  if (role === 'host') {
+    sess.createOfferCode()
+      .then((code) => { if ($('sync-offer-out')) { $('sync-offer-out').value = code; setStatus('Code ready — send it across.'); } })
+      .catch((e) => setErr(e.message || String(e)));
+    $('sync-copy-code').addEventListener('click', () => copyText($('sync-offer-out').value, 'Code copied'));
+    $('sync-copy-link').addEventListener('click', () => copyText(location.origin + location.pathname + '#sync=' + $('sync-offer-out').value, 'Link copied'));
+    $('sync-connect').addEventListener('click', async () => {
+      try { setErr(''); await sess.acceptAnswerCode($('sync-answer-in').value); } catch (e) { setErr(e.message || String(e)); }
+    });
+  } else {
+    if (prefillCode) $('sync-offer-in').value = prefillCode;
+    $('sync-gen-reply').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      try {
+        setErr(''); btn.disabled = true;
+        const answer = await sess.acceptOfferCode($('sync-offer-in').value);
+        $('sync-answer-wrap').style.display = 'block';
+        $('sync-answer-out').value = answer;
+        setStatus('Reply code ready — send it back, then wait.');
+      } catch (e2) { btn.disabled = false; setErr(e2.message || String(e2)); }
+    });
+    $('sync-copy-answer').addEventListener('click', () => copyText($('sync-answer-out').value, 'Code copied'));
+  }
+}
+
 function showMergeReport(report) {
   const lines = [];
   const row = (label, n) => { if (n) lines.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);"><span>${label}</span><strong>${n}</strong></div>`); };
@@ -9872,7 +10223,15 @@ function showOnboarding() {
   };
 }
 
+let pendingSyncCode = null;
+
 (async function boot() {
+  // A #sync= link (from "Copy as link" on the other device) pre-fills the
+  // join flow right after unlock. Strip it from the URL immediately.
+  if (location.hash && location.hash.startsWith('#sync=')) {
+    pendingSyncCode = location.hash.slice(6);
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+  }
   initPwa();
   retryPendingOnboarding();
   await initVaultStorage();  // pick backend + run the one-time IndexedDB migration
