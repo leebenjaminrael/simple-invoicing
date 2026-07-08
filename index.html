@@ -1403,7 +1403,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     transition: border-color 200ms ease;
   }
   #timer-widget .tw-icon { width: 52px; height: 52px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-  #timer-widget .tw-icon svg { width: 23px; height: 23px; display: block; }
+  #timer-widget .tw-icon svg { width: 26.5px; height: 26.5px; display: block; } /* +15%; the 52px circle stays as-is */
   #timer-widget.is-idle .tw { background: var(--accent-bright); border-color: var(--accent-bright); color: #0F0E0D; }
   #timer-widget.is-running .tw { border-color: var(--accent-bright); }
   #timer-widget.is-running .tw-icon { color: var(--accent-bright); }
@@ -1846,7 +1846,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.14.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.14.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
