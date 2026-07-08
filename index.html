@@ -1555,7 +1555,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.12.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.13.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1625,6 +1625,103 @@ async function decryptData(blob, password) {
 }
 
 /* ============================================================
+   VAULT STORAGE — IndexedDB (primary) with localStorage fallback
+
+   The vault used to live in localStorage, which browsers cap around 5 MB and
+   which blocks the main thread on every write. It now lives in IndexedDB
+   (effectively unlimited, async). The encrypted blob itself is unchanged.
+
+   Migration strategy (first boot on this version):
+   - copy the localStorage blob into IndexedDB, READ IT BACK and verify it
+     matches before trusting it; on any failure stay on localStorage.
+   - the localStorage copy is kept for one release as a rollback net, along
+     with a hash snapshot. If an old cached app version later writes to
+     localStorage (rollback edge case), the hash mismatch tells us that copy
+     is newer — we re-migrate it, stashing the IndexedDB copy first so no
+     data is ever destroyed.
+   ============================================================ */
+const IDB_NAME = 'seed-vault-db';
+const IDB_STORE = 'kv';
+let vaultBackend = 'localStorage'; // set to 'idb' by initVaultStorage() when available
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('idb open failed'));
+    req.onblocked = () => reject(new Error('idb blocked'));
+  });
+}
+function idbReq(db, mode, op) {
+  return new Promise((resolve, reject) => {
+    const rq = op(db.transaction(IDB_STORE, mode).objectStore(IDB_STORE));
+    rq.onsuccess = () => resolve(rq.result);
+    rq.onerror = () => reject(rq.error);
+  });
+}
+async function idbGet(key) { const db = await idbOpen(); try { return await idbReq(db, 'readonly', (s) => s.get(key)); } finally { db.close(); } }
+async function idbSet(key, value) { const db = await idbOpen(); try { return await idbReq(db, 'readwrite', (s) => s.put(value, key)); } finally { db.close(); } }
+async function idbDel(key) { const db = await idbOpen(); try { return await idbReq(db, 'readwrite', (s) => s.delete(key)); } finally { db.close(); } }
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(str));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function initVaultStorage() {
+  if (!window.indexedDB) return; // stays on localStorage
+  try {
+    const lsBlob = localStorage.getItem(STORAGE_KEY);
+    const idbBlob = await idbGet('vault');
+    if (!idbBlob && lsBlob) {
+      // One-time migration. Verify the copy before trusting it.
+      await idbSet('vault', lsBlob);
+      if ((await idbGet('vault')) !== lsBlob) throw new Error('migration verify failed');
+      await idbSet('ls-snapshot-hash', await sha256Hex(lsBlob));
+    } else if (idbBlob && lsBlob) {
+      // Both exist. If localStorage no longer matches the snapshot we took at
+      // migration, something wrote to it since (an old cached version, or a
+      // mid-session fallback save) — that copy is newer. Stash the IndexedDB
+      // blob first, then promote the localStorage one.
+      const snap = await idbGet('ls-snapshot-hash');
+      const lsHash = await sha256Hex(lsBlob);
+      if (!snap || lsHash !== snap) {
+        await idbSet('vault-stash-' + new Date().toISOString(), idbBlob);
+        await idbSet('vault', lsBlob);
+        if ((await idbGet('vault')) !== lsBlob) throw new Error('promote verify failed');
+        await idbSet('ls-snapshot-hash', lsHash);
+      }
+    }
+    vaultBackend = 'idb';
+  } catch (e) {
+    vaultBackend = 'localStorage'; // private mode / quota / anything odd — fail safe
+  }
+}
+
+async function vaultGet() {
+  if (vaultBackend === 'idb') {
+    try { const v = await idbGet('vault'); if (v != null) return v; } catch (e) {}
+  }
+  try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
+}
+
+// Returns where the blob landed ('idb' | 'localStorage'); may throw QuotaExceeded
+// from the localStorage path — callers surface that loudly.
+async function vaultSet(blob) {
+  if (vaultBackend === 'idb') {
+    try { await idbSet('vault', blob); return 'idb'; } catch (e) { /* fall through */ }
+  }
+  localStorage.setItem(STORAGE_KEY, blob);
+  return 'localStorage';
+}
+
+async function vaultDelete() {
+  try { await idbDel('vault'); await idbDel('ls-snapshot-hash'); } catch (e) {}
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+}
+
+/* ============================================================
    STATE
    ============================================================ */
 
@@ -1679,15 +1776,17 @@ async function saveState() {
   if (!state || !currentPassword) return;
   applyAutoOverdue(state);
   const blob = await encryptData(state, currentPassword);
+  let where;
   try {
-    localStorage.setItem(STORAGE_KEY, blob);
+    where = await vaultSet(blob);
   } catch (e) {
     // QuotaExceeded — the save DID NOT happen. Say so loudly.
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
-  // Browsers typically cap localStorage around 5 MB — warn well before the wall.
-  if (!quotaWarned && blob.length > 3.5 * 1024 * 1024) {
+  // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
+  // is effectively unlimited.
+  if (where === 'localStorage' && !quotaWarned && blob.length > 3.5 * 1024 * 1024) {
     quotaWarned = true;
     toast(`Heads-up: your vault is ~${(blob.length / 1024 / 1024).toFixed(1)} MB and browser storage tops out around 5 MB. Deleting old imported statements keeps things safe.`, 8000);
   }
@@ -7233,7 +7332,7 @@ function bindSettingsEvents() {
   if (reset) reset.addEventListener('click', async () => {
     if (!confirm('Permanently delete ALL data and reset the app? This cannot be undone.')) return;
     if (!confirm('Are you absolutely sure? This will delete all clients, invoices, quotes, and settings.')) return;
-    localStorage.removeItem(STORAGE_KEY);
+    await vaultDelete();
     location.reload();
   });
 
@@ -8784,10 +8883,10 @@ function showLockForm(returningUser) {
   document.getElementById('lock-pwd').focus();
 }
 
-document.getElementById('lock-reset').addEventListener('click', () => {
+document.getElementById('lock-reset').addEventListener('click', async () => {
   if (!confirm('Reset the vault? This permanently deletes ALL stored clients, invoices, quotes and settings. This cannot be undone.')) return;
   if (!confirm('Are you absolutely sure? Everything in the vault will be lost.')) return;
-  localStorage.removeItem(STORAGE_KEY);
+  await vaultDelete();
   location.reload();
 });
 
@@ -8801,7 +8900,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pwd = document.getElementById('lock-pwd').value;
   const pwd2 = document.getElementById('lock-pwd-2').value;
-  const blob = localStorage.getItem(STORAGE_KEY);
+  const blob = await vaultGet();
   const err = document.getElementById('lock-err');
   err.textContent = '';
   if (Date.now() < unlockLockedUntil) {
@@ -9074,8 +9173,8 @@ async function refreshStorageStatus() {
   }
   let usage = '';
   try {
-    const blob = localStorage.getItem(STORAGE_KEY);
-    if (blob) { const kb = new Blob([blob]).size / 1024; usage = ` · vault ~${kb < 1024 ? kb.toFixed(0) + ' KB' : (kb / 1024).toFixed(1) + ' MB'}`; }
+    const blob = await vaultGet();
+    if (blob) { const kb = new Blob([blob]).size / 1024; usage = ` · vault ~${kb < 1024 ? kb.toFixed(0) + ' KB' : (kb / 1024).toFixed(1) + ' MB'}${vaultBackend === 'idb' ? '' : ' · legacy storage'}`; }
   } catch (e) {}
   const persisted = await navigator.storage.persisted();
   const age = backupAgeDays();
@@ -9264,18 +9363,19 @@ function showOnboarding() {
     setOnboarding({ submitted: true, name, email, at, pending: !ok });
     screen.classList.remove('show');
     if (lock) lock.style.display = 'flex';                // reveal the lock screen now
-    showLockForm(!!localStorage.getItem(STORAGE_KEY));    // proceed to set-password / unlock
+    showLockForm(!!(await vaultGet()));                   // proceed to set-password / unlock
   };
 }
 
-(function boot() {
+(async function boot() {
   initPwa();
   retryPendingOnboarding();
+  await initVaultStorage();  // pick backend + run the one-time IndexedDB migration
   const o = getOnboarding();
   if (!o || !o.submitted) {
     showOnboarding();        // required for new AND existing users until completed
   } else {
-    showLockForm(!!localStorage.getItem(STORAGE_KEY));
+    showLockForm(!!(await vaultGet()));
   }
 })();
 </script>
