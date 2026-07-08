@@ -1324,26 +1324,72 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .backup-banner .ub-dismiss { color: rgba(245,242,236,0.5); }
   .backup-banner .ub-dismiss:hover { color: #F5F2EC; }
 
-  @media (max-width: 720px) {
-    #app.unlocked { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  /* ----- Mobile navigation (≤768px): hamburger drawer + bottom tab bar -----
+     Desktop: sidebar in the grid, topbar/backdrop/bottom-bar hidden. Mobile:
+     the sidebar becomes an off-canvas drawer (opened by the hamburger or the
+     "More" tab), and primary routes live in a fixed bottom bar. */
+  .mobile-topbar { display: none; }
+  #drawer-backdrop { display: none; }
+  #bottom-bar { display: none; }
+
+  @media (max-width: 768px) {
+    #app.unlocked { display: block; height: auto; min-height: 100vh; }
+    .mobile-topbar {
+      display: flex; align-items: center; gap: 10px;
+      position: sticky; top: 0; z-index: 60;
+      background: var(--sidebar-bg);
+      padding: 10px 14px;
+      padding-top: calc(10px + env(safe-area-inset-top));
+      border-bottom: 1px solid rgba(245,242,236,0.08);
+    }
+    #menu-btn {
+      display: flex; align-items: center; justify-content: center;
+      background: none; border: 0; cursor: pointer;
+      color: var(--sidebar-text-active); padding: 8px; margin-left: -8px;
+    }
+    .mobile-topbar .brand {
+      font-family: 'DM Serif Display', serif; font-size: 22px; line-height: 1;
+      color: var(--sidebar-text-active);
+    }
+    /* Sidebar → off-canvas drawer */
     .sidebar {
-      flex-direction: row; flex-wrap: wrap; align-items: center;
-      padding: 10px 14px; gap: 6px;
+      position: fixed; top: 0; left: 0; bottom: 0;
+      width: 264px; max-width: 82vw; z-index: 950;
+      padding-top: calc(24px + env(safe-area-inset-top));
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+      transform: translateX(-105%);
+      transition: transform 240ms ease;
     }
-    .sidebar .brand { padding: 0 6px 0 0; font-size: 22px; }
-    .sidebar .nav-section { display: none; }
-    .nav-item { width: auto; padding: 6px 10px; font-size: 13px; }
-    .nav-item .dot { display: none; }
-    .sidebar-bottom {
-      margin-top: 0; padding-top: 0; border-top: 0;
-      margin-left: auto; flex-direction: row; gap: 6px;
+    body.drawer-open .sidebar { transform: translateX(0); box-shadow: 0 0 60px rgba(0,0,0,0.55); }
+    body.drawer-open #drawer-backdrop {
+      display: block; position: fixed; inset: 0; z-index: 940;
+      background: rgba(0,0,0,0.5);
     }
-    .sidebar .new-btn { padding: 6px 10px; font-size: 12px; }
-    .sidebar .lock-btn { padding: 6px 8px; font-size: 12px; }
+    /* Bottom tab bar (only when unlocked) */
+    #app.unlocked ~ #bottom-bar { display: flex; }
+    #bottom-bar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
+      background: rgba(20, 19, 17, 0.96);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      border-top: 1px solid rgba(245,242,236,0.10);
+      padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    }
+    .bb-item {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+      background: none; border: 0; cursor: pointer;
+      color: var(--text-muted); font-size: 10px; letter-spacing: 0.02em;
+      padding: 5px 0 3px; border-radius: 8px;
+    }
+    .bb-item svg { width: 21px; height: 21px; }
+    .bb-item.active { color: var(--accent-bright); }
+    /* Room for the bars */
+    .content { padding: 20px 16px calc(86px + env(safe-area-inset-bottom)); }
     .form-grid { grid-template-columns: 1fr; }
-    .content { padding: 20px; }
     .page-head { flex-direction: column; align-items: flex-start; }
     .page-head .title { font-size: 24px; }
+    /* Floating bits move above the bottom bar */
+    .update-banner { bottom: calc(70px + env(safe-area-inset-bottom)); }
+    .backup-banner { bottom: calc(126px + env(safe-area-inset-bottom)); }
   }
   /* Floating timer widget — present on all screens (only when unlocked) */
   #timer-widget { position: fixed; right: 20px; bottom: 20px; z-index: 900; display: none; }
@@ -1371,7 +1417,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   #timer-widget .tw-proj { font-size: 13px; font-weight: 600; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
   #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 18px; color: var(--accent-bright); font-variant-numeric: tabular-nums; padding-right: 4px; }
   #timer-widget .tw-stop { border: none; cursor: pointer; width: 34px; height: 34px; border-radius: 999px; background: var(--accent-bright); color: #0F0E0D; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
-  @media (max-width: 720px) { #timer-widget { right: 12px; bottom: 12px; } }
+  @media (max-width: 768px) { #timer-widget { right: 12px; bottom: calc(72px + env(safe-area-inset-bottom)); } }
 </style>
 </head>
 <body>
@@ -1418,7 +1464,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 </div>
 
 <div id="app">
-  <aside class="sidebar">
+  <header class="mobile-topbar">
+    <button id="menu-btn" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <div class="brand" id="topbar-brand">seed</div>
+  </header>
+  <aside class="sidebar" id="app-sidebar">
     <div class="brand" id="sidebar-brand">invoicing</div>
     <div class="entity-switcher" id="entity-switcher"></div>
     <div class="nav-section">Main</div>
@@ -1440,6 +1492,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   </aside>
   <main class="content" id="view-host"></main>
 </div>
+
+<div id="drawer-backdrop"></div>
+<nav id="bottom-bar" aria-label="Primary">
+  <button class="bb-item" data-route="dashboard">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9.5V21h13V9.5"/></svg>
+    <span>Home</span>
+  </button>
+  <button class="bb-item" data-route="documents">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/></svg>
+    <span>Documents</span>
+  </button>
+  <button class="bb-item" data-route="timer">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9.5v3.5l2.4 1.8"/><path d="M10 2h4"/></svg>
+    <span>Timer</span>
+  </button>
+  <button class="bb-item" id="bb-more" aria-label="More — open menu">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+    <span>More</span>
+  </button>
+</nav>
 
 <div id="update-banner" class="update-banner" style="display:none;">
   <span id="update-banner-text">Update available</span>
@@ -1555,7 +1627,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.13.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.13.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -1913,6 +1985,7 @@ function lockApp() {
   state = null;
   currentPassword = null;
   if (lockTimer) clearTimeout(lockTimer);
+  closeDrawer();
   document.getElementById('app').classList.remove('unlocked');
   document.getElementById('lock-screen').style.display = 'flex';
   showLockForm(true);
@@ -2596,6 +2669,10 @@ function setRoute(r) {
   document.querySelectorAll('.nav-item').forEach((n) => {
     n.classList.toggle('active', n.dataset.route === r);
   });
+  document.querySelectorAll('#bottom-bar .bb-item[data-route]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.route === r);
+  });
+  closeDrawer();
   render();
 }
 
@@ -2603,8 +2680,33 @@ document.querySelectorAll('.nav-item').forEach((n) => {
   n.addEventListener('click', () => setRoute(n.dataset.route));
 });
 
-document.getElementById('new-invoice-btn').addEventListener('click', () => openDocEditor(null, 'invoice'));
-document.getElementById('new-quote-btn').addEventListener('click', () => openDocEditor(null, 'quote'));
+/* Mobile navigation: hamburger drawer + bottom tab bar (≤768px, CSS-gated). */
+function openDrawer() {
+  document.body.classList.add('drawer-open');
+  const mb = document.getElementById('menu-btn');
+  if (mb) mb.setAttribute('aria-expanded', 'true');
+}
+function closeDrawer() {
+  document.body.classList.remove('drawer-open');
+  const mb = document.getElementById('menu-btn');
+  if (mb) mb.setAttribute('aria-expanded', 'false');
+}
+document.getElementById('menu-btn').addEventListener('click', () => {
+  document.body.classList.contains('drawer-open') ? closeDrawer() : openDrawer();
+});
+document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
+document.getElementById('bb-more').addEventListener('click', () => {
+  document.body.classList.contains('drawer-open') ? closeDrawer() : openDrawer();
+});
+document.querySelectorAll('#bottom-bar .bb-item[data-route]').forEach((b) => {
+  b.addEventListener('click', () => setRoute(b.dataset.route));
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('drawer-open')) closeDrawer();
+});
+
+document.getElementById('new-invoice-btn').addEventListener('click', () => { closeDrawer(); openDocEditor(null, 'invoice'); });
+document.getElementById('new-quote-btn').addEventListener('click', () => { closeDrawer(); openDocEditor(null, 'quote'); });
 document.getElementById('lock-now-btn').addEventListener('click', () => {
   if (confirm('Lock the app? You will need to re-enter your password.')) lockApp();
 });
@@ -9160,11 +9262,13 @@ function applyBrand() {
   const ent = activeEntity();
   const brand = (s.brandName && s.brandName.trim()) || (ent && ent.company && ent.company.name) || 'seed';
   const title = (s.appTitle && s.appTitle.trim()) || 'Invoicing';
-  // Sidebar / lock screen — always text in the app's serif font
+  // Sidebar / lock screen / mobile top bar — always text in the app's serif font
   const side = document.getElementById('sidebar-brand');
   if (side) side.textContent = brand;
   const lock = document.getElementById('lock-brand');
   if (lock) lock.textContent = brand;
+  const top = document.getElementById('topbar-brand');
+  if (top) top.textContent = brand;
   // Document title
   document.title = `${brand} · ${title}`;
 }
