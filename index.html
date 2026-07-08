@@ -1529,6 +1529,225 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 <div id="modal-host"></div>
 <div id="toast-host"></div>
 
+<script>/* ============================================================
+   MERGE ENGINE — pure vault-merge logic (v1.14)
+
+   Merges two vault states (local + remote) record-by-record using the
+   change-tracking metadata written by trackChanges() since v1.13.1:
+   per-record stamps (ent.sync.rev), deletion tombstones (ent.sync.tombstones),
+   and vault-level entity registry/tombstones (state.syncMeta).
+
+   Rules:
+   - Per record: last-write-wins by stamp `t`. t=0 means "pre-tracking
+     baseline" and always yields to a real stamp.
+   - Record vs tombstone: whichever is newer wins (edit after delete
+     resurrects; delete after edit deletes). Baseline records yield to
+     tombstones.
+   - Ties with different content: deterministic pick (lexicographically
+     larger content hash), logged in the report as a conflict.
+   - Entities: paired by id; one-sided entities are kept unless the other
+     side tombstoned them AFTER that entity's newest record activity.
+   - Invoice/quote number collisions (both devices minted e.g. INV-0839):
+     the earlier-stamped document keeps the number; the newer one is
+     renumbered to the next free number and freshly stamped so the
+     renumber propagates on the next sync.
+   - Additive maps merge additively: payeeRules and expense categories
+     take the LWW winner then union in the loser's missing entries.
+
+   PURE: no DOM, no storage, no globals — inputs are never mutated.
+   Runs unchanged in the browser, Node (tests), or a native webview.
+   ============================================================ */
+
+const MERGE_TRACKED_ARRAYS = ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries'];
+
+function mvClone(x) { return x == null ? x : JSON.parse(JSON.stringify(x)); }
+
+/* Deterministic winner between two stamped candidates.
+   Returns 'a' | 'b'. Prefers higher t; on t tie, higher hash string. */
+function mvPick(ta, ha, tb, hb) {
+  if ((ta || 0) !== (tb || 0)) return (ta || 0) > (tb || 0) ? 'a' : 'b';
+  if ((ha || '') === (hb || '')) return 'a'; // identical content — either is fine
+  return (ha || '') > (hb || '') ? 'a' : 'b';
+}
+
+function mvNewestStamp(ent) {
+  let max = 0;
+  const rev = (ent.sync && ent.sync.rev) || {};
+  for (const k of Object.keys(rev)) if (rev[k].t > max) max = rev[k].t;
+  return max;
+}
+
+function mvMergeEntity(le, re, report, now) {
+  const lRev = (le.sync && le.sync.rev) || {};
+  const rRev = (re.sync && re.sync.rev) || {};
+  const lTomb = (le.sync && le.sync.tombstones) || {};
+  const rTomb = (re.sync && re.sync.tombstones) || {};
+
+  // Entity scalars (company, banking, numbering, …): coarse LWW via the
+  // meta:settings pseudo-record, applied to the whole scalar bundle.
+  const ls = lRev['meta:settings'] || { t: 0, h: '' };
+  const rs = rRev['meta:settings'] || { t: 0, h: '' };
+  const settingsWinner = mvPick(ls.t, ls.h, rs.t, rs.h) === 'a' ? le : re;
+  const out = mvClone(settingsWinner);
+  if (settingsWinner !== le) report.settingsFromRemote.push(le.id);
+
+  // Device-local bits always stay local.
+  out.runningTimer = mvClone(le.runningTimer);
+  out.fxRates = mvClone(le.fxRates);
+  out.fxFetchedAt = le.fxFetchedAt;
+
+  // payeeRules: LWW winner + union in the loser's missing keys (additive learnings).
+  const lp = lRev['meta:payeeRules'] || { t: 0, h: '' };
+  const rp = rRev['meta:payeeRules'] || { t: 0, h: '' };
+  const prWin = mvPick(lp.t, lp.h, rp.t, rp.h) === 'a' ? (le.payeeRules || {}) : (re.payeeRules || {});
+  const prLose = prWin === (le.payeeRules || {}) ? (re.payeeRules || {}) : (le.payeeRules || {});
+  out.payeeRules = mvClone(prWin);
+  for (const k of Object.keys(prLose)) if (!(k in out.payeeRules)) out.payeeRules[k] = mvClone(prLose[k]);
+
+  // Record-by-record merge.
+  const mergedRev = {};
+  const mergedTomb = {};
+  out.sync = { rev: mergedRev, tombstones: mergedTomb };
+  mergedRev['meta:settings'] = mvClone(settingsWinner === le ? ls : rs);
+  mergedRev['meta:payeeRules'] = mvClone(mvPick(lp.t, lp.h, rp.t, rp.h) === 'a' ? lp : rp);
+
+  for (const arr of MERGE_TRACKED_ARRAYS) {
+    const lMap = new Map((le[arr] || []).filter((r) => r && r.id).map((r) => [arr + ':' + r.id, r]));
+    const rMap = new Map((re[arr] || []).filter((r) => r && r.id).map((r) => [arr + ':' + r.id, r]));
+    const keys = new Set([...lMap.keys(), ...rMap.keys(), ...Object.keys(lTomb), ...Object.keys(rTomb)]);
+    const result = [];
+    for (const key of keys) {
+      if (!key.startsWith(arr + ':')) continue;
+      const lr = lMap.get(key), rr = rMap.get(key);
+      const lst = lRev[key], rst = rRev[key];
+      const lt = lTomb[key] || 0, rt = rTomb[key] || 0;
+      const tombTime = Math.max(lt, rt);
+
+      // Candidate record (the stamped winner of the two sides, if both exist).
+      let rec = null, st = null, fromRemote = false;
+      if (lr && rr) {
+        const w = mvPick(lst ? lst.t : 0, lst ? lst.h : '', rst ? rst.t : 0, rst ? rst.h : '');
+        rec = w === 'a' ? lr : rr; st = w === 'a' ? lst : rst; fromRemote = w === 'b';
+        if (lst && rst && lst.t === rst.t && lst.h !== rst.h) report.conflicts.push({ key, entity: le.id, kept: fromRemote ? 'remote' : 'local' });
+        if (fromRemote && lst && rst && rst.t > lst.t) report.updated++;
+      } else if (lr || rr) {
+        rec = lr || rr; st = lr ? lst : rst; fromRemote = !lr;
+        if (fromRemote) report.added++;
+      }
+
+      if (rec && tombTime) {
+        // Delete vs record: newer intent wins; baseline (t=0) yields to tombstone.
+        const recT = st ? st.t : 0;
+        if (recT > tombTime) { report.resurrected++; }
+        else { mergedTomb[key] = tombTime; if (lr) report.deleted++; continue; }
+      } else if (!rec && tombTime) {
+        mergedTomb[key] = tombTime;
+        continue;
+      }
+      if (!rec) continue;
+      result.push(mvClone(rec));
+      mergedRev[key] = st ? mvClone(st) : { h: '', t: 0 };
+    }
+    // Stable order: date then id where dates exist, else id — keeps lists tidy
+    // and the merge deterministic regardless of input order.
+    result.sort((a, b) => ((a.date || '') + a.id).localeCompare((b.date || '') + b.id));
+    out[arr] = result;
+  }
+
+  // Prune tombstones the caller-side tracker would prune anyway (>180 days).
+  for (const [k, t] of Object.entries(mergedTomb)) if (now - t > 180 * 86400000) delete mergedTomb[k];
+
+  mvFixNumberCollisions(out, report, now);
+  return out;
+}
+
+/* Two devices can mint the same invoice/quote number offline. The
+   earlier-stamped document keeps it; later ones move to the next free number
+   and get a fresh stamp so the renumber wins everywhere on later syncs. */
+function mvFixNumberCollisions(ent, report, now) {
+  const rev = ent.sync.rev;
+  for (const type of ['invoice', 'quote']) {
+    const docs = (ent.documents || []).filter((d) => d.type === type);
+    const used = new Map(); // number → doc that keeps it
+    let maxNum = 0;
+    for (const d of docs) maxNum = Math.max(maxNum, Number(d.number) || 0);
+    const stampOf = (d) => { const s = rev['documents:' + d.id]; return s ? s.t : 0; };
+    for (const d of docs.slice().sort((a, b) => stampOf(a) - stampOf(b) || String(a.id).localeCompare(String(b.id)))) {
+      const n = Number(d.number) || 0;
+      if (!used.has(n)) { used.set(n, d); continue; }
+      maxNum += 1;
+      report.renumbered.push({ entity: ent.id, id: d.id, type, from: n, to: maxNum });
+      d.number = maxNum;
+      used.set(maxNum, d);
+      const key = 'documents:' + d.id;
+      rev[key] = { h: (rev[key] && rev[key].h) || '', t: now }; // hash refreshed on next save
+    }
+    const nextField = type === 'invoice' ? 'nextInv' : 'nextQt';
+    ent[nextField] = Math.max(Number(ent[nextField]) || 1, maxNum + 1);
+  }
+}
+
+/* Main entry: merge remote INTO local. Returns { merged, report }; neither
+   input is mutated. Both vaults must be entity-shaped (v6+) with sync maps
+   (any missing maps are treated as all-baseline). */
+function mergeVaults(local, remote, opts = {}) {
+  const now = opts.now || Date.now();
+  const report = { added: 0, updated: 0, deleted: 0, resurrected: 0, renumbered: [], conflicts: [], settingsFromRemote: [], entitiesAdded: 0, entitiesRemoved: 0 };
+
+  const L = local, R = remote;
+  const lsm = L.syncMeta || { rev: {}, entities: {}, entityTombstones: {} };
+  const rsm = R.syncMeta || { rev: {}, entities: {}, entityTombstones: {} };
+
+  const merged = mvClone(L);
+  merged.entities = [];
+
+  const rById = new Map((R.entities || []).map((e) => [e.id, e]));
+  const lById = new Map((L.entities || []).map((e) => [e.id, e]));
+  const allIds = [...new Set([...(L.entities || []).map((e) => e.id), ...(R.entities || []).map((e) => e.id)])];
+
+  for (const id of allIds) {
+    const le = lById.get(id), re = rById.get(id);
+    if (le && re) { merged.entities.push(mvMergeEntity(le, re, report, now)); continue; }
+    const ent = le || re;
+    const tomb = (le ? rsm.entityTombstones : lsm.entityTombstones) || {};
+    if (tomb[id] && tomb[id] >= mvNewestStamp(ent)) { report.entitiesRemoved++; continue; } // deletion stands
+    merged.entities.push(mvClone(ent));
+    if (!le) report.entitiesAdded++;
+  }
+
+  // Global settings: coarse LWW; expense categories + bank profiles union additively.
+  const lg = (lsm.rev || {})['meta:globalSettings'] || { t: 0, h: '' };
+  const rg = (rsm.rev || {})['meta:globalSettings'] || { t: 0, h: '' };
+  const gWinner = mvPick(lg.t, lg.h, rg.t, rg.h) === 'a' ? L : R;
+  const gLoser = gWinner === L ? R : L;
+  merged.settings = mvClone(gWinner.settings || {});
+  const loserSettings = gLoser.settings || {};
+  merged.settings.expenseCategories = [...new Set([...(merged.settings.expenseCategories || []), ...(loserSettings.expenseCategories || [])])];
+  {
+    const seen = new Set((merged.settings.bankProfiles || []).map((p) => JSON.stringify(p)));
+    merged.settings.bankProfiles = merged.settings.bankProfiles || [];
+    for (const p of (loserSettings.bankProfiles || [])) if (!seen.has(JSON.stringify(p))) merged.settings.bankProfiles.push(mvClone(p));
+  }
+
+  // Rebuild vault-level sync meta.
+  merged.syncMeta = { rev: { 'meta:globalSettings': mvClone(gWinner === L ? lg : rg) }, entities: {}, entityTombstones: {} };
+  for (const e of merged.entities) merged.syncMeta.entities[e.id] = (lsm.entities || {})[e.id] || (rsm.entities || {})[e.id] || now;
+  for (const [id, t] of [...Object.entries(lsm.entityTombstones || {}), ...Object.entries(rsm.entityTombstones || {})]) {
+    if (!merged.entities.some((e) => e.id === id)) merged.syncMeta.entityTombstones[id] = Math.max(t, merged.syncMeta.entityTombstones[id] || 0);
+  }
+
+  // Keep the active entity valid.
+  if (!merged.entities.some((e) => e.id === merged.activeEntityId)) {
+    merged.activeEntityId = merged.entities[0] ? merged.entities[0].id : null;
+  }
+  return { merged, report };
+}
+
+/* Node export for headless tests; harmless no-op in the browser. */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { mergeVaults };
+}
+</script>
 <script>
 /* ============================================================
    SEED INVOICING — single-file local app
@@ -1627,7 +1846,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.13.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.14.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7320,8 +7539,11 @@ function renderSettings() {
       <div class="row-flex">
         <button class="btn" id="backup-export">Download backup (JSON)</button>
         <button class="btn" id="backup-import">Restore from backup</button>
+        <button class="btn" id="backup-merge" title="Combine another device's backup with this one — newer versions of each record win">Merge from backup</button>
         <input class="file-input" id="backup-file" type="file" accept=".json" />
+        <input class="file-input" id="merge-file" type="file" accept=".json" />
       </div>
+      <div class="text-sm text-muted" style="margin-top:8px;">Restore <strong>replaces</strong> everything on this device. Merge <strong>combines</strong> — use it to bring in work done on another device: records that only exist there are added, and where both devices touched the same record, the newer edit wins.</div>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
         <div id="storage-status" class="text-sm text-mid">Checking storage…</div>
         <button class="btn btn-sm" id="storage-persist" style="margin-top:8px;display:none;">Make storage persistent</button>
@@ -7493,25 +7715,11 @@ function bindSettingsEvents() {
   if (backupFile) backupFile.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    e.target.value = '';
     if (!confirm('This will REPLACE all current data with the backup. Continue?')) return;
-    const text = await file.text();
     try {
-      // Drop prototype-polluting keys defensively while parsing untrusted JSON.
-      const antiPollution = (k, v) => (k === '__proto__' || k === 'constructor' || k === 'prototype') ? undefined : v;
-      let data = JSON.parse(text, antiPollution);
-      if (data && typeof data === 'object' && data.ct && data.salt && data.iv) {
-        // Encrypted backup — try the current vault password first, then ask.
-        let decrypted = null;
-        try { decrypted = await decryptData(text, currentPassword); } catch (e2) {
-          const pw = prompt('This backup is encrypted. Enter the master password it was created with:');
-          if (pw == null) return;
-          try { decrypted = await decryptData(text, pw); } catch (e3) {
-            alert('Wrong password for this backup.'); return;
-          }
-        }
-        data = JSON.parse(JSON.stringify(decrypted), antiPollution);
-      }
-      if (!data || typeof data !== 'object') throw new Error('not a valid backup file');
+      const data = await decodeBackupText(await file.text());
+      if (data == null) return;   // user cancelled the password prompt
       const isObj = (x) => x && typeof x === 'object';
       const validOld = Array.isArray(data.clients) && Array.isArray(data.documents) && isObj(data.settings);
       const validNew = Array.isArray(data.entities) && isObj(data.settings);
@@ -7525,6 +7733,37 @@ function bindSettingsEvents() {
       toast('Backup restored');
     } catch (err) {
       alert('Invalid backup file: ' + err.message);
+    }
+  });
+
+  const backupMerge = host.querySelector('#backup-merge');
+  const mergeFile = host.querySelector('#merge-file');
+  if (backupMerge) backupMerge.addEventListener('click', () => mergeFile.click());
+  if (mergeFile) mergeFile.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const data = await decodeBackupText(await file.text());
+      if (data == null) return;   // user cancelled the password prompt
+      if (!Array.isArray(data.entities)) {
+        alert('This backup is from an app version too old to merge. Open the app on that device, let it update, download a fresh backup, and merge that instead.');
+        return;
+      }
+      if (!confirm('Merge this backup into the data on this device?\n\nNothing is replaced wholesale: records that only exist in the backup are added, and where both sides changed the same record, the newer edit wins.')) return;
+      // Plain deep copy as the local input — strips the entity-accessor
+      // properties (non-enumerable) and guarantees the engine sees pure data.
+      const { merged, report } = mergeVaults(JSON.parse(JSON.stringify(state)), data);
+      state = merged;
+      migrateState();              // ensure shapes if the backup was an older 6.x
+      installEntityAccessors();
+      await saveState();
+      applyBrand();
+      renderEntitySwitcher();
+      render();
+      showMergeReport(report);
+    } catch (err) {
+      alert('Merge failed — nothing was changed: ' + err.message);
     }
   });
 
@@ -9396,6 +9635,64 @@ async function refreshStorageStatus() {
 }
 
 // Download a JSON backup without any UI prompt (used as a pre-update safety net)
+/* Decode a backup file's text — encrypted (v1.11.3+) or legacy plain JSON.
+   Shared by Restore and Merge so their formats can never drift apart.
+   Returns the parsed state object, or null if the user cancelled the password
+   prompt. Throws on invalid files or a wrong password. */
+async function decodeBackupText(text) {
+  // Drop prototype-polluting keys defensively while parsing untrusted JSON.
+  const antiPollution = (k, v) => (k === '__proto__' || k === 'constructor' || k === 'prototype') ? undefined : v;
+  let data = JSON.parse(text, antiPollution);
+  if (data && typeof data === 'object' && data.ct && data.salt && data.iv) {
+    let decrypted = null;
+    try { decrypted = await decryptData(text, currentPassword); } catch (e) {
+      const pw = prompt('This backup is encrypted. Enter the master password it was created with:');
+      if (pw == null) return null;
+      try { decrypted = await decryptData(text, pw); } catch (e2) {
+        throw new Error('wrong password for this backup');
+      }
+    }
+    data = JSON.parse(JSON.stringify(decrypted), antiPollution);
+  }
+  if (!data || typeof data !== 'object') throw new Error('not a valid backup file');
+  return data;
+}
+
+function showMergeReport(report) {
+  const lines = [];
+  const row = (label, n) => { if (n) lines.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);"><span>${label}</span><strong>${n}</strong></div>`); };
+  row('Records added from the backup', report.added);
+  row('Records updated to the backup’s newer version', report.updated);
+  row('Deletions applied', report.deleted);
+  row('Records kept despite a deletion elsewhere (edited more recently)', report.resurrected);
+  row('Businesses added', report.entitiesAdded);
+  row('Businesses removed (deleted on the other device)', report.entitiesRemoved);
+  const renumbers = (report.renumbered || []).map((r) =>
+    `<div class="text-sm" style="padding:4px 0;">${r.type === 'invoice' ? 'Invoice' : 'Quote'} <span class="mono">#${r.from}</span> existed on both devices — the newer one is now <span class="mono">#${r.to}</span></div>`).join('');
+  const conflictNote = (report.conflicts || []).length
+    ? `<div class="text-sm text-muted" style="margin-top:8px;">${report.conflicts.length} record${report.conflicts.length === 1 ? ' was' : 's were'} changed on both devices at the same moment — one version was kept. Check recent edits if something looks off.</div>` : '';
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head">
+          <div class="ttl">Merge complete</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">
+          ${lines.join('') || '<div class="text-sm text-mid">Both devices already had the same data — nothing needed merging.</div>'}
+          ${renumbers ? `<div style="margin-top:10px;">${renumbers}</div>` : ''}
+          ${conflictNote}
+          <div class="text-sm text-muted" style="margin-top:12px;">Tip: download a fresh backup on this device now — it carries the combined data.</div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" data-close>Done</button>
+        </div>
+      </div>
+    </div>
+  `;
+  showModal(html);
+}
+
 /* Backups are encrypted with the current master password (same AES-GCM vault
    format, plus a `format` tag so restore can tell them apart from old
    plain-JSON backups — which still restore fine). */
