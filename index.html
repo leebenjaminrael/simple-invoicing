@@ -1261,6 +1261,31 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     animation: toastIn 200ms ease;
   }
   @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+  /* Project stat cards */
+  .bento.pj-stats { grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; }
+  @media (max-width: 1100px) { .bento.pj-stats { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .bento.pj-stats { grid-template-columns: 1fr; } }
+
+  /* Project budget table */
+  .budget-table table { width: 100%; border-collapse: collapse; }
+  .budget-table th { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  .budget-table td { padding: 3px 4px; vertical-align: middle; }
+  .budget-table input, .budget-table select {
+    width: 100%; background: var(--surface); border: 1px solid transparent; border-radius: 6px;
+    color: var(--text); font-size: 13px; padding: 7px 8px;
+  }
+  .budget-table input:hover, .budget-table select:hover { border-color: var(--border); }
+  .budget-table input:focus, .budget-table select:focus { border-color: var(--accent-bright); outline: none; background: var(--surface-2); }
+  .budget-table input[type="number"] { text-align: right; font-family: 'DM Mono', monospace; font-size: 12px; }
+  .budget-table .bt-total { font-family: 'DM Mono', monospace; font-size: 13px; white-space: nowrap; }
+  .bt-section-head td { padding: 14px 4px 6px; border-bottom: 1px solid var(--border); }
+  .bt-section-name { font-weight: 600 !important; background: none !important; font-size: 13px !important; min-width: 200px; }
+  .bt-foot { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; max-width: 380px; margin-left: auto; }
+  .bt-foot-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 4px 4px; font-size: 13px; color: var(--text-mid); }
+  .bt-foot-row.bt-grand { font-weight: 600; color: var(--text); font-size: 14px; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
+  .bt-foot-row input { background: var(--surface); border: 1px solid var(--border); border-radius: 5px; color: var(--text); padding: 3px 6px; text-align: right; }
+  @media (max-width: 768px) { .budget-table { overflow-x: auto; } .budget-table table { min-width: 720px; } }
+
   /* Help & FAQ accordions (settings) */
   .faq details { border-bottom: 1px solid var(--border); }
   .faq details:last-child { border-bottom: 0; }
@@ -1482,6 +1507,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <button class="nav-item" data-route="finances"><span class="dot"></span> Finances</button>
     <button class="nav-item" data-route="vat"><span class="dot"></span> VAT</button>
     <button class="nav-item" data-route="documents"><span class="dot"></span> Documents</button>
+    <button class="nav-item" data-route="projects"><span class="dot"></span> Projects</button>
     <button class="nav-item" data-route="clients"><span class="dot"></span> Clients</button>
     <button class="nav-item" data-route="timer"><span class="dot"></span> Timer</button>
     <button class="nav-item" data-route="expenses"><span class="dot"></span> Expenses</button>
@@ -2043,7 +2069,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.15.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.16.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2712,6 +2738,18 @@ function migrateState() {
     // v6.7: record-level change tracking (sync plumbing) — maps are also
     // created lazily by trackChanges(), this just keeps shapes predictable.
     if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
+    // v6.8: projects grow budgets/people/dates; documents + expenses gain an
+    // optional projectId. Old free-text projectTitle matches by name when
+    // unambiguous, so existing invoices link up automatically.
+    for (const p of (ent.projects || [])) ensureProjectShape(p);
+    for (const d of (ent.documents || [])) {
+      if (d.projectId === undefined) {
+        const title = (d.projectTitle || '').trim().toLowerCase();
+        const matches = title ? (ent.projects || []).filter((p) => p.name.trim().toLowerCase() === title) : [];
+        d.projectId = matches.length === 1 ? matches[0].id : null;
+      }
+    }
+    for (const e of (ent.expenses || [])) { if (e.projectId === undefined) e.projectId = null; }
   }
   state.version = 6;
 }
@@ -3093,7 +3131,10 @@ function setRoute(r) {
 }
 
 document.querySelectorAll('.nav-item').forEach((n) => {
-  n.addEventListener('click', () => setRoute(n.dataset.route));
+  n.addEventListener('click', () => {
+    if (n.dataset.route === 'projects') currentProjectId = null; // nav always lands on the list
+    setRoute(n.dataset.route);
+  });
 });
 
 /* Mobile navigation: hamburger drawer + bottom tab bar (≤768px, CSS-gated). */
@@ -3137,6 +3178,7 @@ function render() {
   else if (currentRoute === 'finances') host.innerHTML = renderFinances();
   else if (currentRoute === 'vat') host.innerHTML = renderVatView();
   else if (currentRoute === 'documents') host.innerHTML = renderDocuments();
+  else if (currentRoute === 'projects') host.innerHTML = currentProjectId ? renderProjectDetail() : renderProjects();
   else if (currentRoute === 'clients') host.innerHTML = renderClients();
   else if (currentRoute === 'timer') host.innerHTML = renderTimer();
   else if (currentRoute === 'expenses') host.innerHTML = renderExpensesView();
@@ -4570,6 +4612,13 @@ function openExpenseModal(expense) {
               </select>
             </div>
             <div class="field">
+              <label>Project <span class="text-muted">(optional)</span></label>
+              <select data-ef="projectId">
+                <option value="">— no project —</option>
+                ${(state.projects || []).filter((p) => !p.archived).map((p) => `<option value="${p.id}" ${p.id === expense.projectId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
               <label>Payment source</label>
               <select data-ef="paymentSource">
                 ${state.settings.banking.map((b) => `<option value="${b.id}" ${b.id === expense.paymentSource ? 'selected' : ''}>${escapeHtml(b.label)}</option>`).join('')}
@@ -4652,6 +4701,7 @@ function openExpenseModal(expense) {
       vat,
       vatAmount: vat ? Math.round(calcInputVat(amount, currency, vatRate()) * 100) / 100 : 0,
       directCost: get('directCost').checked,
+      projectId: get('projectId') ? (get('projectId').value || null) : (expense.projectId || null),
       notes: get('notes').value.trim(),
     };
     if (!updated.desc) { toast('Description is required'); return; }
@@ -6133,6 +6183,449 @@ function exportAccountantReport() {
 }
 
 /* ============================================================
+   PROJECTS — budgets, people, profitability
+   Progressive disclosure: a new project is a flat list of budget lines;
+   sections, a second quantity dimension, people with per-project rates,
+   and a production fee are all opt-in. Projects are optional everywhere —
+   documents/expenses link to them via nullable pickers.
+   ============================================================ */
+
+let currentProjectId = null;
+
+function ensureProjectShape(p) {
+  if (!p) return p;
+  if (p.description === undefined) p.description = '';
+  if (p.startDate === undefined) p.startDate = '';
+  if (p.endDate === undefined) p.endDate = '';
+  if (p.feePct === undefined) p.feePct = 0;
+  if (!Array.isArray(p.people)) p.people = [];
+  if (!Array.isArray(p.sections)) p.sections = [{ id: uid('sec-'), name: 'Budget', included: true, lines: [] }];
+  if (!p.status) p.status = 'active';
+  return p;
+}
+
+function newBudgetLine() {
+  return { id: uid('bl-'), desc: '', personId: null, qty1: 1, unit1: '', qty2: 1, unit2: '', rate: 0, costRate: 0 };
+}
+
+/* Line total = Qty × [second Qty] × rate — the film-budget pattern
+   (3 days × 5 videos × R4,000). Simple lines leave the second qty at 1. */
+function blBill(l) { return (Number(l.qty1) || 0) * (Number(l.qty2) || 0) * (Number(l.rate) || 0); }
+function blCost(l) { return (Number(l.qty1) || 0) * (Number(l.qty2) || 0) * (Number(l.costRate) || 0); }
+
+function sectionBudget(sec) {
+  let bill = 0, cost = 0;
+  for (const l of (sec.lines || [])) { bill += blBill(l); cost += blCost(l); }
+  return { bill, cost };
+}
+
+function projectBudget(p) {
+  ensureProjectShape(p);
+  let bill = 0, cost = 0;
+  for (const sec of p.sections) {
+    if (sec.included === false) continue;
+    const s = sectionBudget(sec);
+    bill += s.bill; cost += s.cost;
+  }
+  const fee = bill * ((Number(p.feePct) || 0) / 100);
+  const billTotal = bill + fee;
+  const margin = billTotal - cost;
+  return { bill, fee, billTotal, cost, margin, marginPct: billTotal > 0 ? margin / billTotal : 0 };
+}
+
+/* Whether to show the flat (sectionless) budget UI. */
+function projectIsFlat(p) {
+  return p.sections.length === 1 && p.sections[0].name === 'Budget';
+}
+
+function projectActuals(p) {
+  const docs = (state.documents || []).filter((d) => d.projectId === p.id);
+  let invoiced = 0, paid = 0, quoted = 0, missingFx = false;
+  for (const d of docs) {
+    const z = toBase(calcTotals(d).total, d.currency);
+    if (z == null) { missingFx = true; continue; }
+    if (d.type === 'invoice' && d.status !== 'draft') { invoiced += z; if (d.status === 'paid') paid += z; }
+    if (d.type === 'quote' && d.status !== 'draft') quoted += z;
+  }
+  let expenses = 0;
+  for (const e of (state.expenses || []).filter((x) => x.projectId === p.id)) {
+    const z = toBase(Number(e.amount) || 0, e.currency);
+    if (z == null) { missingFx = true; continue; }
+    expenses += z;
+  }
+  const tes = (state.timeEntries || []).filter((t) => t.projectId === p.id);
+  const hours = tes.reduce((n, t) => n + (t.durationSec || 0), 0) / 3600;
+  const timeValue = tes.reduce((n, t) => n + ((t.durationSec || 0) / 3600) * (Number(t.rate) || 0), 0);
+  return { docs, invoiced, paid, quoted, expenses, hours, timeValue, missingFx };
+}
+
+function renderProjects() {
+  const projects = (state.projects || []).filter((p) => !p.archived);
+  projects.forEach(ensureProjectShape);
+  const rows = projects.map((p) => {
+    const b = projectBudget(p);
+    const a = projectActuals(p);
+    const dates = (p.startDate || p.endDate) ? `${p.startDate ? fmtDate(p.startDate) : '…'} → ${p.endDate ? fmtDate(p.endDate) : '…'}` : '—';
+    return `
+      <tr class="row-clickable" data-pj-open="${p.id}">
+        <td><strong>${escapeHtml(p.name)}</strong></td>
+        <td>${escapeHtml(p.clientId ? clientName(p.clientId) : '—')}</td>
+        <td class="text-sm">${dates}</td>
+        <td><span class="badge badge-${p.status === 'wrapped' ? 'paid' : p.status === 'quoting' ? 'quote' : 'sent'}">${p.status}</span></td>
+        <td class="amount">${b.billTotal ? fmtMoney(b.billTotal, baseCcy()) : '—'}</td>
+        <td class="amount">${b.billTotal ? fmtMoney(b.margin, baseCcy()) + ' <span class="text-muted text-sm">' + Math.round(b.marginPct * 100) + '%</span>' : '—'}</td>
+        <td class="amount">${a.invoiced ? fmtMoney(a.invoiced, baseCcy()) : '—'}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <div class="page-head">
+      <div>
+        <div class="title">Projects</div>
+        <div class="sub">Budgets, costs and profitability — linked to your documents, expenses and time.</div>
+      </div>
+      <div class="page-actions">
+        <button class="btn btn-primary" id="pj-new">+ New project</button>
+      </div>
+    </div>
+    <div class="doc-list">
+      <table>
+        <thead><tr><th>Project</th><th>Client</th><th>Dates</th><th>Status</th><th class="amount">Budget total</th><th class="amount">Planned margin</th><th class="amount">Invoiced</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="7" class="empty" style="padding:32px 16px;">No projects yet. A project holds a budget (billables + costs), and pulls in its linked invoices, expenses and tracked time so you can see profitability at a glance. Keep it to three lines or build a full film budget — both work.<br/><button class="btn btn-primary btn-sm" id="pj-empty-new" style="margin-top:12px;">+ Create your first project</button></td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function budgetLineRow(sec, l, people) {
+  const personOpts = people.length ? `
+    <select data-blp="${sec.id}:${l.id}" title="Person (fills rates)">
+      <option value="">—</option>
+      ${people.map((pp) => `<option value="${pp.id}" ${pp.id === l.personId ? 'selected' : ''}>${escapeHtml(pp.name)}</option>`).join('')}
+    </select>` : '';
+  const bill = blBill(l), cost = blCost(l);
+  return `
+    <tr>
+      <td class="bt-desc"><input data-bl="${sec.id}:${l.id}:desc" value="${escapeHtml(l.desc)}" placeholder="e.g. Camera operator / My time" /></td>
+      ${people.length ? `<td class="bt-person">${personOpts}</td>` : ''}
+      <td class="bt-num"><input data-bl="${sec.id}:${l.id}:qty1" type="number" step="any" value="${l.qty1}" /></td>
+      <td class="bt-unit"><input data-bl="${sec.id}:${l.id}:unit1" value="${escapeHtml(l.unit1)}" placeholder="days" /></td>
+      <td class="bt-num"><input data-bl="${sec.id}:${l.id}:qty2" type="number" step="any" value="${l.qty2}" title="Second quantity — e.g. days × 5 videos. Leave at 1 for simple lines." /></td>
+      <td class="bt-unit"><input data-bl="${sec.id}:${l.id}:unit2" value="${escapeHtml(l.unit2)}" placeholder="×" title="Second unit — videos / people / km" /></td>
+      <td class="bt-num"><input data-bl="${sec.id}:${l.id}:rate" type="number" step="any" value="${l.rate}" title="Rate billed to the client" /></td>
+      <td class="bt-num"><input data-bl="${sec.id}:${l.id}:costRate" type="number" step="any" value="${l.costRate}" title="What this line costs you (0 = your own time)" /></td>
+      <td class="amount bt-total">${fmtMoney(bill, baseCcy())}${cost ? `<div class="text-sm text-muted">-${fmtMoney(cost, baseCcy())}</div>` : ''}</td>
+      <td class="bt-del"><button class="btn btn-sm btn-ghost" data-bl-del="${sec.id}:${l.id}" title="Remove line">×</button></td>
+    </tr>`;
+}
+
+function renderProjectDetail() {
+  const p = projectById(currentProjectId);
+  if (!p) { currentProjectId = null; return renderProjects(); }
+  ensureProjectShape(p);
+  const b = projectBudget(p);
+  const a = projectActuals(p);
+  const flat = projectIsFlat(p);
+  const people = p.people;
+  const colCount = people.length ? 10 : 9;
+
+  const sectionsHtml = p.sections.map((sec) => {
+    const st = sectionBudget(sec);
+    const head = flat ? '' : `
+      <tr class="bt-section-head">
+        <td colspan="${colCount - 2}">
+          <label class="checkbox" style="display:inline-flex;align-items:center;gap:8px;">
+            <input type="checkbox" data-sec-toggle="${sec.id}" ${sec.included !== false ? 'checked' : ''} title="Include in totals — untick to price option combinations" />
+            <input data-sec-name="${sec.id}" value="${escapeHtml(sec.name)}" class="bt-section-name" />
+          </label>
+        </td>
+        <td class="amount"><strong>${fmtMoney(st.bill, baseCcy())}</strong></td>
+        <td class="bt-del"><button class="btn btn-sm btn-ghost" data-sec-del="${sec.id}" title="Delete section">×</button></td>
+      </tr>`;
+    return `
+      ${head}
+      ${(sec.lines || []).map((l) => budgetLineRow(sec, l, people)).join('')}
+      <tr><td colspan="${colCount}" style="border-bottom:${flat ? 'none' : '1px solid var(--border)'};padding:4px 0 12px;"><button class="btn btn-sm" data-sec-add-line="${sec.id}">+ Add line</button></td></tr>`;
+  }).join('');
+
+  return `
+    <div class="page-head">
+      <div>
+        <button class="btn btn-sm btn-ghost" id="pj-back" style="margin-bottom:8px;">← All projects</button>
+        <div class="title">${escapeHtml(p.name)}</div>
+        <div class="sub">${escapeHtml(p.clientId ? clientName(p.clientId) : 'No client')}${p.description ? ' · ' + escapeHtml(p.description) : ''}</div>
+      </div>
+      <div class="page-actions">
+        <select id="pj-status">${['quoting', 'active', 'wrapped'].map((s) => `<option value="${s}" ${p.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+        <button class="btn" id="pj-edit">Edit details</button>
+        <button class="btn btn-primary" id="pj-make-quote">Create quote from budget</button>
+      </div>
+    </div>
+
+    <div class="bento pj-stats">
+      <div class="card-v2 is-dark b-cell"><div class="stat-v2 is-dark"><div class="label">Budget total${p.feePct > 0 ? ' (incl. fee)' : ''}</div><div class="value-wrap"><div class="value" style="font-size:26px;">${fmtMoney(b.billTotal, baseCcy())}</div><div class="sub">planned billables</div></div></div></div>
+      <div class="card-v2 is-dark b-cell"><div class="stat-v2 is-dark"><div class="label">Planned cost</div><div class="value-wrap"><div class="value" style="font-size:26px;">${fmtMoney(b.cost, baseCcy())}</div><div class="sub">what you'll pay out</div></div></div></div>
+      <div class="card-v2 is-dark b-cell"><div class="stat-v2 is-dark"><div class="label">Planned margin</div><div class="value-wrap"><div class="value" style="font-size:26px;color:${b.margin >= 0 ? 'var(--accent-bright)' : '#ff8a7a'};">${fmtMoney(b.margin, baseCcy())}</div><div class="sub">${Math.round(b.marginPct * 100)}% of billed</div></div></div></div>
+      <div class="card-v2 is-cream-warm b-cell"><div class="stat-v2 is-cream-warm"><div class="label">Actuals so far</div><div class="value-wrap"><div class="value" style="font-size:26px;">${fmtMoney(a.invoiced, baseCcy())}</div><div class="sub">invoiced · ${fmtMoney(a.expenses, baseCcy())} spent · ${a.hours.toFixed(1)}h tracked${a.missingFx ? ' · FX missing' : ''}</div></div></div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:18px;">
+      <div class="section-head" style="margin-top:0;"><h2>Budget</h2>
+        <div class="row-flex">
+          ${flat ? `<button class="btn btn-sm" id="pj-add-section" title="Group lines into named sections with subtotals — film-budget style">Use sections</button>` : `<button class="btn btn-sm" id="pj-add-section">+ Add section</button>`}
+          <button class="btn btn-sm" id="pj-people-btn">${people.length ? `People (${people.length})` : 'Add people & rates'}</button>
+        </div>
+      </div>
+      <div class="lines budget-table">
+        <table>
+          <thead><tr>
+            <th>Description</th>${people.length ? '<th style="width:110px;">Person</th>' : ''}
+            <th style="width:64px;">Qty</th><th style="width:74px;">Unit</th>
+            <th style="width:64px;">×</th><th style="width:74px;">Unit</th>
+            <th style="width:90px;">Rate</th><th style="width:90px;">Cost</th>
+            <th style="width:110px;text-align:right;">Total</th><th style="width:36px;"></th>
+          </tr></thead>
+          <tbody>${sectionsHtml}</tbody>
+        </table>
+        <div class="bt-foot">
+          <div class="bt-foot-row"><span>Subtotal</span><span>${fmtMoney(b.bill, baseCcy())}</span></div>
+          <div class="bt-foot-row"><span>Production fee <input id="pj-fee" type="number" step="any" min="0" value="${p.feePct}" style="width:56px;" />%</span><span>${fmtMoney(b.fee, baseCcy())}</span></div>
+          <div class="bt-foot-row bt-grand"><span>TOTAL (billed)</span><span>${fmtMoney(b.billTotal, baseCcy())}</span></div>
+          <div class="bt-foot-row"><span>Total cost</span><span>-${fmtMoney(b.cost, baseCcy())}</span></div>
+          <div class="bt-foot-row bt-grand"><span>Margin</span><span style="color:${b.margin >= 0 ? 'var(--accent-bright)' : '#ff8a7a'};">${fmtMoney(b.margin, baseCcy())} · ${Math.round(b.marginPct * 100)}%</span></div>
+        </div>
+        <div class="text-sm text-muted" style="margin-top:8px;">Amounts in ${baseCcy()}. Rate = billed to client, Cost = what you pay out (leave 0 for your own time — that's margin, not cost).${flat ? '' : ' Untick a section to see totals without it — handy for pricing option combinations.'}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-head" style="margin-top:0;"><h2>Linked</h2></div>
+      <div class="text-sm text-mid" style="margin-bottom:10px;">Link invoices/quotes via the Project field on the document, expenses via the expense editor, and time via the timer.</div>
+      ${a.docs.length ? renderDocTable(a.docs, { compact: true }) : '<div class="empty" style="padding:14px;">No documents linked yet.</div>'}
+      ${(() => {
+        const exps = (state.expenses || []).filter((x) => x.projectId === p.id);
+        if (!exps.length) return '';
+        return `<table style="margin-top:12px;"><thead><tr><th>Date</th><th>Expense</th><th class="amount">Amount</th></tr></thead><tbody>
+          ${exps.map((e) => `<tr><td>${fmtDate(e.date)}</td><td>${escapeHtml(e.desc)}</td><td class="amount">${fmtMoney(Number(e.amount) || 0, e.currency)}</td></tr>`).join('')}
+        </tbody></table>`;
+      })()}
+      ${a.hours > 0 ? `<div class="text-sm text-mid" style="margin-top:12px;">⏱ ${a.hours.toFixed(1)} hours tracked · billable value ${fmtMoney(a.timeValue, baseCcy())} — bill it from the <a href="#" data-route-link="timer" style="color:var(--accent-bright);">Timer</a> tab.</div>` : ''}
+    </div>`;
+}
+
+function openProjectModal(existing) {
+  const p = existing || { name: '', clientId: '', description: '', startDate: '', endDate: '' };
+  const clientOpts = ['<option value="">— no client yet —</option>']
+    .concat((state.clients || []).map((c) => `<option value="${c.id}" ${c.id === p.clientId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`)).join('');
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head"><div class="ttl">${existing ? 'Edit project' : 'New project'}</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="field full"><label>Name</label><input id="pjm-name" value="${escapeHtml(p.name)}" placeholder="e.g. Learning Lab videos" /></div>
+            <div class="field full"><label>Client</label><select id="pjm-client">${clientOpts}</select></div>
+            <div class="field full"><label>Description <span class="text-muted">(optional)</span></label><input id="pjm-desc" value="${escapeHtml(p.description || '')}" placeholder="e.g. 5 videos @ 3 mins" /></div>
+            <div class="field"><label>Est. start</label><input id="pjm-start" type="date" value="${p.startDate || ''}" /></div>
+            <div class="field"><label>Est. end</label><input id="pjm-end" type="date" value="${p.endDate || ''}" /></div>
+          </div>
+          <div class="err" id="pjm-err"></div>
+        </div>
+        <div class="modal-foot">
+          ${existing ? '<button class="btn btn-ghost danger" id="pjm-delete" style="margin-right:auto;">Delete project</button>' : ''}
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="pjm-save">${existing ? 'Save' : 'Create project'}</button>
+        </div>
+      </div>
+    </div>`);
+  document.getElementById('pjm-save').addEventListener('click', async () => {
+    const name = document.getElementById('pjm-name').value.trim();
+    if (!name) { document.getElementById('pjm-err').textContent = 'Give the project a name.'; return; }
+    let target = existing;
+    if (!target) { target = ensureProjectShape({ id: uid('pj-'), clientId: null, name: '', rate: 0, status: 'active', archived: false, createdAt: new Date().toISOString() }); state.projects.push(target); }
+    target.name = name;
+    target.clientId = document.getElementById('pjm-client').value || null;
+    target.description = document.getElementById('pjm-desc').value.trim();
+    target.startDate = document.getElementById('pjm-start').value || '';
+    target.endDate = document.getElementById('pjm-end').value || '';
+    await saveState();
+    closeModal();
+    currentProjectId = target.id;
+    render();
+  });
+  const del = document.getElementById('pjm-delete');
+  if (del) del.addEventListener('click', async () => {
+    const linkedDocs = (state.documents || []).some((d) => d.projectId === existing.id);
+    if (linkedDocs) { alert('This project has invoices or quotes linked to it — unlink them first (or archive the project by wrapping it).'); return; }
+    const removed = existing;
+    state.projects = state.projects.filter((x) => x.id !== existing.id);
+    for (const e of (state.expenses || [])) if (e.projectId === existing.id) e.projectId = null;
+    await saveState();
+    closeModal();
+    currentProjectId = null;
+    render();
+    toastUndo(`Deleted ${removed.name}`, async () => {
+      state.projects.push(removed);
+      await saveState();
+      render();
+    });
+  });
+}
+
+function openProjectPeopleModal(p) {
+  const rows = () => p.people.map((pp, i) => `
+    <tr>
+      <td><input data-pp="${i}:name" value="${escapeHtml(pp.name)}" placeholder="Name" /></td>
+      <td><input data-pp="${i}:billRate" type="number" step="any" value="${pp.billRate}" title="Billed to client" /></td>
+      <td><input data-pp="${i}:costRate" type="number" step="any" value="${pp.costRate}" title="What you pay them (0 = you)" /></td>
+      <td><button class="btn btn-sm btn-ghost" data-pp-del="${i}">×</button></td>
+    </tr>`).join('');
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><div class="ttl">People &amp; rates — ${escapeHtml(p.name)}</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="margin-bottom:10px;">Rates are per person <strong>per project</strong>. Picking a person on a budget line fills their rates. Cost 0 = yourself (your time is margin, not cost).</div>
+          <table class="budget-table"><thead><tr><th>Name</th><th style="width:110px;">Bill rate</th><th style="width:110px;">Cost rate</th><th style="width:36px;"></th></tr></thead>
+          <tbody id="pp-rows">${rows()}</tbody></table>
+          <button class="btn btn-sm" id="pp-add" style="margin-top:8px;">+ Add person</button>
+        </div>
+        <div class="modal-foot"><button class="btn btn-primary" id="pp-done">Done</button></div>
+      </div>
+    </div>`);
+  const rebind = () => {
+    document.querySelectorAll('[data-pp]').forEach((el) => el.addEventListener('change', () => {
+      const [i, f] = el.dataset.pp.split(':');
+      p.people[+i][f] = f === 'name' ? el.value : (Number(el.value) || 0);
+    }));
+    document.querySelectorAll('[data-pp-del]').forEach((el) => el.addEventListener('click', () => {
+      p.people.splice(+el.dataset.ppDel, 1);
+      document.getElementById('pp-rows').innerHTML = rows();
+      rebind();
+    }));
+  };
+  rebind();
+  document.getElementById('pp-add').addEventListener('click', () => {
+    p.people.push({ id: uid('pp-'), name: '', billRate: 0, costRate: 0 });
+    document.getElementById('pp-rows').innerHTML = rows();
+    rebind();
+  });
+  document.getElementById('pp-done').addEventListener('click', async () => {
+    p.people = p.people.filter((pp) => pp.name.trim());
+    await saveState();
+    closeModal();
+    render();
+  });
+}
+
+/* Flat project → one quote line per budget line; sectioned → one line per
+   included section subtotal. Fee becomes a % line either way. */
+async function createQuoteFromProject(p) {
+  const b = projectBudget(p);
+  if (b.billTotal <= 0) { toast('Add some budget lines first'); return; }
+  let lines;
+  if (projectIsFlat(p)) {
+    lines = p.sections[0].lines.filter((l) => blBill(l) > 0).map((l) => ({
+      id: uid('l-'), desc: l.desc + (l.unit1 ? ` (${l.qty1} ${l.unit1}${Number(l.qty2) !== 1 ? ` × ${l.qty2} ${l.unit2}`.trimEnd() : ''})` : ''),
+      qty: 1, price: blBill(l), vat: true,
+    }));
+  } else {
+    lines = p.sections.filter((s) => s.included !== false && sectionBudget(s).bill > 0).map((s) => ({
+      id: uid('l-'), desc: s.name, qty: 1, price: sectionBudget(s).bill, vat: true,
+    }));
+  }
+  if (Number(p.feePct) > 0) lines.push({ id: uid('l-'), type: 'percent', desc: 'Production fee', percent: Number(p.feePct), vat: true });
+  const bank = (state.settings.banking || []).find((x) => x.currency === baseCcy()) || (state.settings.banking || [])[0] || { id: 'sa' };
+  const doc = {
+    id: uid('d-'), type: 'quote', number: state.settings.nextQt,
+    clientId: p.clientId || null, projectId: p.id, projectTitle: p.name,
+    date: todayISO(), dueDate: null, expiry: addDays(todayISO(), 30),
+    currency: baseCcy(), bankId: bank.id, lines,
+    status: 'draft', paidDate: null, sourceQuoteId: null,
+    notes: '', includeNotes: false, terms: STANDARD_TERMS_QUOTE,
+  };
+  state.settings.nextQt += 1;
+  state.documents.push(doc);
+  await saveState();
+  toast('Created ' + docNumber(doc));
+  openDocEditor(doc.id);
+}
+
+function bindProjectsEvents() {
+  document.getElementById('pj-new')?.addEventListener('click', () => openProjectModal());
+  document.getElementById('pj-empty-new')?.addEventListener('click', () => openProjectModal());
+  document.querySelectorAll('[data-pj-open]').forEach((row) => row.addEventListener('click', () => {
+    currentProjectId = row.dataset.pjOpen;
+    render();
+  }));
+  document.getElementById('pj-back')?.addEventListener('click', () => { currentProjectId = null; render(); });
+
+  const p = projectById(currentProjectId);
+  if (!p) return;
+  ensureProjectShape(p);
+  const saveRender = async () => { await saveState(); render(); };
+
+  document.getElementById('pj-edit')?.addEventListener('click', () => openProjectModal(p));
+  document.getElementById('pj-people-btn')?.addEventListener('click', () => openProjectPeopleModal(p));
+  document.getElementById('pj-make-quote')?.addEventListener('click', () => createQuoteFromProject(p));
+  document.getElementById('pj-status')?.addEventListener('change', async (e) => { p.status = e.target.value; await saveState(); });
+  document.getElementById('pj-fee')?.addEventListener('change', async (e) => { p.feePct = Math.max(0, Number(e.target.value) || 0); saveRender(); });
+  document.getElementById('pj-add-section')?.addEventListener('click', async () => {
+    if (projectIsFlat(p)) p.sections[0].name = p.sections[0].lines.length ? 'Section 1' : 'Pre-production';
+    p.sections.push({ id: uid('sec-'), name: 'New section', included: true, lines: [] });
+    saveRender();
+  });
+  document.querySelectorAll('[data-sec-add-line]').forEach((el) => el.addEventListener('click', async () => {
+    const sec = p.sections.find((s) => s.id === el.dataset.secAddLine);
+    if (sec) { sec.lines.push(newBudgetLine()); saveRender(); }
+  }));
+  document.querySelectorAll('[data-sec-toggle]').forEach((el) => el.addEventListener('change', async () => {
+    const sec = p.sections.find((s) => s.id === el.dataset.secToggle);
+    if (sec) { sec.included = el.checked; saveRender(); }
+  }));
+  document.querySelectorAll('[data-sec-name]').forEach((el) => {
+    el.addEventListener('click', (e) => e.preventDefault());
+    el.addEventListener('change', async () => {
+      const sec = p.sections.find((s) => s.id === el.dataset.secName);
+      if (sec) { sec.name = el.value.trim() || 'Section'; saveRender(); }
+    });
+  });
+  document.querySelectorAll('[data-sec-del]').forEach((el) => el.addEventListener('click', async () => {
+    const sec = p.sections.find((s) => s.id === el.dataset.secDel);
+    if (!sec) return;
+    if (sec.lines.length && !confirm(`Delete section "${sec.name}" and its ${sec.lines.length} line${sec.lines.length === 1 ? '' : 's'}?`)) return;
+    p.sections = p.sections.filter((s) => s.id !== sec.id);
+    if (!p.sections.length) p.sections = [{ id: uid('sec-'), name: 'Budget', included: true, lines: [] }];
+    saveRender();
+  }));
+  document.querySelectorAll('[data-bl]').forEach((el) => el.addEventListener('change', async () => {
+    const [secId, lineId, field] = el.dataset.bl.split(':');
+    const sec = p.sections.find((s) => s.id === secId);
+    const line = sec && sec.lines.find((l) => l.id === lineId);
+    if (!line) return;
+    line[field] = (field === 'desc' || field === 'unit1' || field === 'unit2') ? el.value : (Number(el.value) || 0);
+    saveRender();
+  }));
+  document.querySelectorAll('[data-blp]').forEach((el) => el.addEventListener('change', async () => {
+    const [secId, lineId] = el.dataset.blp.split(':');
+    const sec = p.sections.find((s) => s.id === secId);
+    const line = sec && sec.lines.find((l) => l.id === lineId);
+    if (!line) return;
+    line.personId = el.value || null;
+    const pp = p.people.find((x) => x.id === el.value);
+    if (pp) {
+      line.rate = Number(pp.billRate) || 0;
+      line.costRate = Number(pp.costRate) || 0;
+      if (!line.desc) line.desc = pp.name;
+    }
+    saveRender();
+  }));
+  document.querySelectorAll('[data-bl-del]').forEach((el) => el.addEventListener('click', async () => {
+    const [secId, lineId] = el.dataset.blDel.split(':');
+    const sec = p.sections.find((s) => s.id === secId);
+    if (sec) { sec.lines = sec.lines.filter((l) => l.id !== lineId); saveRender(); }
+  }));
+}
+
+/* ============================================================
    DOCUMENTS
    ============================================================ */
 
@@ -6499,8 +6992,11 @@ function renderDocEditor() {
           <select data-df="clientId">${clientOpts || '<option value="">— add a client first —</option>'}</select>
         </div>
         <div class="field">
-          <label>Project title</label>
-          <input data-df="projectTitle" value="${escapeHtml(d.projectTitle)}" />
+          <label>Project</label>
+          <select data-df="projectId">
+            <option value="">— no project —</option>
+            ${(state.projects || []).filter((p) => !p.archived).map((p) => `<option value="${p.id}" ${p.id === d.projectId ? 'selected' : ''}>${escapeHtml(p.name)}${p.clientId ? ' — ' + escapeHtml(clientName(p.clientId)) : ''}</option>`).join('')}
+          </select>
         </div>
         <div class="field">
           <label>Date</label>
@@ -6654,6 +7150,13 @@ function bindEditorEvents() {
       const f = el.dataset.df;
       let v = el.type === 'checkbox' ? el.checked : el.value;
       editingDoc[f] = v;
+      if (f === 'projectId') {
+        // Keep the display title in sync — PDFs and lists show projectTitle.
+        const pj = projectById(v || null);
+        editingDoc.projectId = v || null;
+        editingDoc.projectTitle = pj ? pj.name : '';
+        if (pj && pj.clientId && !editingDoc.clientId) { editingDoc.clientId = pj.clientId; renderDocEditor(); }
+      }
       if (f === 'clientId') {
         const cl = state.clients.find((x) => x.id === v);
         if (cl && cl.currency) {
@@ -8363,6 +8866,10 @@ function bindViewEvents() {
         }
       });
     });
+  }
+
+  if (currentRoute === 'projects') {
+    bindProjectsEvents();
   }
 
   if (currentRoute === 'reconcile') {
