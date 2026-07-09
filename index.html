@@ -1454,6 +1454,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       <input id="ob-name" type="text" autocomplete="name" placeholder="Jane Smith" />
       <label for="ob-email" style="margin-top:12px;">Email</label>
       <input id="ob-email" type="email" autocomplete="email" placeholder="jane@example.com" />
+      <label class="checkbox" style="margin-top:14px;display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+        <input id="ob-hasother" type="checkbox" style="margin-top:2px;" />
+        <span>I already use this app on another device — help me copy my data across</span>
+      </label>
       <div class="err" id="ob-err"></div>
       <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px;height:40px;" id="ob-btn">Continue</button>
     </form>
@@ -2039,7 +2043,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.15.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.15.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7729,10 +7733,12 @@ function renderSettings() {
     <div class="settings-section">
       <h3>Device sync</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">Sync this device directly with your other one (phone, laptop) over a private encrypted connection — your data goes straight between the two devices and <strong>never touches a server</strong>. Works best with both on the same Wi-Fi. Open this screen on <strong>both</strong> devices: press Start on one, Join on the other, and pass the codes across (AirDrop, message to yourself, or copy-paste).</div>
+      ${syncSupport().ok ? `
       <div class="row-flex">
         <button class="btn btn-primary" id="sync-start">Start sync — show code</button>
         <button class="btn" id="sync-join">Join sync — I have a code</button>
-      </div>
+      </div>` : `
+      <div class="text-sm" style="color:#b4690e;">Live sync isn't available in this browser — ${syncSupport().why}. Update the browser to use it, or move data with <strong>Merge from backup</strong> below (works everywhere).</div>`}
     </div>
 
     <div class="settings-section">
@@ -7953,16 +7959,8 @@ function bindSettingsEvents() {
         return;
       }
       if (!confirm('Merge this backup into the data on this device?\n\nNothing is replaced wholesale: records that only exist in the backup are added, and where both sides changed the same record, the newer edit wins.')) return;
-      // Plain deep copy as the local input — strips the entity-accessor
-      // properties (non-enumerable) and guarantees the engine sees pure data.
-      const { merged, report } = mergeVaults(JSON.parse(JSON.stringify(state)), data);
-      state = merged;
-      migrateState();              // ensure shapes if the backup was an older 6.x
-      installEntityAccessors();
-      await saveState();
-      applyBrand();
-      renderEntitySwitcher();
-      render();
+      // Same path as live sync — including "fresh device adopts a full copy".
+      const report = await applySyncMerge(data);
       showMergeReport(report);
     } catch (err) {
       alert('Merge failed — nothing was changed: ' + err.message);
@@ -9604,10 +9602,21 @@ function enterApp() {
   renderEntitySwitcher();
   setRoute('dashboard');
   resetLockTimer();
+  const ob = getOnboarding();
   if (pendingSyncCode) {
     // Arrived via a #sync= link — go straight into the join flow.
     const code = pendingSyncCode; pendingSyncCode = null;
     setTimeout(() => { setRoute('settings'); openSyncModal('join', code); }, 400);
+  } else if (ob && ob.wantsSync && !ob.syncOffered && vaultIsPristine(state) && syncSupport().ok) {
+    // They told us at sign-up they already use the app elsewhere — take them
+    // straight into pairing (once) so this device starts as a copy.
+    setOnboarding({ ...ob, syncOffered: true });
+    setTimeout(() => {
+      setRoute('settings');
+      openSyncModal('join');
+      const st = document.getElementById('sync-status');
+      if (st) st.textContent = 'On your OTHER device: Settings → Device sync → Start, then send the code here (AirDrop or message it to yourself).';
+    }, 500);
   } else {
     setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
   }
@@ -9876,13 +9885,48 @@ async function decodeBackupText(text) {
 /* ----- Device sync UI (transport in sync.js, merge in merge.js) ----- */
 let activeSyncSession = null;
 
+/* Can this browser run live sync? Everything evergreen (Chrome/Edge 80+,
+   Safari 16.4+, Firefox 113+, iOS/Android) passes. Older browsers get a
+   clear notice pointing at Merge from backup instead of a broken flow. */
+function syncSupport() {
+  if (typeof RTCPeerConnection === 'undefined') {
+    return { ok: false, why: 'it doesn\'t support direct device connections (WebRTC)' };
+  }
+  if (typeof CompressionStream === 'undefined' || typeof DecompressionStream === 'undefined') {
+    return { ok: false, why: 'it\'s an older version (sync codes need Safari 16.4+, Firefox 113+, or any recent Chrome/Edge)' };
+  }
+  return { ok: true };
+}
+
+/* A vault that has never been used: no records anywhere and no company name.
+   A fresh install syncing with an established device shouldn't "merge" —
+   it should become a copy. */
+function vaultIsPristine(s) {
+  const ents = (s && s.entities) || [];
+  const arrays = ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries'];
+  const records = ents.reduce((n, e) => n + arrays.reduce((m, k) => m + ((e[k] || []).length), 0), 0);
+  const named = ents.some((e) => e.company && e.company.name && e.company.name.trim());
+  return records === 0 && !named;
+}
+
 function copyText(text, msg) {
   navigator.clipboard.writeText(text).then(() => toast(msg)).catch(() => toast('Copy failed — select and copy manually'));
 }
 
 async function applySyncMerge(remoteState) {
-  const { merged, report } = mergeVaults(JSON.parse(JSON.stringify(state)), remoteState);
-  state = merged;
+  let report;
+  if (vaultIsPristine(state) && !vaultIsPristine(remoteState)) {
+    // Fresh install + established source → adopt a complete copy instead of
+    // merging (avoids the blank placeholder business surviving into the result).
+    const arrays = ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries'];
+    const total = (remoteState.entities || []).reduce((n, e) => n + arrays.reduce((m, k) => m + ((e[k] || []).length), 0), 0);
+    state = JSON.parse(JSON.stringify(remoteState));
+    report = { adoptedAll: true, added: total, updated: 0, deleted: 0, resurrected: 0, renumbered: [], conflicts: [], settingsFromRemote: [], entitiesAdded: (state.entities || []).length, entitiesRemoved: 0 };
+  } else {
+    const out = mergeVaults(JSON.parse(JSON.stringify(state)), remoteState);
+    state = out.merged;
+    report = out.report;
+  }
   migrateState();
   installEntityAccessors();
   await saveState();
@@ -9893,6 +9937,8 @@ async function applySyncMerge(remoteState) {
 }
 
 function openSyncModal(role, prefillCode) {
+  const support = syncSupport();
+  if (!support.ok) { alert(`Live sync isn't available in this browser — ${support.why}. Use Settings → Backup → Merge from backup instead.`); return; }
   if (activeSyncSession) { try { activeSyncSession.destroy(); } catch (e) {} activeSyncSession = null; }
   const ta = 'width:100%;resize:vertical;font-family:\'DM Mono\',monospace;font-size:11px;word-break:break-all;';
   const hostSteps = `
@@ -10010,6 +10056,24 @@ function openSyncModal(role, prefillCode) {
 }
 
 function showMergeReport(report) {
+  if (report.adoptedAll) {
+    showModal(`
+      <div class="modal-overlay" id="modal-overlay">
+        <div class="modal" style="max-width:460px;">
+          <div class="modal-head">
+            <div class="ttl">You're all set</div>
+            <span class="modal-close" data-close>×</span>
+          </div>
+          <div class="modal-body">
+            <div>This device was empty, so it now carries a <strong>complete copy</strong> of your other device's data — ${report.entitiesAdded} business${report.entitiesAdded === 1 ? '' : 'es'}, ${report.added} record${report.added === 1 ? '' : 's'}: clients, documents, expenses, everything.</div>
+            <div class="text-sm text-muted" style="margin-top:10px;">Your master password on this device stays the one you chose here — passwords are per device and are never sent during sync.</div>
+          </div>
+          <div class="modal-foot"><button class="btn btn-primary" data-close>Done</button></div>
+        </div>
+      </div>
+    `);
+    return;
+  }
   const lines = [];
   const row = (label, n) => { if (n) lines.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);"><span>${label}</span><strong>${n}</strong></div>`); };
   row('Records added from the backup', report.added);
@@ -10215,8 +10279,9 @@ function showOnboarding() {
     const btn = document.getElementById('ob-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
     const at = new Date().toISOString();
+    const wantsSync = !!(document.getElementById('ob-hasother') && document.getElementById('ob-hasother').checked);
     const ok = await sendOnboarding({ name, email, appVersion: APP_VERSION, date: at });
-    setOnboarding({ submitted: true, name, email, at, pending: !ok });
+    setOnboarding({ submitted: true, name, email, at, pending: !ok, wantsSync });
     screen.classList.remove('show');
     if (lock) lock.style.display = 'flex';                // reveal the lock screen now
     showLockForm(!!(await vaultGet()));                   // proceed to set-password / unlock
