@@ -2070,7 +2070,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.16.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.16.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7458,7 +7458,7 @@ function openDocPreview(docId) {
                 }
                 <div class="row"><span class="l">${isInv ? 'Invoice #:' : 'Quote #:'}</span><span class="v">${docNumber(d)}</span></div>
                 ${d.poNumber ? `<div class="row"><span class="l">PO #:</span><span class="v">${escapeHtml(d.poNumber)}</span></div>` : ''}
-                ${co.taxRef ? `<div class="row"><span class="l">Tax Ref #:</span><span class="v">${escapeHtml(co.taxRef)}</span></div>` : ''}
+                ${co.taxRef ? `<div class="row"><span class="l">Business Reg #:</span><span class="v">${escapeHtml(co.taxRef)}</span></div>` : ''}
                 <div class="row"><span class="l">VAT #:</span><span class="v">${escapeHtml(co.vat || '')}</span></div>
               </div>
             </div>
@@ -7860,7 +7860,7 @@ async function buildPdfDoc(d) {
   else metaRow('Expires:', fmtDate(d.expiry));
   metaRow(isInv ? 'Invoice #:' : 'Quote #:', docNumber(d));
   if (d.poNumber) metaRow('PO #:', d.poNumber);
-  if (co.taxRef) metaRow('Tax Ref #:', co.taxRef);
+  if (co.taxRef) metaRow('Business Reg #:', co.taxRef);
   metaRow('VAT #:', co.vat || '');
 
   y = Math.max(bly, my) + 16;
@@ -8092,7 +8092,7 @@ function renderSettings() {
         <div class="field"><label>Attention</label><input data-cs="attention" value="${escapeHtml(co.attention || '')}" /></div>
         <div class="field full"><label>Address</label><input data-cs="address" value="${escapeHtml(co.address || '')}" /></div>
         <div class="field"><label>VAT number</label><input data-cs="vat" value="${escapeHtml(co.vat || '')}" /></div>
-        <div class="field"><label>Tax reference number <span class="text-muted">(optional — e.g. SARS income tax no.)</span></label><input data-cs="taxRef" value="${escapeHtml(co.taxRef || '')}" /></div>
+        <div class="field"><label>Business registration number <span class="text-muted">(optional)</span></label><input data-cs="taxRef" value="${escapeHtml(co.taxRef || '')}" /></div>
         <div class="field"><label>Email</label><input data-cs="email" value="${escapeHtml(co.email || '')}" /></div>
         <div class="field"><label>Phone</label><input data-cs="phone" value="${escapeHtml(co.phone || '')}" /></div>
         <div class="field">
