@@ -2070,7 +2070,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.16.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.16.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2535,7 +2535,14 @@ function calcTotals(doc) {
   const depositPct = Number(doc.depositPct) || 0;
   const deposit = total * (depositPct / 100);
   const due = depositPct > 0 ? deposit : total;
-  return { subtotal, vat, total, deposit, due, depositPct };
+  // When only a deposit is billed, the ex-VAT revenue and output VAT recognised
+  // for THIS invoice are the same proportion of the whole. Aggregations
+  // (income, profit, VAT, reconcile) use these; the invoice document itself
+  // still shows the full subtotal/vat/total with the deposit called out.
+  const dueFraction = depositPct > 0 ? depositPct / 100 : 1;
+  const dueSubtotal = subtotal * dueFraction;
+  const dueVat = vat * dueFraction;
+  return { subtotal, vat, total, deposit, due, depositPct, dueSubtotal, dueVat, dueFraction };
 }
 function statusBadge(d) {
   let cls = 'badge-' + d.status;
@@ -2787,9 +2794,10 @@ function taxYearFor(iso) {
 function ymOf(iso) { return iso ? iso.slice(0, 7) : null; }
 
 // Returns ZAR-equivalent revenue for a doc using cached FX. Null if rate missing.
+// Uses the billed amount (deposit-aware) so a 50% deposit invoice counts as 50%.
 function docRevenueZAR(doc) {
   const t = calcTotals(doc);
-  return toBase(t.total, doc.currency);
+  return toBase(t.due, doc.currency);
 }
 
 // Returns the "recognition date" for a doc under given basis. null if doc shouldn't count.
@@ -2817,7 +2825,7 @@ function profitForPeriod(pStart, pEnd, basis) {
     if (d.type !== 'invoice') continue;
     const rd = recognitionDate(d, basis);
     if (!rd || rd < pStart || rd > pEnd) continue;
-    const sub = toBase(calcTotals(d).subtotal, d.currency);   // ex-VAT
+    const sub = toBase(calcTotals(d).dueSubtotal, d.currency); // ex-VAT, deposit-aware
     if (sub == null) { missingFx = true; continue; }
     revenue += sub;
   }
@@ -3005,7 +3013,7 @@ function vatForPeriod(pStart, pEnd, basis) {
     if (!rd) continue;
     if (rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
-    output += t.vat;
+    output += t.dueVat;   // deposit-aware: only the VAT on the billed portion
   }
   for (const e of state.expenses) {
     if (e.date < pStart || e.date > pEnd) continue;
@@ -3279,7 +3287,7 @@ function renderDashboard() {
   for (const d of invoices) {
     if (d.status !== 'paid') continue;
     if (!d.paidDate || d.paidDate < monthStart || d.paidDate > today) continue;
-    const z = toBase(calcTotals(d).total, d.currency);
+    const z = toBase(calcTotals(d).due, d.currency);   // deposit-aware: only what was billed
     if (z == null) { thisMonthMissingFx = true; continue; }
     thisMonthZAR += z;
   }
@@ -3452,7 +3460,7 @@ function renderDocTableInline(docs) {
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
-        <td class="amount">${fmtMoney(t.total, d.currency)}</td>
+        <td class="amount">${fmtMoney(t.due, d.currency)}${t.depositPct > 0 ? ` <span class="text-muted text-sm">(${t.depositPct}% dep)</span>` : ''}</td>
         <td>${statusBadge(d)}</td>
       </tr>
     `;
@@ -3465,7 +3473,7 @@ function renderDocTableInline(docs) {
           <th>Client</th>
           <th>Project</th>
           <th>Date</th>
-          <th class="amount">Total</th>
+          <th class="amount">Amount</th>
           <th>Status</th>
         </tr>
       </thead>
@@ -3861,9 +3869,9 @@ function vatPeriodDetail(pStart, pEnd, basis) {
     const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
-    if (t.vat <= 0) continue;
-    invoices.push({ doc: d, recognised: rd, vat: t.vat, total: t.total });
-    output += t.vat;
+    if (t.dueVat <= 0) continue;
+    invoices.push({ doc: d, recognised: rd, vat: t.dueVat, total: t.due });
+    output += t.dueVat;
   }
   const expenses = [];
   let input = 0;
@@ -4915,7 +4923,7 @@ function renderRecGroup(title, matches, kind) {
                 });
                 const docOpts = sortedInvs.map((d) => {
                   const paidTag = d.status === 'paid' ? ' (paid)' : '';
-                  return `<option value="${d.id}" ${d.id === m.docId ? 'selected' : ''}>${docNumber(d)} · ${escapeHtml(clientName(d.clientId))} · ${fmtMoney(calcTotals(d).total, d.currency)}${paidTag}</option>`;
+                  return `<option value="${d.id}" ${d.id === m.docId ? 'selected' : ''}>${docNumber(d)} · ${escapeHtml(clientName(d.clientId))} · ${fmtMoney(calcTotals(d).due, d.currency)}${paidTag}</option>`;
                 }).join('');
                 subControl = `<select data-rec-doc="${m.id}" style="max-width:240px;">${docOpts || '<option>No invoices</option>'}</select>`;
               } else if (m.action === 'expense' || m.action === 'fx-fee') {
@@ -5894,7 +5902,7 @@ function buildMatches(parsedStatement) {
         const amountMatches = allInvoices.filter((d) =>
           d.currency === tx.currency &&
           !matchedInvoiceIds.has(d.id) &&
-          Math.abs(calcTotals(d).total - tx.amount) < 0.5
+          Math.abs(calcTotals(d).due - tx.amount) < 0.5   // billed amount (deposit-aware)
         );
         if (amountMatches.length === 1) { matched = amountMatches[0]; reasonMatch = 'amount'; }
         else if (amountMatches.length > 1) {
@@ -6110,10 +6118,10 @@ function exportAccountantReport() {
   let incZAR = 0, incVAT = 0;
   for (const d of state.documents.filter((x) => x.type === 'invoice' && x.status === 'paid' && x.paidDate >= periodStart && x.paidDate <= periodEnd).sort((a, b) => (a.paidDate || '').localeCompare(b.paidDate || ''))) {
     const t = calcTotals(d);
-    const zar = toBase(t.total, d.currency);
+    const zar = toBase(t.due, d.currency);   // deposit-aware
     if (zar != null) incZAR += zar;
-    incVAT += docHasVat(d) ? t.vat : 0;
-    row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.subtotal.toFixed(2), t.vat.toFixed(2), t.total.toFixed(2), zar == null ? '' : zar.toFixed(2));
+    incVAT += docHasVat(d) ? t.dueVat : 0;
+    row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.dueSubtotal.toFixed(2), t.dueVat.toFixed(2), t.due.toFixed(2), zar == null ? '' : zar.toFixed(2));
   }
   row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', '', '', '', incZAR.toFixed(2));
   row();
@@ -6243,7 +6251,7 @@ function projectActuals(p) {
   const docs = (state.documents || []).filter((d) => d.projectId === p.id);
   let invoiced = 0, paid = 0, quoted = 0, missingFx = false;
   for (const d of docs) {
-    const z = toBase(calcTotals(d).total, d.currency);
+    const z = toBase(calcTotals(d).due, d.currency);   // deposit-aware
     if (z == null) { missingFx = true; continue; }
     if (d.type === 'invoice' && d.status !== 'draft') { invoiced += z; if (d.status === 'paid') paid += z; }
     if (d.type === 'quote' && d.status !== 'draft') quoted += z;
@@ -6723,7 +6731,7 @@ function renderDocTable(docs, opts = {}) {
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
-        <td class="amount">${fmtMoney(t.total, d.currency)}</td>
+        <td class="amount">${fmtMoney(t.due, d.currency)}${t.depositPct > 0 ? ` <span class="text-muted text-sm" title="${t.depositPct}% deposit of ${fmtMoney(t.total, d.currency)}">(${t.depositPct}% dep)</span>` : ''}</td>
         <td>${statusBadge(d)}</td>
         <td class="actions">${actions.join('')}</td>
       </tr>
@@ -6738,7 +6746,7 @@ function renderDocTable(docs, opts = {}) {
             <th>Client</th>
             <th>Project</th>
             <th>Date</th>
-            <th class="amount">Total</th>
+            <th class="amount">Amount</th>
             <th>Status</th>
             <th></th>
           </tr>
@@ -7624,7 +7632,7 @@ function maybeOfferRecurring() {
     return `
       <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);">
         <span>${escapeHtml(clientName(d.clientId))}${d.projectTitle ? ' — ' + escapeHtml(d.projectTitle) : ''}</span>
-        <span class="nowrap">${fmtMoney(t.total, d.currency)}</span>
+        <span class="nowrap">${fmtMoney(t.due, d.currency)}</span>
       </div>`;
   }).join('');
   const html = `
@@ -8946,7 +8954,7 @@ function bindReconcileEvents() {
       // Pick best candidate. Try: same currency + amount match (any status), then same currency unpaid, then first.
       const all = state.documents.filter((d) => d.type === 'invoice');
       const sameCcy = all.filter((d) => d.currency === m.tx.currency);
-      const exact = sameCcy.find((d) => Math.abs(calcTotals(d).total - Math.abs(m.tx.amount)) < 0.5);
+      const exact = sameCcy.find((d) => Math.abs(calcTotals(d).due - Math.abs(m.tx.amount)) < 0.5);   // billed amount (deposit-aware)
       const unpaidSameCcy = sameCcy.filter((d) => d.status !== 'paid');
       m.docId = (exact || unpaidSameCcy[0] || sameCcy[0] || all[0])?.id;
     } else if (sel.value === 'expense' || sel.value === 'fx-fee') {
