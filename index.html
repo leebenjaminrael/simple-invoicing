@@ -1111,6 +1111,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .badge-converted { color: var(--text-muted); border-color: var(--text-muted); }
   .badge-expired { color: var(--danger); border-color: var(--danger); }
   .badge-declined { color: var(--text-muted); border-color: var(--text-muted); text-decoration: line-through; }
+  .badge-issued { color: #C4B5FD; border-color: #C4B5FD; }
 
   /* Forms */
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -2040,6 +2041,7 @@ const SEED_DATA = {
       banking: BANKING_DEFAULT,
       nextInv: 1,
       nextQt: 1,
+      nextCredit: 1,
       baseCurrency: 'ZAR',
       vatPercent: 15,
       vatCycle: 'bi-monthly',
@@ -2070,7 +2072,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.16.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.17.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2282,7 +2284,7 @@ function installEntityAccessors() {
   };
   ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer', 'payeeRules'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
-  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'invoicePrefix', 'quotePrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed'].forEach((k) => defineProxy(state.settings, k));
+  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'nextCredit', 'invoicePrefix', 'quotePrefix', 'creditPrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed'].forEach((k) => defineProxy(state.settings, k));
 }
 
 /* ============================================================
@@ -2508,9 +2510,57 @@ function docNumber(d) {
   // Prefix + padding are per-business settings (fallbacks cover vaults created
   // before v6.6 and the create-vault path, which skips migrateState).
   const s = (state && state.settings) || {};
-  const prefix = d.type === 'invoice' ? (s.invoicePrefix ?? 'INV-') : (s.quotePrefix ?? 'QT-');
+  const prefix = d.type === 'invoice' ? (s.invoicePrefix ?? 'INV-')
+    : d.type === 'credit' ? (s.creditPrefix ?? 'CN-')
+    : (s.quotePrefix ?? 'QT-');
   const digits = Number(s.numberDigits) || 4;
   return prefix + String(d.number).padStart(digits, '0');
+}
+function docTypeName(d) { return d.type === 'invoice' ? 'invoice' : d.type === 'credit' ? 'credit note' : 'quote'; }
+// Full value % of the job this invoice bills (a plain invoice with no deposit bills 100%).
+function portionPctOf(d) { const p = Number(d.depositPct) || 0; return p > 0 ? p : 100; }
+// The label shown on the portion callout ("Deposit" / "Balance" / "Part payment").
+function portionLabelOf(d) { return d.portionLabel || 'Deposit'; }
+
+/* ---- Part-invoicing: a "billing group" is the set of invoices that together
+   bill one job (deposit + balance, or several progress payments). Members
+   share billingGroupId and identical line items; each bills depositPct% of the
+   shared value. A lone deposit invoice is its own group of one. ---- */
+function billingGroupMembers(d) {
+  if (d.billingGroupId) return (state.documents || []).filter((x) => x.type === 'invoice' && x.billingGroupId === d.billingGroupId);
+  return [d];
+}
+function groupBilledPct(d) {
+  return billingGroupMembers(d).reduce((sum, m) => sum + portionPctOf(m), 0);
+}
+function groupRemainingPct(d) {
+  return Math.max(0, Math.round((100 - groupBilledPct(d)) * 100) / 100);
+}
+// Whether a "bill the balance" action makes sense for this invoice.
+function canInvoiceBalance(d) {
+  return d.type === 'invoice' && Number(d.depositPct) > 0 && groupRemainingPct(d) > 0;
+}
+// Base-currency value of work billed as a deposit but not yet fully invoiced.
+// Only counts groups where at least one member has actually been issued (not a
+// lone draft) — i.e. income that's genuinely committed and still to come.
+function committedIncomeZAR() {
+  const seen = new Set();
+  let total = 0, missingFx = false;
+  for (const d of (state.documents || [])) {
+    if (d.type !== 'invoice') continue;
+    const key = d.billingGroupId || d.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const members = billingGroupMembers(d);
+    const remaining = groupRemainingPct(d);
+    if (remaining <= 0) continue;
+    if (!members.some((m) => m.status !== 'draft')) continue; // nothing issued yet
+    const full = calcTotals(members[0]).total; // members share line items
+    const z = toBase(full * (remaining / 100), members[0].currency);
+    if (z == null) { missingFx = true; continue; }
+    total += z;
+  }
+  return { total, missingFx };
 }
 function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
@@ -2743,6 +2793,9 @@ function migrateState() {
     if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
     if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
     if (ent.numberDigits === undefined) ent.numberDigits = 4;
+    // v6.9: credit notes get their own sequence + prefix.
+    if (ent.nextCredit === undefined) ent.nextCredit = 1;
+    if (ent.creditPrefix === undefined) ent.creditPrefix = 'CN-';
     // v6.7: record-level change tracking (sync plumbing) — maps are also
     // created lazily by trackChanges(), this just keeps shapes predictable.
     if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
@@ -2758,6 +2811,12 @@ function migrateState() {
       }
     }
     for (const e of (ent.expenses || [])) { if (e.projectId === undefined) e.projectId = null; }
+    // v6.9: part-invoicing group + label defaults; credit-note allocation field.
+    for (const d of (ent.documents || [])) {
+      if (d.billingGroupId === undefined) d.billingGroupId = null;
+      if (d.portionLabel === undefined) d.portionLabel = (Number(d.depositPct) > 0 ? 'Deposit' : '');
+      if (d.type === 'credit' && d.appliesToInvoiceId === undefined) d.appliesToInvoiceId = null;
+    }
   }
   state.version = 6;
 }
@@ -2794,14 +2853,21 @@ function taxYearFor(iso) {
 function ymOf(iso) { return iso ? iso.slice(0, 7) : null; }
 
 // Returns ZAR-equivalent revenue for a doc using cached FX. Null if rate missing.
-// Uses the billed amount (deposit-aware) so a 50% deposit invoice counts as 50%.
+// Uses the billed amount (deposit-aware); credit notes count NEGATIVE.
 function docRevenueZAR(doc) {
   const t = calcTotals(doc);
-  return toBase(t.due, doc.currency);
+  const z = toBase(t.due, doc.currency);
+  if (z == null) return null;
+  return doc.type === 'credit' ? -z : z;
 }
 
 // Returns the "recognition date" for a doc under given basis. null if doc shouldn't count.
 function recognitionDate(doc, basis) {
+  if (doc.type === 'credit') {
+    // A credit note reduces revenue; recognised on its date once issued
+    // (not "paid", so the same date under both cash and accrual).
+    return doc.status === 'draft' ? null : doc.date;
+  }
   if (doc.type !== 'invoice') return null;
   if (basis === 'cash') {
     if (doc.status !== 'paid') return null;
@@ -2810,6 +2876,18 @@ function recognitionDate(doc, basis) {
   // accrual: any non-draft invoice counts on its invoice date
   if (doc.status === 'draft') return null;
   return doc.date;
+}
+
+// Issued credit notes allocated to an invoice, in the invoice's own currency
+// (credit notes copy the invoice currency). Reduces what the client owes.
+function creditAllocatedTo(invId) {
+  return (state.documents || [])
+    .filter((x) => x.type === 'credit' && x.status !== 'draft' && x.appliesToInvoiceId === invId)
+    .reduce((s, c) => s + calcTotals(c).due, 0);
+}
+// An unpaid invoice's still-owed amount after allocated credit notes (floored at 0).
+function invoiceDueNet(d) {
+  return Math.max(0, calcTotals(d).due - creditAllocatedTo(d.id));
 }
 
 const DRAWINGS_CATEGORY = 'Drawings / Salary';
@@ -2822,12 +2900,12 @@ function profitForPeriod(pStart, pEnd, basis) {
   let revenue = 0, directCost = 0, overhead = 0, drawings = 0;
   let missingFx = false;
   for (const d of state.documents) {
-    if (d.type !== 'invoice') continue;
+    if (d.type !== 'invoice' && d.type !== 'credit') continue;
     const rd = recognitionDate(d, basis);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const sub = toBase(calcTotals(d).dueSubtotal, d.currency); // ex-VAT, deposit-aware
     if (sub == null) { missingFx = true; continue; }
-    revenue += sub;
+    revenue += d.type === 'credit' ? -sub : sub;   // credit notes reduce revenue
   }
   for (const e of state.expenses) {
     if (!e.date || e.date < pStart || e.date > pEnd) continue;
@@ -2895,9 +2973,9 @@ function agingBuckets() {
     if (days > 90) key = '90+';
     else if (days > 60) key = '61-90';
     else if (days > 30) key = '31-60';
-    const t = calcTotals(d);
-    const z = toBase(t.due, d.currency);
+    const z = toBase(invoiceDueNet(d), d.currency);
     if (z == null) { missingFx = true; continue; }
+    if (z <= 0) continue;   // fully credited — no longer owed
     buckets[key] += z;
     byClient[d.clientId] = byClient[d.clientId] || { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0, total: 0 };
     byClient[d.clientId][key] += z;
@@ -2948,8 +3026,7 @@ function pipeline(convWindow) {
   for (const d of state.documents) {
     if (d.type !== 'invoice') continue;
     if (d.status !== 'sent' && d.status !== 'overdue') continue;
-    const t = calcTotals(d);
-    const z = toBase(t.due, d.currency);
+    const z = toBase(invoiceDueNet(d), d.currency);
     if (z == null) { missingFx = true; continue; }
     confirmed += z;
   }
@@ -3007,13 +3084,12 @@ function vatForPeriod(pStart, pEnd, basis) {
   let output = 0;
   let input = 0;
   for (const d of state.documents) {
-    if (d.type !== 'invoice') continue;
+    if (d.type !== 'invoice' && d.type !== 'credit') continue;
     if (!docHasVat(d)) continue;
-    const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
-    if (!rd) continue;
-    if (rd < pStart || rd > pEnd) continue;
+    const rd = recognitionDate(d, basis);
+    if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
-    output += t.dueVat;   // deposit-aware: only the VAT on the billed portion
+    output += d.type === 'credit' ? -t.dueVat : t.dueVat;   // credit notes reduce output VAT
   }
   for (const e of state.expenses) {
     if (e.date < pStart || e.date > pEnd) continue;
@@ -3268,8 +3344,7 @@ function renderDashboard() {
   const overdue = invoices.filter((d) => d.status === 'overdue').length;
   const outstandingByCcy = {};
   for (const inv of unpaid) {
-    const t = calcTotals(inv);
-    outstandingByCcy[inv.currency] = (outstandingByCcy[inv.currency] || 0) + t.due;
+    outstandingByCcy[inv.currency] = (outstandingByCcy[inv.currency] || 0) + invoiceDueNet(inv);
   }
   let outstandingZAR = 0;
   let canConvert = true;
@@ -3278,6 +3353,8 @@ function renderDashboard() {
     if (z == null) { canConvert = false; break; }
     outstandingZAR += z;
   }
+  // Work billed as a deposit/part but not yet invoiced — committed income still to come.
+  const committed = committedIncomeZAR();
 
   // This-month-so-far (cash basis revenue this month, ZAR equiv)
   const today = todayISO();
@@ -3290,6 +3367,14 @@ function renderDashboard() {
     const z = toBase(calcTotals(d).due, d.currency);   // deposit-aware: only what was billed
     if (z == null) { thisMonthMissingFx = true; continue; }
     thisMonthZAR += z;
+  }
+  // Issued credit notes dated this month reduce the net figure.
+  for (const d of docs) {
+    if (d.type !== 'credit' || d.status === 'draft') continue;
+    if (!d.date || d.date < monthStart || d.date > today) continue;
+    const z = toBase(calcTotals(d).due, d.currency);
+    if (z == null) { thisMonthMissingFx = true; continue; }
+    thisMonthZAR -= z;
   }
   const monthName = new Date(today + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
@@ -3377,7 +3462,7 @@ function renderDashboard() {
           </div>
           <div class="value-wrap">
             <div class="value" style="color:var(--accent-bright);">${canConvert ? fmtMoney(outstandingZAR, baseCcy()) : '—'}</div>
-            <div class="sub">${fxLabel}</div>
+            <div class="sub">${committed.total > 0 ? `+ ${fmtMoney(committed.total, baseCcy())} still to invoice on active jobs` : fxLabel}</div>
           </div>
         </div>
       </div>
@@ -3460,7 +3545,7 @@ function renderDocTableInline(docs) {
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
-        <td class="amount">${fmtMoney(t.due, d.currency)}${t.depositPct > 0 ? ` <span class="text-muted text-sm">(${t.depositPct}% dep)</span>` : ''}</td>
+        <td class="amount">${d.type === 'credit' ? '−' + fmtMoney(t.total, d.currency) : fmtMoney(t.due, d.currency)}${t.depositPct > 0 && d.type !== 'credit' ? ` <span class="text-muted text-sm">(${portionLabelOf(d)} ${t.depositPct}%)</span>` : ''}</td>
         <td>${statusBadge(d)}</td>
       </tr>
     `;
@@ -3865,13 +3950,14 @@ function vatPeriodDetail(pStart, pEnd, basis) {
   const invoices = [];
   let output = 0;
   for (const d of state.documents) {
-    if (d.type !== 'invoice' || !docHasVat(d)) continue;
-    const rd = basis === 'cash' ? (d.status === 'paid' ? (d.paidDate || d.date) : null) : (d.status !== 'draft' ? d.date : null);
+    if ((d.type !== 'invoice' && d.type !== 'credit') || !docHasVat(d)) continue;
+    const rd = recognitionDate(d, basis);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
     if (t.dueVat <= 0) continue;
-    invoices.push({ doc: d, recognised: rd, vat: t.dueVat, total: t.due });
-    output += t.dueVat;
+    const sign = d.type === 'credit' ? -1 : 1;
+    invoices.push({ doc: d, recognised: rd, vat: sign * t.dueVat, total: sign * t.due });
+    output += sign * t.dueVat;
   }
   const expenses = [];
   let input = 0;
@@ -6650,13 +6736,14 @@ function renderDocuments() {
       </div>
       <div class="page-actions">
         <input type="text" class="search-input" id="doc-search" placeholder="Search by number, client, project…" value="${escapeHtml(docSearch)}" />
+        <button class="btn" id="doc-new-credit">+ Credit note</button>
         <button class="btn" id="doc-new-quote">+ Quote</button>
         <button class="btn btn-primary" id="doc-new-invoice">+ Invoice</button>
       </div>
     </div>
 
     <div class="tabs">
-      ${['all', 'invoices', 'quotes', 'unpaid', 'paid'].map((t) =>
+      ${['all', 'invoices', 'quotes', 'credits', 'unpaid', 'paid'].map((t) =>
         `<div class="tab ${docFilter === t ? 'active' : ''}" data-filter="${t}">${t.charAt(0).toUpperCase() + t.slice(1)}</div>`
       ).join('')}
     </div>
@@ -6669,6 +6756,7 @@ function filteredDocs() {
   let docs = state.documents.slice();
   if (docFilter === 'invoices') docs = docs.filter((d) => d.type === 'invoice');
   else if (docFilter === 'quotes') docs = docs.filter((d) => d.type === 'quote');
+  else if (docFilter === 'credits') docs = docs.filter((d) => d.type === 'credit');
   else if (docFilter === 'unpaid') docs = docs.filter((d) => d.type === 'invoice' && (d.status === 'sent' || d.status === 'overdue'));
   else if (docFilter === 'paid') docs = docs.filter((d) => d.type === 'invoice' && d.status === 'paid');
 
@@ -6702,6 +6790,8 @@ function renderDocTable(docs, opts = {}) {
   const rows = docs.map((d) => {
     const t = calcTotals(d);
     const isInv = d.type === 'invoice';
+    const isQuote = d.type === 'quote';
+    const isCredit = d.type === 'credit';
     const num = docNumber(d);
     const actions = [];
     if (d.status === 'draft') {
@@ -6713,7 +6803,10 @@ function renderDocTable(docs, opts = {}) {
     if (isInv && d.status !== 'paid' && d.status !== 'draft') {
       actions.push(`<button class="btn btn-sm" data-action="markpaid" data-id="${d.id}" title="Mark paid today">✓ Paid</button>`);
     }
-    if (!isInv && d.status === 'sent') {
+    if (isInv && canInvoiceBalance(d)) {
+      actions.push(`<button class="btn btn-sm" data-action="balance" data-id="${d.id}" title="Invoice the remaining ${groupRemainingPct(d)}%">Invoice balance</button>`);
+    }
+    if (isQuote && d.status === 'sent') {
       actions.push(`<button class="btn btn-sm" data-action="accept" data-id="${d.id}" title="Client accepted this quote">✓ Accept</button>`);
       actions.push(`<button class="btn btn-sm btn-ghost" data-action="decline" data-id="${d.id}" title="Client declined this quote">✗ Decline</button>`);
     }
@@ -6721,8 +6814,11 @@ function renderDocTable(docs, opts = {}) {
     if (!opts.compact) {
       actions.push(`<button class="btn btn-sm btn-ghost" data-action="edit" data-id="${d.id}">Edit</button>`);
       actions.push(`<button class="btn btn-sm btn-ghost" data-action="clone" data-id="${d.id}" title="Copy into a new draft with today's date">Duplicate</button>`);
-      if (!isInv && d.status !== 'converted' && d.status !== 'declined') {
+      if (isQuote && d.status !== 'converted' && d.status !== 'declined') {
         actions.push(`<button class="btn btn-sm" data-action="convert" data-id="${d.id}">Convert</button>`);
+      }
+      if (isInv) {
+        actions.push(`<button class="btn btn-sm btn-ghost" data-action="credit" data-id="${d.id}" title="Create a credit note against this invoice">Credit</button>`);
       }
     }
     return `
@@ -6731,7 +6827,7 @@ function renderDocTable(docs, opts = {}) {
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
-        <td class="amount">${fmtMoney(t.due, d.currency)}${t.depositPct > 0 ? ` <span class="text-muted text-sm" title="${t.depositPct}% deposit of ${fmtMoney(t.total, d.currency)}">(${t.depositPct}% dep)</span>` : ''}</td>
+        <td class="amount">${d.type === 'credit' ? '−' + fmtMoney(t.total, d.currency) : fmtMoney(t.due, d.currency)}${t.depositPct > 0 && d.type !== 'credit' ? ` <span class="text-muted text-sm" title="${t.depositPct}% of ${fmtMoney(t.total, d.currency)}">(${portionLabelOf(d)} ${t.depositPct}%)</span>` : ''}</td>
         <td>${statusBadge(d)}</td>
         <td class="actions">${actions.join('')}</td>
       </tr>
@@ -6766,8 +6862,7 @@ function renderClients() {
     const outstanding = state.documents
       .filter((d) => d.type === 'invoice' && d.clientId === c.id && (d.status === 'sent' || d.status === 'overdue'))
       .reduce((acc, d) => {
-        const t = calcTotals(d);
-        acc[d.currency] = (acc[d.currency] || 0) + t.due;
+        acc[d.currency] = (acc[d.currency] || 0) + invoiceDueNet(d);
         return acc;
       }, {});
     const outStr = Object.entries(outstanding).map(([c, v]) => fmtMoney(v, c)).join(' · ') || '<span class="text-muted">—</span>';
@@ -6905,10 +7000,11 @@ function openDocEditor(docId, defaultType) {
     const today = todayISO();
     const firstClient = state.clients[0];
     const startCcy = (firstClient && firstClient.currency) || baseCcy();
+    const num = type === 'invoice' ? state.settings.nextInv : type === 'credit' ? state.settings.nextCredit : state.settings.nextQt;
     doc = {
       id: uid('d-'),
       type,
-      number: type === 'invoice' ? state.settings.nextInv : state.settings.nextQt,
+      number: num,
       clientId: firstClient ? firstClient.id : '',
       currency: startCcy,
       bankId: (state.settings.banking.find((b) => b.currency === startCcy) || state.settings.banking[0] || { id: 'sa' }).id,
@@ -6919,7 +7015,10 @@ function openDocEditor(docId, defaultType) {
       poNumber: '',
       lines: [{ id: uid('l-'), desc: '', qty: 1, price: 0, vat: true }],
       depositPct: 0,
-      terms: type === 'invoice' ? STANDARD_TERMS_INVOICE : STANDARD_TERMS_QUOTE,
+      portionLabel: '',
+      billingGroupId: null,
+      appliesToInvoiceId: type === 'credit' ? null : undefined,
+      terms: type === 'invoice' ? STANDARD_TERMS_INVOICE : type === 'quote' ? STANDARD_TERMS_QUOTE : '',
       notes: '',
       includeNotes: false,
       status: 'draft',
@@ -6974,7 +7073,7 @@ function renderDocEditor() {
   const html = `
     <div class="page-head">
       <div>
-        <div class="title">${d._isNew ? 'New' : 'Edit'} ${d.type === 'invoice' ? 'invoice' : 'quote'}</div>
+        <div class="title">${d._isNew ? 'New' : 'Edit'} ${docTypeName(d)}</div>
         <div class="sub">${docNumber(d)}</div>
       </div>
       <div class="page-actions">
@@ -6991,8 +7090,9 @@ function renderDocEditor() {
         <div class="doc-toggle">
           <div class="opt ${d.type === 'invoice' ? 'active' : ''}" data-type="invoice">Invoice</div>
           <div class="opt ${d.type === 'quote' ? 'active' : ''}" data-type="quote">Quote</div>
+          <div class="opt ${d.type === 'credit' ? 'active' : ''}" data-type="credit">Credit note</div>
         </div>
-        <div class="text-mid text-sm">${d.type === 'invoice' ? 'INV-' : 'QT-'}${String(d.number).padStart(4,'0')}</div>
+        <div class="text-mid text-sm">${docNumber(d)}</div>
       </div>
 
       <div class="form-grid">
@@ -7016,10 +7116,18 @@ function renderDocEditor() {
             <label>Due date</label>
             <input data-df="dueDate" type="date" value="${d.dueDate || ''}" />
           </div>
-        ` : `
+        ` : d.type === 'quote' ? `
           <div class="field">
             <label>Expiry date</label>
             <input data-df="expiry" type="date" value="${d.expiry || ''}" />
+          </div>
+        ` : `
+          <div class="field">
+            <label>Applies to invoice <span class="text-muted">(optional)</span></label>
+            <select data-df="appliesToInvoiceId">
+              <option value="">— not allocated —</option>
+              ${(state.documents || []).filter((x) => x.type === 'invoice').sort((a, b) => (b.date || '').localeCompare(a.date || '')).map((x) => `<option value="${x.id}" ${x.id === d.appliesToInvoiceId ? 'selected' : ''}>${docNumber(x)} · ${escapeHtml(clientName(x.clientId))}</option>`).join('')}
+            </select>
           </div>
         `}
         <div class="field">
@@ -7050,6 +7158,8 @@ function renderDocEditor() {
           <select data-df="status">
             ${(d.type === 'invoice'
                 ? ['draft','sent','paid','overdue']
+                : d.type === 'credit'
+                ? ['draft','issued']
                 : ['draft','sent','accepted','declined','converted','expired']
               ).map((s) => `<option value="${s}" ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
@@ -7089,18 +7199,20 @@ function renderDocEditor() {
         </div>
       </div>
 
+      ${d.type === 'invoice' ? `
       <div style="margin-top:18px;">
-        <label>Deposit</label>
+        <label>Part invoice <span class="text-muted">(bill a % of the total — the rest can be invoiced later)</span></label>
         <div class="deposit-options">
-          ${[0,25,50,100].map((p) => `<div class="opt ${d.depositPct === p ? 'active' : ''}" data-deposit="${p}">${p === 0 ? 'None' : p + '%'}</div>`).join('')}
+          ${[0,25,50,75,100].map((p) => `<div class="opt ${d.depositPct === p ? 'active' : ''}" data-deposit="${p}">${p === 0 ? 'Full' : p + '%'}</div>`).join('')}
         </div>
-      </div>
+        ${d.billingGroupId ? `<div class="text-sm text-muted" style="margin-top:8px;">Part of a billing group — ${Math.round(groupBilledPct(d))}% of this job is invoiced across ${billingGroupMembers(d).length} document${billingGroupMembers(d).length === 1 ? '' : 's'}${groupRemainingPct(d) > 0 ? `, ${groupRemainingPct(d)}% still to invoice` : ' (fully invoiced)'}.</div>` : ''}
+      </div>` : ''}
 
       <div class="totals-box mt-24">
         <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, d.currency)}</span></div>
         ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
         <div class="row total"><span>Total ${d.currency}</span><span class="v">${fmtMoney(t.total, d.currency)}</span></div>
-        ${t.depositPct > 0 ? `<div class="row muted"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
+        ${t.depositPct > 0 ? `<div class="row muted"><span>${portionLabelOf(d)} (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
         <div class="row due"><span>Amount due ${d.currency}</span><span class="v">${fmtMoney(t.due, d.currency)}</span></div>
       </div>
     </div>
@@ -7139,14 +7251,18 @@ function bindEditorEvents() {
       const newType = el.dataset.type;
       if (newType === editingDoc.type) return;
       editingDoc.type = newType;
-      editingDoc.number = newType === 'invoice' ? state.settings.nextInv : state.settings.nextQt;
-      editingDoc.terms = newType === 'invoice' ? STANDARD_TERMS_INVOICE : STANDARD_TERMS_QUOTE;
+      editingDoc.number = newType === 'invoice' ? state.settings.nextInv : newType === 'credit' ? state.settings.nextCredit : state.settings.nextQt;
+      editingDoc.terms = newType === 'invoice' ? STANDARD_TERMS_INVOICE : newType === 'quote' ? STANDARD_TERMS_QUOTE : '';
       if (newType === 'invoice') {
         editingDoc.dueDate = editingDoc.dueDate || addDays(editingDoc.date, 7);
         editingDoc.expiry = null;
-      } else {
+      } else if (newType === 'quote') {
         editingDoc.expiry = editingDoc.expiry || addDays(editingDoc.date, 30);
         editingDoc.dueDate = null;
+      } else {
+        editingDoc.dueDate = null; editingDoc.expiry = null;
+        editingDoc.depositPct = 0; editingDoc.billingGroupId = null;
+        if (editingDoc.appliesToInvoiceId === undefined) editingDoc.appliesToInvoiceId = null;
       }
       editingDoc.status = 'draft';
       renderDocEditor();
@@ -7315,7 +7431,7 @@ function updateTotalsBox() {
     <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, editingDoc.currency)}</span></div>
     ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, editingDoc.currency)}</span></div>` : ''}
     <div class="row total"><span>Total ${editingDoc.currency}</span><span class="v">${fmtMoney(t.total, editingDoc.currency)}</span></div>
-    ${t.depositPct > 0 ? `<div class="row muted"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, editingDoc.currency)}</span></div>` : ''}
+    ${t.depositPct > 0 ? `<div class="row muted"><span>${portionLabelOf(editingDoc)} (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, editingDoc.currency)}</span></div>` : ''}
     <div class="row due"><span>Amount due ${editingDoc.currency}</span><span class="v">${fmtMoney(t.due, editingDoc.currency)}</span></div>
   `;
 }
@@ -7354,6 +7470,7 @@ async function doAutoSave() {
   } else {
     state.documents.push({ ...d });
     if (d.type === 'invoice') state.settings.nextInv = d.number + 1;
+    else if (d.type === 'credit') state.settings.nextCredit = d.number + 1;
     else state.settings.nextQt = d.number + 1;
   }
   delete editingDoc._isNew;
@@ -7374,6 +7491,7 @@ async function saveDocFromEditor(redirect) {
   } else {
     state.documents.push({ ...d });
     if (d.type === 'invoice') state.settings.nextInv = d.number + 1;
+    else if (d.type === 'credit') state.settings.nextCredit = d.number + 1;
     else state.settings.nextQt = d.number + 1;
   }
   delete editingDoc._isNew;
@@ -7398,7 +7516,7 @@ function openDocPreview(docId) {
   const co = state.settings.company || COMPANY_DEFAULT;
   const isZAR = docHasVat(d);
   const isInv = d.type === 'invoice';
-  const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
+  const docTypeLabel = d.type === 'credit' ? 'CREDIT NOTE' : isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
   const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
     const isPct = l.type === 'percent';
     return `
@@ -7428,7 +7546,9 @@ function openDocPreview(docId) {
             <button class="btn btn-sm" id="prev-edit">Edit</button>
             <button class="btn btn-sm" id="prev-clone">Clone</button>
             ${isInv && d.status !== 'paid' ? `<button class="btn btn-sm" id="prev-mark-paid">Mark paid</button>` : ''}
-            ${!isInv && d.status !== 'converted' ? `<button class="btn btn-sm" id="prev-convert">Convert to invoice</button>` : ''}
+            ${d.type === 'quote' && d.status !== 'converted' ? `<button class="btn btn-sm" id="prev-convert">Convert to invoice</button>` : ''}
+            ${isInv && canInvoiceBalance(d) ? `<button class="btn btn-sm" id="prev-balance">Invoice balance (${groupRemainingPct(d)}%)</button>` : ''}
+            ${isInv ? `<button class="btn btn-sm" id="prev-credit">Create credit note</button>` : ''}
             <button class="btn btn-sm" id="prev-email">Compose email</button>
             ${isInv && d.status === 'overdue' ? `<button class="btn btn-sm" id="prev-remind">Send reminder</button>` : ''}
             <button class="btn btn-sm" id="prev-share">Share / email PDF</button>
@@ -7452,7 +7572,7 @@ function openDocPreview(docId) {
 
             <div class="meta-block">
               <div class="bill-to">
-                <div class="l">${isInv ? 'Bill to' : 'Quoted for'}</div>
+                <div class="l">${isInv ? 'Bill to' : d.type === 'credit' ? 'Credit to' : 'Quoted for'}</div>
                 <div class="name">${escapeHtml(c.name)}</div>
                 <div class="addr">${escapeHtml(c.addr || '')}</div>
                 ${c.vat ? `<div class="addr">VAT: ${escapeHtml(c.vat)}</div>` : ''}
@@ -7462,9 +7582,13 @@ function openDocPreview(docId) {
                 <div class="row"><span class="l">Date:</span><span class="v">${fmtDate(d.date)}</span></div>
                 ${isInv
                   ? `<div class="row"><span class="l">Due Date:</span><span class="v">${fmtDate(d.dueDate)}</span></div>`
-                  : `<div class="row"><span class="l">Expires:</span><span class="v">${fmtDate(d.expiry)}</span></div>`
+                  : d.type === 'quote'
+                  ? `<div class="row"><span class="l">Expires:</span><span class="v">${fmtDate(d.expiry)}</span></div>`
+                  : (d.appliesToInvoiceId && state.documents.find((x) => x.id === d.appliesToInvoiceId))
+                  ? `<div class="row"><span class="l">Re Invoice:</span><span class="v">${docNumber(state.documents.find((x) => x.id === d.appliesToInvoiceId))}</span></div>`
+                  : ''
                 }
-                <div class="row"><span class="l">${isInv ? 'Invoice #:' : 'Quote #:'}</span><span class="v">${docNumber(d)}</span></div>
+                <div class="row"><span class="l">${isInv ? 'Invoice #:' : d.type === 'credit' ? 'Credit #:' : 'Quote #:'}</span><span class="v">${docNumber(d)}</span></div>
                 ${d.poNumber ? `<div class="row"><span class="l">PO #:</span><span class="v">${escapeHtml(d.poNumber)}</span></div>` : ''}
                 ${co.taxRef ? `<div class="row"><span class="l">Business Reg #:</span><span class="v">${escapeHtml(co.taxRef)}</span></div>` : ''}
                 <div class="row"><span class="l">VAT #:</span><span class="v">${escapeHtml(co.vat || '')}</span></div>
@@ -7488,7 +7612,7 @@ function openDocPreview(docId) {
               <div class="row"><span>Subtotal</span><span class="v">${fmtMoney(t.subtotal, d.currency)}</span></div>
               ${isZAR ? `<div class="row"><span>VAT ${vatRate()}%</span><span class="v">${fmtMoney(t.vat, d.currency)}</span></div>` : ''}
               <div class="row line"><span>TOTAL ${d.currency}</span><span class="v">${fmtMoney(t.total, d.currency)}</span></div>
-              ${t.depositPct > 0 ? `<div class="row deposit-callout"><span>Deposit (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
+              ${t.depositPct > 0 ? `<div class="row deposit-callout"><span>${portionLabelOf(d)} (${t.depositPct}%)</span><span class="v">${fmtMoney(t.deposit, d.currency)}</span></div>` : ''}
               <div class="row line"><span>Amount Due ${d.currency}</span><span class="v">${fmtMoney(t.due, d.currency)}</span></div>
             </div>
 
@@ -7532,6 +7656,8 @@ function openDocPreview(docId) {
     await convertQuoteToInvoice(d.id);
     closeModal();
   });
+  if ($('prev-balance')) $('prev-balance').addEventListener('click', () => { closeModal(); createBalanceInvoice(d.id); });
+  if ($('prev-credit')) $('prev-credit').addEventListener('click', () => { closeModal(); createCreditNoteFromInvoice(d.id); });
   $('prev-email').addEventListener('click', () => composeEmail(d));
   if ($('prev-remind')) $('prev-remind').addEventListener('click', () => composeReminderEmail(d));
   { const sb = $('prev-share'); if (sb) sb.addEventListener('click', () => shareDoc(d)); }
@@ -7677,6 +7803,35 @@ async function markDocAsSent(docId) {
   toast(`${docNumber(d)} marked as sent`);
 }
 
+/* Create the balance (or next part) invoice for a deposit/part invoice. The
+   source and the new invoice share a billingGroupId so the app knows they're
+   slices of one job; the new invoice bills the remaining %. */
+async function createBalanceInvoice(docId) {
+  const src = state.documents.find((x) => x.id === docId);
+  if (!src || src.type !== 'invoice') return;
+  const remaining = groupRemainingPct(src);
+  if (remaining <= 0) { toast('This job is already fully invoiced'); return; }
+  // Ensure the source is in a group so members can be found later.
+  if (!src.billingGroupId) src.billingGroupId = uid('bg-');
+  const clone = JSON.parse(JSON.stringify(src));
+  clone.id = uid('d-');
+  clone.number = state.settings.nextInv;
+  state.settings.nextInv += 1;
+  clone.date = todayISO();
+  clone.dueDate = addDays(clone.date, 7);
+  clone.status = 'draft';
+  clone.paidDate = null;
+  clone.sourceQuoteId = null;
+  clone.repeatMonthly = false;
+  clone.billingGroupId = src.billingGroupId;
+  clone.depositPct = remaining;
+  clone.portionLabel = 'Balance';   // bills the full remaining; reduce % in the editor for a partial
+  state.documents.push(clone);
+  await saveState();
+  toast(`Created ${docNumber(clone)} — balance (${remaining}%)`);
+  openDocEditor(clone.id);
+}
+
 async function setQuoteStatus(docId, status) {
   const d = state.documents.find((x) => x.id === docId);
   if (!d || d.type !== 'quote') return;
@@ -7684,6 +7839,38 @@ async function setQuoteStatus(docId, status) {
   await saveState();
   render();
   toast(`${docNumber(d)} ${status}`);
+}
+
+/* Create a credit note from an existing invoice — copies the line items and
+   allocates against that invoice. Opens in the editor so wording can be
+   trimmed (credit notes usually carry less detail). */
+async function createCreditNoteFromInvoice(invoiceId) {
+  const inv = state.documents.find((x) => x.id === invoiceId);
+  if (!inv || inv.type !== 'invoice') return;
+  const today = todayISO();
+  const cn = {
+    ...JSON.parse(JSON.stringify(inv)),
+    id: uid('d-'),
+    type: 'credit',
+    number: state.settings.nextCredit,
+    date: today,
+    dueDate: null,
+    expiry: null,
+    depositPct: 0,
+    portionLabel: '',
+    billingGroupId: null,
+    repeatMonthly: false,
+    status: 'draft',
+    paidDate: null,
+    sourceQuoteId: null,
+    appliesToInvoiceId: inv.id,
+    terms: '',
+  };
+  state.settings.nextCredit += 1;
+  state.documents.push(cn);
+  await saveState();
+  toast(`Created ${docNumber(cn)} against ${docNumber(inv)}`);
+  openDocEditor(cn.id);
 }
 
 async function convertQuoteToInvoice(quoteId) {
@@ -7752,7 +7939,7 @@ async function buildPdfDoc(d) {
   const co = state.settings.company || COMPANY_DEFAULT;
   const isZAR = docHasVat(d);
   const isInv = d.type === 'invoice';
-  const docTypeLabel = isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
+  const docTypeLabel = d.type === 'credit' ? 'CREDIT NOTE' : isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
 
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const PAGE_W = doc.internal.pageSize.getWidth();
@@ -7828,7 +8015,7 @@ async function buildPdfDoc(d) {
   // Bill-to (left) and meta (right)
   doc.setTextColor(158, 157, 153);
   doc.setFontSize(8);
-  doc.text(isInv ? 'BILL TO' : 'QUOTED FOR', M, y);
+  doc.text(isInv ? 'BILL TO' : d.type === 'credit' ? 'CREDIT TO' : 'QUOTED FOR', M, y);
   doc.setTextColor(28, 27, 25);
   doc.setFontSize(11);
   doc.setFont('helvetica', 'bold');
@@ -7865,8 +8052,9 @@ async function buildPdfDoc(d) {
   };
   metaRow('Date:', fmtDate(d.date));
   if (isInv) metaRow('Due Date:', fmtDate(d.dueDate));
-  else metaRow('Expires:', fmtDate(d.expiry));
-  metaRow(isInv ? 'Invoice #:' : 'Quote #:', docNumber(d));
+  else if (d.type === 'quote') metaRow('Expires:', fmtDate(d.expiry));
+  else if (d.appliesToInvoiceId && state.documents.find((x) => x.id === d.appliesToInvoiceId)) metaRow('Re Invoice:', docNumber(state.documents.find((x) => x.id === d.appliesToInvoiceId)));
+  metaRow(isInv ? 'Invoice #:' : d.type === 'credit' ? 'Credit #:' : 'Quote #:', docNumber(d));
   if (d.poNumber) metaRow('PO #:', d.poNumber);
   if (co.taxRef) metaRow('Business Reg #:', co.taxRef);
   metaRow('VAT #:', co.vat || '');
@@ -7940,7 +8128,7 @@ async function buildPdfDoc(d) {
   y += 4;  // extra breathing room above TOTAL
   totalRow('TOTAL ' + d.currency, fmtMoney(t.total, d.currency), { bold: true });
   if (t.depositPct > 0) {
-    totalRow(`Deposit (${t.depositPct}%)`, fmtMoney(t.deposit, d.currency));
+    totalRow(`${portionLabelOf(d)} (${t.depositPct}%)`, fmtMoney(t.deposit, d.currency));
   }
   // Separator above Amount Due
   y += 4;  // breathing room above the line
@@ -8153,8 +8341,10 @@ function renderSettings() {
       <div class="form-grid">
         <div class="field"><label>Next invoice number</label><input data-cs="nextInv" type="number" value="${state.settings.nextInv}" /></div>
         <div class="field"><label>Next quote number</label><input data-cs="nextQt" type="number" value="${state.settings.nextQt}" /></div>
+        <div class="field"><label>Next credit note number</label><input data-cs="nextCredit" type="number" value="${state.settings.nextCredit ?? 1}" /></div>
         <div class="field"><label>Invoice prefix</label><input data-cs="invoicePrefix" value="${escapeHtml(state.settings.invoicePrefix ?? 'INV-')}" placeholder="INV-" /></div>
         <div class="field"><label>Quote prefix</label><input data-cs="quotePrefix" value="${escapeHtml(state.settings.quotePrefix ?? 'QT-')}" placeholder="QT-" /></div>
+        <div class="field"><label>Credit note prefix</label><input data-cs="creditPrefix" value="${escapeHtml(state.settings.creditPrefix ?? 'CN-')}" placeholder="CN-" /></div>
         <div class="field"><label>Number length <span class="text-muted">(zero-padded digits)</span></label><input data-cs="numberDigits" type="number" min="1" max="8" value="${Number(state.settings.numberDigits) || 4}" /></div>
       </div>
       <div class="text-sm text-mid" style="margin-top:10px;">Next invoice will be numbered <strong>${escapeHtml(docNumber({ type: 'invoice', number: state.settings.nextInv }))}</strong>. Continuing from another tool? Set the prefix and next number to match your existing scheme.</div>
@@ -8321,12 +8511,12 @@ function bindSettingsEvents() {
     el.addEventListener('change', async () => {
       const f = el.dataset.cs;
       let v = el.value;
-      if (f === 'nextInv' || f === 'nextQt' || f === 'autoLockMinutes') v = Number(v) || 0;
+      if (f === 'nextInv' || f === 'nextQt' || f === 'nextCredit' || f === 'autoLockMinutes') v = Number(v) || 0;
       if (f === 'vatPercent') v = Math.max(0, Number(v) || 0);
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
       if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
       if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
-      if (['nextInv','nextQt','invoicePrefix','quotePrefix','numberDigits','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
+      if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -8721,6 +8911,8 @@ function bindViewEvents() {
       else if (action === 'remind') { const d = state.documents.find((x) => x.id === id); if (d) composeReminderEmail(d); }
       else if (action === 'accept') setQuoteStatus(id, 'accepted');
       else if (action === 'decline') setQuoteStatus(id, 'declined');
+      else if (action === 'balance') createBalanceInvoice(id);
+      else if (action === 'credit') createCreditNoteFromInvoice(id);
     });
   });
   document.querySelectorAll('[data-route-link]').forEach((el) => {
@@ -8739,6 +8931,7 @@ function bindViewEvents() {
     const nq = document.getElementById('doc-new-quote');
     if (ni) ni.addEventListener('click', () => openDocEditor(null, 'invoice'));
     if (nq) nq.addEventListener('click', () => openDocEditor(null, 'quote'));
+    document.getElementById('doc-new-credit')?.addEventListener('click', () => openDocEditor(null, 'credit'));
     document.getElementById('empty-new-invoice')?.addEventListener('click', () => openDocEditor(null, 'invoice'));
     document.getElementById('empty-new-quote')?.addEventListener('click', () => openDocEditor(null, 'quote'));
   }
