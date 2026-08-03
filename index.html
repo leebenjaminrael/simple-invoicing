@@ -1370,6 +1370,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .update-banner .ub-btn:hover { background: #000; }
   .update-banner .ub-dismiss { background: transparent; border: 0; color: rgba(15,14,13,0.5); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
   .update-banner .ub-dismiss:hover { color: #0F0E0D; }
+  /* "We've moved" — highest-priority banner, so it sits above the others.
+     No dismiss: the user needs to see this until they've actually moved. */
+  .migrate-banner { bottom: 18px; z-index: 970; background: var(--accent-bright); color: #0F0E0D; }
+  .migrate-banner .ub-btn { background: #0F0E0D; color: var(--accent-bright); }
+
+  /* Install prompt — cream, sits above the backup banner if both show */
+  .install-banner { bottom: 122px; background: var(--c-cream, #F5F2EC); color: #1C1B19; border: 1px solid rgba(28,27,25,0.12); }
+  .install-banner .ub-btn { background: #1C1B19; color: var(--c-cream, #F5F2EC); }
+  .install-banner .ub-dismiss { color: rgba(28,27,25,0.45); }
+  .install-banner .ub-dismiss:hover { color: #1C1B19; }
+
   /* Backup reminder — dark, sits above the update banner if both show */
   .backup-banner { bottom: 70px; background: #1c1b19; color: #F5F2EC; border: 1px solid rgba(245,242,236,0.15); }
   .backup-banner .ub-btn { background: var(--accent-bright); color: #0F0E0D; }
@@ -1576,6 +1587,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   <span id="update-banner-text">Update available</span>
   <button class="ub-btn" id="update-reload">Back up &amp; reload</button>
   <button class="ub-dismiss" id="update-dismiss" title="Dismiss">×</button>
+</div>
+
+<div id="migrate-banner" class="update-banner migrate-banner" style="display:none;">
+  <span id="migrate-banner-text">We've moved to a new address — bring your data across in one click.</span>
+  <button class="ub-btn" id="migrate-go">Move my data</button>
+</div>
+
+<div id="install-banner" class="update-banner install-banner" style="display:none;">
+  <span id="install-banner-text">Add it to your apps</span>
+  <button class="ub-btn" id="install-go">Install</button>
+  <button class="ub-dismiss" id="install-later" title="Not now">×</button>
 </div>
 
 <div id="backup-banner" class="update-banner backup-banner" style="display:none;">
@@ -2226,9 +2248,63 @@ if (typeof module !== 'undefined' && module.exports) {
 // ── Master switch. false = dormant (current behaviour). Set true at launch. ──
 const COMMERCIAL_ENABLED = false;
 
-// Placeholder brand — swap once the app has a name. Shown on trial/free docs.
-const APP_BRAND_NAME = 'Invoicing';        // e.g. 'Ledgerly'
-const APP_BRAND_URL = 'https://example.com'; // your marketing site / app link
+/* ── REBRAND / DOMAIN MOVE — also dark until switch-day ──────────────────────
+   The app is named Simpl and will live at app.simpl.money, but existing users
+   are still on leebenjaminrael.github.io with their data tied to that origin
+   (browser storage is per-origin). Renaming or pushing installs before they've
+   been told to migrate would be confusing at best and lose data at worst.
+
+   So this stays false until the migration is announced. While false the app
+   reads exactly as it does today. Flip it (with the switch-day runbook in
+   LAUNCH-RUNBOOK.md) to turn on the name, the new URL and the install prompt
+   together.
+   Test it any time without shipping it: append ?preview=launch  */
+const REBRAND_ENABLED = false;
+
+/* The SAME build is deployed to both homes during the move, and works out which
+   role it's playing from the URL it was served from:
+     old origin → keeps today's neutral branding + offers to move the user's data
+     new origin → is Simpl, and accepts an incoming move
+   That means one build, one deploy script, and no chance of the two drifting. */
+const MIGRATION = {
+  enabled: false,                                    // flip on switch-day
+  oldOrigin: 'https://leebenjaminrael.github.io',
+  newOrigin: 'https://app.simpl.money',
+  newAppUrl: 'https://app.simpl.money/',
+};
+
+function onNewOrigin() {
+  try { return location.origin === MIGRATION.newOrigin; } catch (e) { return false; }
+}
+function onOldOrigin() {
+  try { return location.origin === MIGRATION.oldOrigin; } catch (e) { return false; }
+}
+// Show the "we've moved" offer only on the old home, and only once switched on.
+function migrationActive() {
+  return MIGRATION.enabled && onOldOrigin();
+}
+
+function launchActive() {
+  if (REBRAND_ENABLED) return true;
+  if (onNewOrigin()) return true;        // it's Simpl by virtue of where it lives
+  try {
+    if (localStorage.getItem('seed-launch-preview') === '1') return true;
+    if (typeof location !== 'undefined' && location.search.indexOf('preview=launch') !== -1) {
+      localStorage.setItem('seed-launch-preview', '1');
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+// Brand shown in-app (recovery-phrase file, document footer at launch, install
+// prompt). Falls back to today's neutral naming while the rebrand is dark.
+const APP_BRAND_NAME = launchActive() ? 'Simpl' : 'Invoicing';
+const APP_BRAND_URL = launchActive() ? 'https://simpl.money' : 'https://leebenjaminrael.github.io/simple-invoicing/';
+
+/* Don't advertise "install" while we're still on the old origin — an install
+   made there pins the app (and its data) to a domain we're about to leave. */
+const INSTALL_PROMPT_ENABLED = launchActive();
 
 const TRIAL_DAYS = 7;
 const LICENCE_KEY_STORE = 'seed-licence-v1';      // the signed licence string
@@ -2413,7 +2489,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.18.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.19.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2754,6 +2830,50 @@ async function refreshLicenceState() {
   }
   licenceState = licenceStatusFrom({ active, licencePayload: payload, trialStart });
   return licenceState;
+}
+
+/* One-click licence links: app.simpl.money/#licence=LIC1.…
+   Sent to a customer after purchase so they never have to paste anything.
+   Deliberately in the URL *fragment*, not the query string — fragments are
+   never transmitted to a server, so the key can't end up in web-server logs.
+   Runs before the lock screen, and works whether or not commerce is live yet
+   (a key applied early simply waits until it's needed). */
+async function applyLicenceFromUrl() {
+  const hash = location.hash || '';
+  if (hash.indexOf('#licence=') !== 0) return false;
+  const raw = decodeURIComponent(hash.slice(9)).trim();
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+
+  const payload = await verifyLicence(raw);
+  if (!payload) {
+    showModal(`
+      <div class="modal-overlay" id="modal-overlay">
+        <div class="modal" style="max-width:440px;">
+          <div class="modal-head"><div class="ttl">That licence link didn't work</div><span class="modal-close" data-close>×</span></div>
+          <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.7;">The link may have been broken across two lines by your email app, or it's meant for a different version. Try copying the whole link again — or paste the key straight into <strong>Settings → Licence</strong>.</div></div>
+          <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>
+        </div>
+      </div>`);
+    return false;
+  }
+
+  try { localStorage.setItem(LICENCE_KEY_STORE, raw); } catch (e) {}
+  await refreshLicenceState();
+  const until = new Date(payload.exp).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:440px;">
+        <div class="modal-head"><div class="ttl">Licence activated</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            Thanks — ${escapeHtml(APP_BRAND_NAME)} is licensed to <strong>${escapeHtml(payload.e || '')}</strong> until <strong>${escapeHtml(until)}</strong>.
+            <br/><br/>It's stored on this device. If you use ${escapeHtml(APP_BRAND_NAME)} on more than one, open the same link there too.
+          </div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-primary" data-close>Get started</button></div>
+      </div>
+    </div>`);
+  return true;
 }
 
 // Should the "Created with <brand>" line appear on documents?
@@ -3477,22 +3597,56 @@ function monthShort(m) {
 }
 
 // VAT summary for a period (ZAR-only invoices count for output VAT, ZAR-only expenses with vat=true for input)
+/* Totals for one VAT period.
+ *
+ * As well as the tax itself, this returns the VALUE of the supplies, which is
+ * what a VAT201 return actually asks for:
+ *   standardExcl  → supplies you charged VAT on, excluding the VAT   (field 1)
+ *   output        → the VAT on those supplies                        (field 4)
+ *   noVatSupplies → supplies you did NOT charge VAT on            (fields 2/3)
+ *   input         → VAT you paid on purchases                      (field 14)
+ *
+ * Everything is converted to the base currency. If a rate is missing the
+ * document is counted in missingFx rather than silently dropped — an invoice
+ * quietly missing from a VAT return is worse than an obvious gap.
+ */
 function vatForPeriod(pStart, pEnd, basis) {
-  let output = 0;
-  let input = 0;
+  let output = 0, input = 0;
+  let standardExcl = 0, standardIncl = 0, noVatSupplies = 0, vatablePurchases = 0;
+  let missingFx = 0;
+
   for (const d of state.documents) {
     if (d.type !== 'invoice' && d.type !== 'credit') continue;
-    if (!docHasVat(d)) continue;
     const rd = recognitionDate(d, basis);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
-    output += d.type === 'credit' ? -t.dueVat : t.dueVat;   // credit notes reduce output VAT
+    const sign = d.type === 'credit' ? -1 : 1;   // credit notes reduce supplies and VAT
+    const excl = toBase(t.dueSubtotal, d.currency);
+    const incl = toBase(t.due, d.currency);
+    if (excl == null || incl == null) { missingFx++; continue; }
+    if (docHasVat(d)) {
+      standardExcl += sign * excl;
+      standardIncl += sign * incl;
+      output += sign * t.dueVat;
+    } else {
+      noVatSupplies += sign * excl;             // no VAT, so excl === incl
+    }
   }
+
   for (const e of state.expenses) {
-    if (e.date < pStart || e.date > pEnd) continue;
-    input += inputVatOf(e);  // stored at entry (or computed for legacy records)
+    if (!e.date || e.date < pStart || e.date > pEnd) continue;
+    const iv = inputVatOf(e);   // stored at entry (or computed for legacy records)
+    if (iv <= 0) continue;
+    input += iv;
+    const amt = toBase(e.amount, e.currency);
+    if (amt == null) { missingFx++; continue; }
+    vatablePurchases += amt;
   }
-  return { output, input, net: output - input };
+
+  return {
+    output, input, net: output - input,
+    standardExcl, standardIncl, noVatSupplies, vatablePurchases, missingFx,
+  };
 }
 
 // Top N clients by revenue in tax year (cash basis by default)
@@ -4344,30 +4498,37 @@ let vatPeriodCount = 12;
 
 // The invoices (output VAT) and expenses (input VAT) that make up one period.
 function vatPeriodDetail(pStart, pEnd, basis) {
-  const invoices = [];
-  let output = 0;
+  const invoices = [];      // supplies you charged VAT on
+  const noVatInvoices = []; // supplies you did not charge VAT on
   for (const d of state.documents) {
-    if ((d.type !== 'invoice' && d.type !== 'credit') || !docHasVat(d)) continue;
+    if (d.type !== 'invoice' && d.type !== 'credit') continue;
     const rd = recognitionDate(d, basis);
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
-    if (t.dueVat <= 0) continue;
     const sign = d.type === 'credit' ? -1 : 1;
-    invoices.push({ doc: d, recognised: rd, vat: sign * t.dueVat, total: sign * t.due });
-    output += sign * t.dueVat;
+    if (docHasVat(d)) {
+      if (t.dueVat <= 0) continue;
+      invoices.push({
+        doc: d, recognised: rd,
+        vat: sign * t.dueVat, total: sign * t.due, excl: sign * t.dueSubtotal,
+      });
+    } else {
+      noVatInvoices.push({ doc: d, recognised: rd, total: sign * t.due });
+    }
   }
   const expenses = [];
-  let input = 0;
   for (const e of state.expenses) {
     if (!e.date || e.date < pStart || e.date > pEnd) continue;
     const iv = inputVatOf(e);
     if (iv <= 0) continue;
     expenses.push({ exp: e, vat: iv });
-    input += iv;
   }
   invoices.sort((a, b) => (a.recognised || '').localeCompare(b.recognised || ''));
+  noVatInvoices.sort((a, b) => (a.recognised || '').localeCompare(b.recognised || ''));
   expenses.sort((a, b) => (a.exp.date || '').localeCompare(b.exp.date || ''));
-  return { invoices, expenses, output, input, net: output - input };
+  // totals come from the single source of truth so the lists and the
+  // headline figures can never drift apart
+  return { invoices, noVatInvoices, expenses, ...vatForPeriod(pStart, pEnd, basis) };
 }
 
 function renderVatView() {
@@ -4375,7 +4536,9 @@ function renderVatView() {
   const periods = vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
   const rows = periods.map((p, i) => `
     <tr class="row-clickable" data-vat-idx="${i}">
-      <td><strong>${escapeHtml(p.label)}</strong><div class="text-sm text-mid">${fmtDate(p.start)} – ${fmtDate(p.end)}</div></td>
+      <td><strong>${escapeHtml(p.label)}</strong><div class="text-sm text-mid">${fmtDate(p.start)} – ${fmtDate(p.end)}</div>${p.missingFx > 0 ? `<div class="text-sm" style="color:var(--danger);">${p.missingFx} doc${p.missingFx === 1 ? '' : 's'} missing FX rate</div>` : ''}</td>
+      <td class="amount">${fmtMoney(p.standardExcl, baseCcy())}</td>
+      <td class="amount">${fmtMoney(p.noVatSupplies, baseCcy())}</td>
       <td class="amount">${fmtMoney(p.output, baseCcy())}</td>
       <td class="amount">${fmtMoney(p.input, baseCcy())}</td>
       <td class="amount"><strong style="color:${p.net >= 0 ? 'var(--text)' : 'var(--accent-bright)'};">${fmtMoney(p.net, baseCcy())}</strong></td>
@@ -4406,15 +4569,23 @@ function renderVatView() {
     <div class="list-card">
       <div class="list-head"><h2>VAT by ${vatCycleLabel().toLowerCase()} period</h2><span class="text-sm text-mid">Output − Input = Net payable</span></div>
       <div class="doc-list" style="border:0;overflow-x:auto;">
-        <table style="min-width:680px;">
-          <thead><tr><th>Period</th><th class="amount">Output VAT</th><th class="amount">Input VAT</th><th class="amount">Net payable</th><th></th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="5" class="empty">No VAT activity.</td></tr>'}</tbody>
+        <table style="min-width:900px;">
+          <thead><tr>
+            <th>Period</th>
+            <th class="amount">Invoiced with VAT<div class="text-sm text-mid" style="font-weight:400;">excl. VAT</div></th>
+            <th class="amount">Invoiced without VAT</th>
+            <th class="amount">Output VAT</th>
+            <th class="amount">Input VAT</th>
+            <th class="amount">Net payable</th>
+            <th></th>
+          </tr></thead>
+          <tbody>${rows || '<tr><td colspan="7" class="empty">No VAT activity.</td></tr>'}</tbody>
         </table>
       </div>
     </div>
 
     <div class="text-sm text-mid" style="margin-top:12px;">
-      Output VAT = VAT charged on ${baseCcy()} invoices · Input VAT = VAT claimable on ${baseCcy()} expenses marked as VAT-inclusive. A <strong>positive net</strong> is payable to the tax authority; a negative net is a refund. Click a period for the line-by-line breakdown, or export it as CSV for your accountant.
+      <strong>Invoiced with VAT</strong> is the value of your standard-rated supplies excluding the VAT itself, which is the figure a VAT return asks for. <strong>Invoiced without VAT</strong> covers zero-rated, exempt and non-VAT invoices. <strong>Output VAT</strong> is the VAT you charged; <strong>Input VAT</strong> is what you can claim back on ${baseCcy()} expenses marked VAT-inclusive. A <strong>positive net</strong> is payable to the tax authority; a negative net is a refund. Credit notes reduce the period they were issued in. Click a period for the full breakdown including what you paid VAT on, or export it as CSV.
     </div>
   `;
 }
@@ -4439,6 +4610,27 @@ function openVatPeriodModal(p) {
       <td class="amount"><strong>${fmtMoney(r.vat, r.exp.currency)}</strong></td>
     </tr>
   `).join('') || `<tr><td colspan="5" class="text-mid" style="padding:12px;">No input VAT in this period.</td></tr>`;
+  const noVatRows = det.noVatInvoices.map((r) => `
+    <tr>
+      <td class="num">${docNumber(r.doc)}</td>
+      <td>${fmtDate(r.recognised)}</td>
+      <td>${escapeHtml(clientName(r.doc.clientId))}</td>
+      <td class="amount"><strong>${fmtMoney(r.total, r.doc.currency)}</strong></td>
+    </tr>
+  `).join('') || `<tr><td colspan="4" class="text-mid" style="padding:12px;">No zero-rated or non-VAT invoices in this period.</td></tr>`;
+
+  const figure = (label, value, note, colour) => `
+    <div style="padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-radius:12px;">
+      <div class="stat-label">${label}</div>
+      <div style="font-family:'DM Mono',monospace;font-size:20px;margin-top:6px;${colour ? 'color:' + colour + ';' : ''}">${value}</div>
+      ${note ? `<div class="text-sm text-mid" style="margin-top:4px;">${note}</div>` : ''}
+    </div>`;
+
+  const fxWarning = det.missingFx > 0 ? `
+    <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;background:rgba(255,107,92,.10);border-left:3px solid var(--danger);">
+      <strong>${det.missingFx} document${det.missingFx === 1 ? '' : 's'} could not be converted to ${escapeHtml(baseCcy())}</strong>
+      <div class="text-sm text-mid" style="margin-top:4px;">No exchange rate is stored for that currency, so ${det.missingFx === 1 ? 'it is' : 'they are'} excluded from the totals below. Add the rate in Settings before you file.</div>
+    </div>` : '';
 
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
@@ -4451,16 +4643,31 @@ function openVatPeriodModal(p) {
           </div>
         </div>
         <div class="modal-body">
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
-            <div><div class="stat-label">Output VAT</div><div style="font-family:'DM Serif Display',serif;font-size:22px;">${fmtMoney(det.output, baseCcy())}</div></div>
-            <div><div class="stat-label">Input VAT</div><div style="font-family:'DM Serif Display',serif;font-size:22px;">${fmtMoney(det.input, baseCcy())}</div></div>
-            <div><div class="stat-label">Net payable</div><div style="font-family:'DM Serif Display',serif;font-size:22px;color:var(--accent-bright);">${fmtMoney(det.net, baseCcy())}</div></div>
+          ${fxWarning}
+          <div class="section-head" style="margin:0 0 10px;"><h2 style="font-size:16px;">For your VAT return</h2></div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px;">
+            ${figure('1 · Invoiced WITH VAT', fmtMoney(det.standardExcl, baseCcy()), 'Excluding VAT. VAT on this: <strong>' + fmtMoney(det.output, baseCcy()) + '</strong>')}
+            ${figure('2 · Invoiced WITHOUT VAT', fmtMoney(det.noVatSupplies, baseCcy()), 'Zero-rated, exempt or non-VAT')}
+            ${figure('3 · Purchases you paid VAT on', fmtMoney(det.vatablePurchases, baseCcy()), 'VAT claimable: <strong>' + fmtMoney(det.input, baseCcy()) + '</strong>')}
           </div>
-          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Output VAT — invoices</h2></div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
+            ${figure('Output VAT', fmtMoney(det.output, baseCcy()))}
+            ${figure('Input VAT', fmtMoney(det.input, baseCcy()))}
+            ${figure(det.net >= 0 ? 'Net payable to SARS' : 'Net refund due', fmtMoney(Math.abs(det.net), baseCcy()), '', 'var(--accent-bright)')}
+          </div>
+          <div class="text-sm text-mid" style="margin-bottom:20px;">
+            ${financesBasis === 'cash' ? 'Payments (cash) basis: invoices count when paid.' : 'Invoice (accrual) basis: invoices count on their invoice date.'}
+            Totals include credit notes as reductions. Figures are in ${escapeHtml(baseCcy())}.
+          </div>
+          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Invoices WITH VAT</h2></div>
           <div class="doc-list" style="overflow-x:auto;margin-bottom:18px;">
             <table style="min-width:560px;"><thead><tr><th>#</th><th>Date</th><th>Client</th><th class="amount">Total</th><th class="amount">VAT</th></tr></thead><tbody>${invRows}</tbody></table>
           </div>
-          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Input VAT — expenses</h2></div>
+          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Invoices WITHOUT VAT</h2></div>
+          <div class="doc-list" style="overflow-x:auto;margin-bottom:18px;">
+            <table style="min-width:560px;"><thead><tr><th>#</th><th>Date</th><th>Client</th><th class="amount">Total</th></tr></thead><tbody>${noVatRows}</tbody></table>
+          </div>
+          <div class="section-head" style="margin:0 0 8px;"><h2 style="font-size:16px;">Purchases you paid VAT on</h2></div>
           <div class="doc-list" style="overflow-x:auto;">
             <table style="min-width:560px;"><thead><tr><th>Date</th><th>Description</th><th>Category</th><th class="amount">Amount</th><th class="amount">VAT</th></tr></thead><tbody>${expRows}</tbody></table>
           </div>
@@ -4487,18 +4694,34 @@ function exportVatPeriod(p) {
   row('Basis', financesBasis === 'cash' ? 'Payments (cash)' : 'Invoice (accrual)');
   row('VAT rate', vatRate() + '%');
   row('Currency', baseCcy());
+  if (det.missingFx > 0) {
+    row('WARNING', `${det.missingFx} document(s) excluded — no exchange rate stored for their currency`);
+  }
   row();
-  row('OUTPUT VAT — invoices');
-  row('Invoice #', 'Date', 'Client', 'Total', 'VAT');
-  for (const r of det.invoices) row(docNumber(r.doc), r.recognised, clientName(r.doc.clientId), r.total.toFixed(2), r.vat.toFixed(2));
-  row('', '', '', 'TOTAL OUTPUT VAT', det.output.toFixed(2));
+  row('SUMMARY FOR VAT RETURN');
+  row('1. Invoiced WITH VAT (excluding VAT)', det.standardExcl.toFixed(2));
+  row('   VAT charged on those invoices (output VAT)', det.output.toFixed(2));
+  row('   Same invoices including VAT', det.standardIncl.toFixed(2));
+  row('2. Invoiced WITHOUT VAT (zero-rated, exempt or non-VAT)', det.noVatSupplies.toFixed(2));
+  row('3. Purchases you paid VAT on (including VAT)', det.vatablePurchases.toFixed(2));
+  row('   VAT claimable on those purchases (input VAT)', det.input.toFixed(2));
   row();
-  row('INPUT VAT — expenses');
+  row('NET PAYABLE TO SARS', det.net.toFixed(2));
+  row();
+  row('INVOICES WITH VAT');
+  row('Invoice #', 'Date', 'Client', 'Excl VAT', 'VAT', 'Total');
+  for (const r of det.invoices) row(docNumber(r.doc), r.recognised, clientName(r.doc.clientId), r.excl.toFixed(2), r.vat.toFixed(2), r.total.toFixed(2));
+  row('', '', 'TOTAL', det.standardExcl.toFixed(2), det.output.toFixed(2), det.standardIncl.toFixed(2));
+  row();
+  row('INVOICES WITHOUT VAT');
+  row('Invoice #', 'Date', 'Client', 'Total');
+  for (const r of det.noVatInvoices) row(docNumber(r.doc), r.recognised, clientName(r.doc.clientId), r.total.toFixed(2));
+  row('', '', 'TOTAL', det.noVatSupplies.toFixed(2));
+  row();
+  row('PURCHASES YOU PAID VAT ON');
   row('Date', 'Description', 'Category', 'Amount', 'VAT');
   for (const r of det.expenses) row(r.exp.date, r.exp.desc, r.exp.category || '', r.exp.amount.toFixed(2), r.vat.toFixed(2));
-  row('', '', '', 'TOTAL INPUT VAT', det.input.toFixed(2));
-  row();
-  row('NET PAYABLE', det.net.toFixed(2));
+  row('', '', 'TOTAL', det.vatablePurchases.toFixed(2), det.input.toFixed(2));
 
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -10726,6 +10949,320 @@ async function applyPdfReview() {
 }
 
 /* ============================================================
+   ONE-CLICK MOVE TO THE NEW HOME
+
+   Browser storage is locked to an exact domain, so moving to app.simpl.money
+   means the data has to be handed across deliberately. Rather than making
+   people export a file, set a new password and import it, the old page opens
+   the new one and passes the ENCRYPTED vault blob straight over via
+   postMessage — plus the sign-up record so they aren't asked to register again.
+
+   Because the blob moves untouched:
+     • their existing password still works
+     • their recovery phrase still works
+     • nothing is ever decrypted in transit
+
+   Safety rules, in order of importance:
+     1. The old copy is NEVER deleted — if anything goes wrong, it's still there.
+     2. We refuse to overwrite an existing vault on the new side.
+     3. Both ends pin the exact origin; we never postMessage to '*'.
+   ============================================================ */
+
+const MIGRATION_DONE_STORE = 'seed-migrated-v1';
+const MIGRATION_MSG = 'simpl-migrate';
+/* The payload rides in the URL *fragment*. Fragments are never sent to any
+   server — they're purely client-side — so the encrypted vault goes straight
+   from one page to the other without touching the network. This deliberately
+   avoids depending on window.opener, which gets severed by COOP headers,
+   privacy settings and some browsers. Guard rail: skip it for very large
+   vaults (a big embedded logo) and fall back to sync/backup. */
+const MIGRATION_MAX_PAYLOAD = 400000;
+
+/* Device-level settings that should follow the user to the new home. The vault
+   itself travels separately (it's the big encrypted blob). Deliberately NOT
+   carried: the device id (a new origin is fairly a new device) and the
+   install-dismissed flag (we want to offer the install on the new home). */
+function migrationCarryKeys() {
+  return [
+    'seed-onboarding-v2',        // so they aren't asked to sign up again
+    PWD_HINT_STORE,              // password hint
+    LICENCE_KEY_STORE,           // a paid licence must not be lost in the move
+    TRIAL_META_STORE,            // trial continues rather than restarting
+    BRANDING_OPT_IN_STORE,       // their "keep the footer on" choice
+    RECOVERY_PROMPT_STORE,       // don't re-nag someone who already declined
+    BACKUP_META_KEY,             // last-backup date, so no false "never backed up"
+  ];
+}
+
+function migrationCompleted() {
+  try { return localStorage.getItem(MIGRATION_DONE_STORE) === '1'; } catch (e) { return false; }
+}
+
+/* ---------- OLD side: offer the move, then send ---------- */
+
+function initMigrationSource() {
+  if (!migrationActive()) return;
+  const banner = document.getElementById('migrate-banner');
+  if (!banner) return;
+  banner.style.display = migrationCompleted() ? 'none' : 'flex';
+  // If the new side manages to call back, retire the banner for good.
+  window.addEventListener('message', (ev) => {
+    if (ev.origin !== MIGRATION.newOrigin) return;
+    const d = ev.data || {};
+    if (d.type === MIGRATION_MSG && d.step === 'done') markMigrationDone();
+  });
+}
+
+function markMigrationDone() {
+  try { localStorage.setItem(MIGRATION_DONE_STORE, '1'); } catch (e) {}
+  const b = document.getElementById('migrate-banner');
+  if (b) b.style.display = 'none';
+}
+
+async function startMigration(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = 'Move my data'; } };
+  try {
+    const blob = await vaultGet();
+    if (!blob) { restore(); openMigrationFallbackModal('no-data'); return; }
+
+    const keys = {};
+    for (const k of migrationCarryKeys()) {
+      try { const v = localStorage.getItem(k); if (v) keys[k] = v; } catch (e) {}
+    }
+
+    const payload = encodeURIComponent(JSON.stringify({ v: 2, blob, keys }));
+    if (payload.length > MIGRATION_MAX_PAYLOAD) { restore(); openMigrationFallbackModal('too-big'); return; }
+
+    // Must be a direct consequence of the click or the pop-up blocker eats it.
+    const target = window.open(MIGRATION.newAppUrl + '#m=' + payload, '_blank');
+    if (!target) { restore(); openMigrationFallbackModal('blocked'); return; }
+
+    restore();
+    markMigrationDone();
+    toast('Sent — carry on in the new tab. This copy is left untouched as a backup.');
+  } catch (e) {
+    restore();
+    openMigrationFallbackModal('error');
+  }
+}
+
+function openMigrationFallbackModal(reason) {
+  const why = reason === 'too-big'
+    ? 'Your data is too large to hand over in one click (usually a big logo).'
+    : reason === 'no-data'
+      ? 'There\'s no saved data on this address to move.'
+      : reason === 'blocked'
+        ? 'Your browser blocked the new tab from opening.'
+        : 'Something went wrong opening the new address.';
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head"><div class="ttl">Let's move your data the manual way</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            ${escapeHtml(why)} Nothing has been lost — your data is still right here. Two ways to move it:
+            <p style="margin:12px 0 6px;"><strong>Option 1 — sync (no files)</strong></p>
+            Open the new address in another tab, then use <strong>Settings → Device sync</strong> on both and pair them.
+            <p style="margin:12px 0 6px;"><strong>Option 2 — backup file</strong></p>
+            Here: <strong>Settings → Backup → Download backup</strong>. Then on the new address, set a password, and use <strong>Restore from backup</strong> — it'll ask for the password this vault uses today.
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Close</button>
+          <a class="btn btn-primary" href="${MIGRATION.newAppUrl}" target="_blank" rel="noopener" style="text-decoration:none;">Open the new address</a>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+/* ---------- NEW side: accept an incoming move ---------- */
+
+/* Returns true if an incoming move was accepted (so boot can skip the normal
+   lock-screen setup path and show the welcome instead). */
+async function initMigrationTarget() {
+  if (!onNewOrigin()) return false;
+  const hash = location.hash || '';
+  if (hash.indexOf('#m=') !== 0) return false;
+
+  // Take the payload out of the address bar immediately — no ciphertext left
+  // sitting in the URL or the history entry.
+  let raw = hash.slice(3);
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+
+  const tellSource = (step, reason) => {
+    try { if (window.opener) window.opener.postMessage({ type: MIGRATION_MSG, step, reason }, MIGRATION.oldOrigin); } catch (e) {}
+  };
+
+  try {
+    const data = JSON.parse(decodeURIComponent(raw));
+    if (!data || !data.blob || typeof data.blob !== 'string') { openMigrationTargetProblem('not-a-vault'); return false; }
+    // Sanity-check it really is one of our vault blobs before storing it.
+    const parsed = JSON.parse(data.blob);
+    if (!parsed || !parsed.ct) { openMigrationTargetProblem('not-a-vault'); return false; }
+
+    // Never clobber data that's already here. Idempotent if it's the same blob
+    // (e.g. the link was opened twice).
+    const existing = await vaultGet();
+    if (existing && existing !== data.blob) { openMigrationTargetProblem('has-data'); return false; }
+
+    if (!existing) await vaultSet(data.blob);
+    // Carry the device-level settings across — only keys we expect, so a
+    // malformed payload can't write arbitrary storage.
+    const allowed = migrationCarryKeys();
+    const incoming = data.keys || {};
+    for (const k of Object.keys(incoming)) {
+      if (allowed.indexOf(k) === -1) continue;
+      if (typeof incoming[k] !== 'string') continue;
+      try { localStorage.setItem(k, incoming[k]); } catch (e) {}
+    }
+    // v1 payloads (pre-release shape) — kept so an old tab still works.
+    if (data.onboarding) { try { localStorage.setItem('seed-onboarding-v2', data.onboarding); } catch (e) {} }
+    if (data.hint) { try { localStorage.setItem(PWD_HINT_STORE, data.hint); } catch (e) {} }
+    tellSource('done');
+    showMigrationWelcome();
+    return true;
+  } catch (e) {
+    openMigrationTargetProblem('error');
+    return false;
+  }
+}
+
+function openMigrationTargetProblem(reason) {
+  const msg = reason === 'has-data'
+    ? 'This address already has data on it, so nothing was overwritten. If you meant to combine two devices, use <strong>Settings → Device sync</strong> or <strong>Settings → Backup → Merge from backup</strong> instead.'
+    : 'That move link didn\'t come through in one piece. Nothing has been lost — your data is still safe at the old address. Try again from there, or use <strong>Settings → Backup → Download backup</strong> and restore it here.';
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head"><div class="ttl">Couldn't bring the data across</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.7;">${msg}</div></div>
+        <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>
+      </div>
+    </div>
+  `);
+}
+
+function showMigrationWelcome() {
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:460px;">
+        <div class="modal-head"><div class="ttl">Your data is here</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            Everything moved across to <strong>${escapeHtml(MIGRATION.newOrigin.replace('https://', ''))}</strong> — encrypted the whole way, so nothing changed:
+            <ul style="margin:10px 0 0 18px;padding:0;">
+              <li style="margin-bottom:6px;">Unlock with the <strong>same password</strong> you always use.</li>
+              <li style="margin-bottom:6px;">Your <strong>recovery phrase</strong> still works.</li>
+              <li>Your old copy is untouched, as a safety net.</li>
+            </ul>
+            <p style="margin-top:12px;">Bookmark this address — it's home from now on.</p>
+          </div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-primary" data-close>Unlock ${escapeHtml(APP_BRAND_NAME)}</button></div>
+      </div>
+    </div>
+  `);
+}
+
+/* ============================================================
+   INSTALL PROMPT (PWA)
+
+   Dark until launch (INSTALL_PROMPT_ENABLED) — we don't want people installing
+   the app against the old github.io origin days before it moves, because an
+   installed PWA is pinned to the origin its data lives on.
+
+   Chrome/Edge/Android fire `beforeinstallprompt`, which we capture and replay
+   from our own button. iOS Safari never fires it (Apple's choice), so there we
+   show the manual Share → Add to Home Screen instructions instead.
+   ============================================================ */
+
+const INSTALL_DISMISS_STORE = 'seed-install-dismissed-v1';
+let deferredInstallEvent = null;
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+function isIosSafari() {
+  const ua = navigator.userAgent;
+  const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return iOS && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+}
+function installDismissed() {
+  try { return localStorage.getItem(INSTALL_DISMISS_STORE) === '1'; } catch (e) { return false; }
+}
+
+function initInstallPrompt() {
+  if (!INSTALL_PROMPT_ENABLED) return;      // dark until switch-day
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();                      // suppress the browser's own mini-infobar
+    deferredInstallEvent = e;
+    refreshInstallUi();
+  });
+  window.addEventListener('appinstalled', () => {
+    deferredInstallEvent = null;
+    try { localStorage.setItem(INSTALL_DISMISS_STORE, '1'); } catch (e) {}
+    refreshInstallUi();
+    toast('Installed — you can open ' + APP_BRAND_NAME + ' from your apps now');
+  });
+  refreshInstallUi();
+}
+
+// Can we offer an install at all? (Not already installed, not dismissed, and
+// either the browser gave us a prompt or we can show iOS instructions.)
+function canOfferInstall() {
+  if (!INSTALL_PROMPT_ENABLED) return false;
+  if (isStandalone() || installDismissed()) return false;
+  return !!deferredInstallEvent || isIosSafari();
+}
+
+function refreshInstallUi() {
+  const banner = document.getElementById('install-banner');
+  if (!banner) return;
+  banner.style.display = canOfferInstall() ? 'flex' : 'none';
+  const label = document.getElementById('install-banner-text');
+  if (label) label.textContent = `Add ${APP_BRAND_NAME} to your ${isIosSafari() ? 'home screen' : 'apps'} — it opens in its own window and works offline.`;
+}
+
+async function doInstall() {
+  if (deferredInstallEvent) {
+    deferredInstallEvent.prompt();
+    const choice = await deferredInstallEvent.userChoice.catch(() => null);
+    deferredInstallEvent = null;
+    if (choice && choice.outcome === 'accepted') {
+      try { localStorage.setItem(INSTALL_DISMISS_STORE, '1'); } catch (e) {}
+    }
+    refreshInstallUi();
+    return;
+  }
+  if (isIosSafari()) openIosInstallModal();
+}
+
+function openIosInstallModal() {
+  const share = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px"><path d="M12 15V3"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/></svg>';
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:420px;">
+        <div class="modal-head"><div class="ttl">Add ${escapeHtml(APP_BRAND_NAME)} to your home screen</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            Safari doesn't offer a one-click install, so it takes two taps:
+            <ol style="margin:12px 0 0 18px;padding:0;">
+              <li style="margin-bottom:8px;">Tap the <strong>Share</strong> button ${share} in the Safari toolbar${/iPad/.test(navigator.userAgent) ? ' (top right)' : ' (bottom of the screen)'}.</li>
+              <li style="margin-bottom:8px;">Scroll down and choose <strong>Add to Home Screen</strong>.</li>
+              <li>Tap <strong>Add</strong>. It'll appear with your other apps.</li>
+            </ol>
+          </div>
+          <div class="text-sm text-muted" style="margin-top:14px;line-height:1.55;">Your data stays on this device either way — installing just gives it its own icon, its own window, and full offline use.</div>
+        </div>
+        <div class="modal-foot"><button class="btn btn-primary" data-close>Got it</button></div>
+      </div>
+    </div>
+  `);
+}
+
+/* ============================================================
    RECOVERY PHRASE + PASSWORD HINT
 
    The master password is the only key to the vault, so losing it used to mean
@@ -11242,6 +11779,10 @@ function initPwa() {
   // pressure). Granted automatically for installed PWAs / engaged sites.
   requestPersistentStorage();
 
+  initInstallPrompt();
+  initMigrationSource();   // old home: offer the one-click move
+  // (the receiving half runs in boot(), before the lock screen is decided)
+
   // Check for a newer version (silent on any failure)
   checkForUpdate();
   // Re-check when the tab regains focus, when the PWA resumes from the
@@ -11274,6 +11815,19 @@ function initPwa() {
     m.snoozeUntil = new Date(Date.now() + BACKUP_SNOOZE_DAYS * 86400000).toISOString();
     setBackupMeta(m);
     hideBackupBanner();
+  });
+
+  // "We've moved" banner (only ever visible on the old origin, post-switch)
+  const migrateGo = document.getElementById('migrate-go');
+  if (migrateGo) migrateGo.addEventListener('click', (e) => startMigration(e.currentTarget));
+
+  // Install prompt banner (only ever visible once INSTALL_PROMPT_ENABLED)
+  const installGo = document.getElementById('install-go');
+  const installLater = document.getElementById('install-later');
+  if (installGo) installGo.addEventListener('click', () => doInstall());
+  if (installLater) installLater.addEventListener('click', () => {
+    try { localStorage.setItem(INSTALL_DISMISS_STORE, '1'); } catch (e) {}
+    refreshInstallUi();
   });
 }
 
@@ -11777,6 +12331,13 @@ let pendingSyncCode = null;
   initPwa();
   retryPendingOnboarding();
   await initVaultStorage();  // pick backend + run the one-time IndexedDB migration
+  // Accept an incoming move BEFORE deciding what the lock screen should say —
+  // otherwise a migrating user would briefly be asked to create a new vault.
+  await initMigrationTarget();
+  await applyLicenceFromUrl();   // #licence=… links, before anything else draws
+  // If the app is ALREADY open and the user clicks a licence link, the browser
+  // may just change the fragment without reloading — catch that too.
+  window.addEventListener('hashchange', () => { applyLicenceFromUrl(); });
   const o = getOnboarding();
   if (!o || !o.submitted) {
     showOnboarding();        // required for new AND existing users until completed
