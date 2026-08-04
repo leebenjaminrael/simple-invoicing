@@ -1481,6 +1481,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 18px; color: var(--accent-bright); font-variant-numeric: tabular-nums; padding-right: 4px; }
   #timer-widget .tw-stop { border: none; cursor: pointer; width: 34px; height: 34px; border-radius: 999px; background: var(--accent-bright); color: #0F0E0D; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
   @media (max-width: 768px) { #timer-widget { right: 12px; bottom: calc(72px + env(safe-area-inset-bottom)); } }
+
+  /* Section heading rows inside a document's line table */
+  .lines tr[data-line-type="heading"] td { background: var(--surface-2); }
+  .lines tr[data-line-type="heading"] textarea { font-weight: 600; color: var(--text); }
 </style>
 </head>
 <body>
@@ -2489,7 +2493,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.19.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.20.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3085,9 +3089,11 @@ function clientName(id) {
 }
 // Subtotal of the normal (non-percentage) lines — the base a % line applies to.
 function lineBaseSubtotal(doc) {
-  return (doc.lines || []).reduce((s, l) => s + (l && l.type === 'percent' ? 0 : (Number(l.qty) || 0) * (Number(l.price) || 0)), 0);
+  return (doc.lines || []).reduce((s, l) => s + (l && (l.type === 'percent' || l.type === 'heading') ? 0 : (Number(l.qty) || 0) * (Number(l.price) || 0)), 0);
 }
 function calcLine(line, doc) {
+  // A heading is a section title only — it carries no money.
+  if (line && line.type === 'heading') return 0;
   if (line && line.type === 'percent') {
     return ((Number(line.percent) || 0) / 100) * (doc ? lineBaseSubtotal(doc) : 0);
   }
@@ -7233,21 +7239,54 @@ function openProjectPeopleModal(p) {
 
 /* Flat project → one quote line per budget line; sectioned → one line per
    included section subtotal. Fee becomes a % line either way. */
-async function createQuoteFromProject(p) {
-  const b = projectBudget(p);
-  if (b.billTotal <= 0) { toast('Add some budget lines first'); return; }
-  let lines;
-  if (projectIsFlat(p)) {
-    lines = p.sections[0].lines.filter((l) => blBill(l) > 0).map((l) => ({
-      id: uid('l-'), desc: l.desc + (l.unit1 ? ` (${l.qty1} ${l.unit1}${Number(l.qty2) !== 1 ? ` × ${l.qty2} ${l.unit2}`.trimEnd() : ''})` : ''),
-      qty: 1, price: blBill(l), vat: true,
-    }));
+/* Turn a project budget into quote lines.
+ *   'detailed' → a heading per section, then every budget line with its own
+ *                quantity and rate, so the client sees the full build-up
+ *   'sections' → one line per section at the section total
+ *   'single'   → one line for the whole project
+ * The production fee is always its own percentage line, in every mode, so it
+ * is never buried inside another figure.
+ */
+function projectQuoteLines(p, mode, withUnits) {
+  const desc = (l) => {
+    const base = l.desc || '';
+    if (!withUnits || !l.unit1) return base;
+    const q2 = Number(l.qty2) !== 1 ? ` × ${l.qty2} ${l.unit2 || ''}`.trimEnd() : '';
+    return `${base} (${l.qty1} ${l.unit1}${q2})`;
+  };
+  const secs = (p.sections || []).filter((s) => s.included !== false);
+  const flat = projectIsFlat(p);
+  const out = [];
+
+  if (mode === 'single') {
+    out.push({ id: uid('l-'), desc: p.name || 'Project', qty: 1, price: projectBudget(p).bill, vat: true });
+  } else if (mode === 'sections' && !flat) {
+    for (const s of secs) {
+      if (sectionBudget(s).bill <= 0) continue;
+      out.push({ id: uid('l-'), desc: s.name, qty: 1, price: sectionBudget(s).bill, vat: true });
+    }
   } else {
-    lines = p.sections.filter((s) => s.included !== false && sectionBudget(s).bill > 0).map((s) => ({
-      id: uid('l-'), desc: s.name, qty: 1, price: sectionBudget(s).bill, vat: true,
-    }));
+    // detailed (and any flat project, which has nothing to summarise)
+    for (const s of secs) {
+      const lines = (s.lines || []).filter((l) => blBill(l) > 0);
+      if (!lines.length) continue;
+      if (!flat) out.push({ id: uid('l-'), type: 'heading', desc: s.name });
+      for (const l of lines) {
+        // qty × price reproduces blBill exactly, so the quote total always
+        // matches the budget total
+        const units = (Number(l.qty1) || 0) * (Number(l.qty2) || 0);
+        out.push({ id: uid('l-'), desc: desc(l), qty: units, price: Number(l.rate) || 0, vat: true });
+      }
+    }
   }
-  if (Number(p.feePct) > 0) lines.push({ id: uid('l-'), type: 'percent', desc: 'Production fee', percent: Number(p.feePct), vat: true });
+  if (Number(p.feePct) > 0) {
+    out.push({ id: uid('l-'), type: 'percent', desc: 'Production fee', percent: Number(p.feePct), vat: true });
+  }
+  return out;
+}
+
+async function createQuoteFromProject(p, mode, withUnits) {
+  const lines = projectQuoteLines(p, mode, withUnits);
   const bank = (state.settings.banking || []).find((x) => x.currency === baseCcy()) || (state.settings.banking || [])[0] || { id: 'sa' };
   const doc = {
     id: uid('d-'), type: 'quote', number: state.settings.nextQt,
@@ -7262,6 +7301,58 @@ async function createQuoteFromProject(p) {
   await saveState();
   toast('Created ' + docNumber(doc));
   openDocEditor(doc.id);
+}
+
+function openQuoteFromBudgetModal(p) {
+  const b = projectBudget(p);
+  if (b.billTotal <= 0) { toast('Add some budget lines first'); return; }
+  const flat = projectIsFlat(p);
+  const count = (mode) => projectQuoteLines(p, mode, true).length;
+
+  const opt = (value, checked, title, note, n) => `
+    <label class="quote-mode" style="display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:1px solid var(--border);border-radius:12px;cursor:pointer;margin-bottom:10px;">
+      <input type="radio" name="qmode" value="${value}" ${checked ? 'checked' : ''} style="margin-top:3px;" />
+      <span style="flex:1;">
+        <strong>${title}</strong>
+        <div class="text-sm text-mid" style="margin-top:3px;">${note}</div>
+      </span>
+      <span class="text-sm text-muted mono" style="white-space:nowrap;">${n} line${n === 1 ? '' : 's'}</span>
+    </label>`;
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:560px;">
+        <div class="modal-head">
+          <div class="ttl">Create quote from budget</div>
+          <div class="actions"><span class="modal-close" data-close>×</span></div>
+        </div>
+        <div class="modal-body">
+          <p class="text-sm text-mid" style="margin:0 0 16px;">How much of the budget should the client see?</p>
+          ${flat ? '' : opt('detailed', true, 'Full breakdown', 'Every section as a heading, with each line item and its own price underneath.', count('detailed'))}
+          ${flat ? opt('detailed', true, 'Itemised', 'Every budget line with its own price.', count('detailed')) : ''}
+          ${flat ? '' : opt('sections', false, 'Section totals only', 'One line per section. The client sees the shape, not the detail.', count('sections'))}
+          ${opt('single', false, 'Single line', 'One line for the whole project.', count('single'))}
+          <label class="checkbox" style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+            <input type="checkbox" id="q-units" checked />
+            <span class="text-sm">Include quantities and units in the descriptions <span class="text-muted">(e.g. “Camera operator (6 days × 2 crew)”)</span></span>
+          </label>
+          <div class="text-sm text-mid" style="margin-top:16px;">
+            Budget total <strong>${fmtMoney(b.billTotal, baseCcy())}</strong>${Number(p.feePct) > 0 ? ` · production fee of ${p.feePct}% is added as its own line in every option` : ''}. You can edit everything before sending.
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="q-create">Create quote</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('q-create').addEventListener('click', () => {
+    const mode = (document.querySelector('input[name="qmode"]:checked') || {}).value || 'detailed';
+    const withUnits = document.getElementById('q-units').checked;
+    closeModal();
+    createQuoteFromProject(p, mode, withUnits);
+  });
 }
 
 function bindProjectsEvents() {
@@ -7280,7 +7371,7 @@ function bindProjectsEvents() {
 
   document.getElementById('pj-edit')?.addEventListener('click', () => openProjectModal(p));
   document.getElementById('pj-people-btn')?.addEventListener('click', () => openProjectPeopleModal(p));
-  document.getElementById('pj-make-quote')?.addEventListener('click', () => createQuoteFromProject(p));
+  document.getElementById('pj-make-quote')?.addEventListener('click', () => openQuoteFromBudgetModal(p));
   document.getElementById('pj-status')?.addEventListener('change', async (e) => { p.status = e.target.value; await saveState(); });
   document.getElementById('pj-fee')?.addEventListener('change', async (e) => { p.feePct = Math.max(0, Number(e.target.value) || 0); saveRender(); });
   document.getElementById('pj-add-section')?.addEventListener('click', async () => {
@@ -7663,6 +7754,14 @@ function renderDocEditor() {
     const vatCell = isZAR ? `<td class="vat-cell"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
     const amtCell = `<td class="amount-cell">${fmtMoney(calcLine(l, d), d.currency)}</td>`;
     const delCell = `<td class="row-actions"><span class="row-del" data-line-del="${i}">×</span></td>`;
+    if (l.type === 'heading') {
+      return `
+    <tr data-line-idx="${i}" data-line-type="heading">
+      <td colspan="${isZAR ? 4 : 3}"><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Section heading" style="font-weight:600;">${escapeHtml(l.desc || '')}</textarea></td>
+      <td class="amount-cell text-muted" style="font-size:11px;">heading</td>
+      ${delCell}
+    </tr>`;
+    }
     if (l.type === 'percent') {
       return `
     <tr data-line-idx="${i}" data-line-type="percent">
@@ -7818,6 +7917,7 @@ function renderDocEditor() {
         <div class="lines-foot">
           <button class="btn btn-sm" id="line-add">+ Add line</button>
           <button class="btn btn-sm" id="line-add-pct">+ % / discount line</button>
+          <button class="btn btn-sm" id="line-add-head">+ Section heading</button>
           ${state.settings.savedLineItems && state.settings.savedLineItems.length === 0 ? '<span class="text-sm text-muted">Tip: save frequent line items in Settings.</span>' : ''}
         </div>
       </div>
@@ -7993,6 +8093,12 @@ function bindEditorEvents() {
     renderDocEditor();
     scheduleAutoSave();
   });
+  const lineAddHead = host.querySelector('#line-add-head');
+  if (lineAddHead) lineAddHead.addEventListener('click', () => {
+    editingDoc.lines.push({ id: uid('l-'), type: 'heading', desc: 'Section' });
+    renderDocEditor();
+    scheduleAutoSave();
+  });
 
   host.querySelectorAll('[data-deposit]').forEach((el) => {
     el.addEventListener('click', () => {
@@ -8140,8 +8246,14 @@ function openDocPreview(docId) {
   const isZAR = docHasVat(d);
   const isInv = d.type === 'invoice';
   const docTypeLabel = d.type === 'credit' ? 'CREDIT NOTE' : isInv ? (co.vat ? 'TAX INVOICE' : 'INVOICE') : 'QUOTE';
-  const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
+  const linesHtml = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent' || l.type === 'heading').map((l) => {
     const isPct = l.type === 'percent';
+    if (l.type === 'heading') {
+      return `
+    <tr class="line-heading">
+      <td colspan="${isZAR ? 5 : 4}" style="padding-top:16px;font-weight:700;border-bottom:1px solid #ddd;">${escapeHtml(l.desc || '').replace(/\n/g, '<br>')}</td>
+    </tr>`;
+    }
     return `
     <tr>
       <td><span class="desc">${escapeHtml(l.desc || '').replace(/\n/g, '<br>')}</span></td>
@@ -8689,8 +8801,16 @@ async function buildPdfDoc(d) {
   const head = isZAR
     ? [['Description', 'Qty', 'Unit price', 'VAT', 'Amount ' + d.currency]]
     : [['Description', 'Qty', 'Unit price', 'Amount ' + d.currency]];
-  const body = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent').map((l) => {
+  const body = d.lines.filter((l) => l.desc || l.qty || l.price || l.type === 'percent' || l.type === 'heading').map((l) => {
     const isPct = l.type === 'percent';
+    if (l.type === 'heading') {
+      // one bold cell spanning the whole table
+      return [{
+        content: l.desc || '',
+        colSpan: isZAR ? 5 : 4,
+        styles: { fontStyle: 'bold', fillColor: [245, 242, 236], textColor: [28, 27, 25] },
+      }];
+    }
     const baseRow = [
       l.desc || '',
       isPct ? (Number(l.percent) || 0) + '%' : String(l.qty),
