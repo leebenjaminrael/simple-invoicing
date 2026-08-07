@@ -2493,7 +2493,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.20.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.21.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2989,8 +2989,8 @@ function addDays(iso, days) {
   const day = String(d.getDate()).padStart(2, '0');
   return `${d.getFullYear()}-${m}-${day}`;
 }
-const SYM = { ZAR: 'R', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', KES: 'KSh' };
-const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'KES'];
+const SYM = { ZAR: 'R', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', CAD: 'C$', KES: 'KSh' };
+const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'KES'];
 // The app's home/reporting currency — everything converts to this for the dashboard,
 // finances and accountant report. Configurable in Settings; defaults to ZAR.
 function baseCcy() { return (state && state.settings && state.settings.baseCurrency) || 'ZAR'; }
