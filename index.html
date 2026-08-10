@@ -1491,7 +1491,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
 <div id="lock-screen">
   <div class="lock-card">
-    <div class="brand" id="lock-brand">invoicing</div>
+    <div class="brand" id="lock-brand">Simpl</div>
     <div class="sub" id="lock-sub">Set a master password to encrypt your data.</div>
     <form id="lock-form" autocomplete="off">
       <label for="lock-pwd">Master password</label>
@@ -1541,10 +1541,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <button id="menu-btn" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
     </button>
-    <div class="brand" id="topbar-brand">seed</div>
+    <div class="brand" id="topbar-brand">Simpl</div>
   </header>
   <aside class="sidebar" id="app-sidebar">
-    <div class="brand" id="sidebar-brand">invoicing</div>
+    <div class="brand" id="sidebar-brand">Simpl</div>
     <div class="entity-switcher" id="entity-switcher"></div>
     <div class="nav-section">Main</div>
     <button class="nav-item" data-route="dashboard"><span class="dot"></span> Dashboard</button>
@@ -2494,8 +2494,8 @@ const SEED_DATA = {
     },
   ],
   settings: {
-    brandName: 'invoicing',
-    appTitle: 'App',
+    brandName: APP_BRAND_NAME,
+    appTitle: APP_BRAND_NAME,
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     bankProfiles: [],
     autoLockMinutes: 15,
@@ -2503,7 +2503,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.22.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.23.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3253,8 +3253,8 @@ function migrateState() {
   if (!state.settings.goals) state.settings.goals = { annual: 0, monthly: {} };
   if (!state.settings.goals.monthly) state.settings.goals.monthly = {};
   // v4: brand customisation
-  if (!state.settings.brandName) state.settings.brandName = 'seed';
-  if (!state.settings.appTitle) state.settings.appTitle = 'Invoicing';
+  if (!state.settings.brandName) state.settings.brandName = APP_BRAND_NAME;
+  if (!state.settings.appTitle) state.settings.appTitle = APP_BRAND_NAME;
   if (!state.settings.bankProfiles) state.settings.bankProfiles = [];
 
   // v5: wrap the single flat business into entities[]. Must be LAST — after this,
@@ -4700,7 +4700,7 @@ function openVatPeriodModal(p) {
 function exportVatPeriod(p) {
   const det = vatPeriodDetail(p.start, p.end, financesBasis);
   const co = (activeEntity() && activeEntity().company) || {};
-  const orgName = co.name || state.settings.brandName || 'Business';
+  const orgName = co.name || 'Business';
   const lines = [];
   const csvEsc = (v) => { if (v == null) return ''; const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
@@ -6828,7 +6828,7 @@ function exportAccountantReport() {
   const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
 
   const co = state.settings.company || {};
-  const orgName = co.name || (state.settings.brandName) || 'Business';
+  const orgName = co.name || 'Business';
   row(`${orgName} — Accountant Report`);
   row(`Period`, `${periodStart} to ${periodEnd} (SA tax year ${ty.label})`);
   row(`Generated`, new Date().toISOString().slice(0, 19).replace('T', ' '));
@@ -8929,7 +8929,7 @@ async function shareDoc(d) {
   let built;
   try { built = await buildPdfDoc(d); } catch (e) { toast('Could not build PDF'); return; }
   const file = new File([built.doc.output('blob')], built.filename, { type: 'application/pdf' });
-  const fromName = (state.settings.company && state.settings.company.name) || state.settings.brandName || '';
+  const fromName = (state.settings.company && state.settings.company.name) || '';
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({
@@ -8967,7 +8967,7 @@ function composeEmail(d) {
   const t = calcTotals(d);
   const num = docNumber(d);
   const co = (state.settings && state.settings.company) || {};
-  const fromName = co.tradingName || co.name || (state.settings && state.settings.brandName) || 'us';
+  const fromName = co.tradingName || co.name || 'us';
   const subject = `${num} from ${fromName}`;
   const dateLabel = d.type === 'invoice' ? `due ${fmtDate(d.dueDate)}` : `valid until ${fmtDate(d.expiry)}`;
   const signOff = (co.attention || '').split(' ')[0] || '';
@@ -8982,7 +8982,7 @@ function composeReminderEmail(d) {
   const t = calcTotals(d);
   const num = docNumber(d);
   const co = (state.settings && state.settings.company) || {};
-  const orgName = co.tradingName || co.name || (state.settings && state.settings.brandName) || '';
+  const orgName = co.tradingName || co.name || '';
   const signOff = (co.attention || '').split(' ')[0] || '';
   const days = d.dueDate ? Math.max(0, Math.floor((Date.now() - new Date(d.dueDate + 'T00:00:00').getTime()) / 86400000)) : 0;
   const overdueLabel = days > 0 ? `was due on ${fmtDate(d.dueDate)} — ${days} day${days === 1 ? '' : 's'} ago` : `was due on ${fmtDate(d.dueDate)}`;
@@ -9010,11 +9010,7 @@ function renderSettings() {
 
     <div class="settings-section">
       <h3>Brand</h3>
-      <div class="form-grid">
-        <div class="field"><label>Brand name <span class="text-muted">(sidebar + lock screen, short)</span></label><input data-cs="brandName" value="${escapeHtml(state.settings.brandName || '')}" placeholder="e.g. acme" /></div>
-        <div class="field"><label>App title <span class="text-muted">(browser tab suffix)</span></label><input data-cs="appTitle" value="${escapeHtml(state.settings.appTitle || 'Invoicing')}" placeholder="e.g. Invoicing" /></div>
-      </div>
-      <div class="text-sm text-mid" style="margin-top:10px;">The brand name is shown in the sidebar, lock screen and browser tab in the app's serif font. The logo (below) is only used on PDFs (invoices and quotes), not in the app itself.</div>
+      <div class="text-sm text-mid">Your logo (below) is used on PDFs — invoices and quotes — not in the app itself. Your company name and details live under Company.</div>
     </div>
 
     <div class="settings-section">
@@ -9324,7 +9320,7 @@ function bindSettingsEvents() {
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
       if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
       if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
-      if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','brandName','appTitle','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
+      if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -10837,8 +10833,8 @@ function extractInvoiceFields(text, fileName) {
     const v = (co[f] || '').toString().toLowerCase();
     v.split(/[\s,]+/).forEach((tok) => { if (tok.length > 3) ownTokens.add(tok); });
   }
-  const brand = ((state.settings && state.settings.brandName) || '').toLowerCase();
-  if (brand && brand.length > 2) ownTokens.add(brand);
+  // (brandName is no longer user-set — it's the product name for everyone — so
+  // it deliberately isn't used as an "own business" token here any more.)
   const isOwnLine = (ln) => {
     const t = ln.toLowerCase();
     let hits = 0;
@@ -11859,11 +11855,12 @@ async function deleteEntity(id) {
   toast('Business deleted');
 }
 
+/* The app is Simpl for everyone — the old per-user brandName/appTitle
+   white-labelling was removed, so this now just stamps the product name.
+   Any brandName a user set previously is ignored rather than deleted. */
 function applyBrand() {
-  const s = state && state.settings ? state.settings : {};
-  const ent = activeEntity();
-  const brand = (s.brandName && s.brandName.trim()) || (ent && ent.company && ent.company.name) || 'seed';
-  const title = (s.appTitle && s.appTitle.trim()) || 'Invoicing';
+  const brand = APP_BRAND_NAME;
+  const title = APP_BRAND_NAME;
   // Sidebar / lock screen / mobile top bar — always text in the app's serif font
   const side = document.getElementById('sidebar-brand');
   if (side) side.textContent = brand;
@@ -11872,7 +11869,7 @@ function applyBrand() {
   const top = document.getElementById('topbar-brand');
   if (top) top.textContent = brand;
   // Document title
-  document.title = `${brand} · ${title}`;
+  document.title = brand === title ? brand : `${brand} · ${title}`;
 }
 
 /* ============================================================
@@ -12151,7 +12148,7 @@ function openSyncModal(role, prefillCode) {
   const sess = createSyncSession(role, {
     helloPayload: () => ({
       deviceId: getDeviceId(),
-      brand: (state.settings.brandName || 'invoicing'),
+      brand: APP_BRAND_NAME,
       appVersion: APP_VERSION,
       entities: state.entities.length,
       documents: state.entities.reduce((n, e) => n + (e.documents || []).length, 0),
