@@ -2303,7 +2303,7 @@ function launchActive() {
 
 // Brand shown in-app (recovery-phrase file, document footer at launch, install
 // prompt). Falls back to today's neutral naming while the rebrand is dark.
-const APP_BRAND_NAME = launchActive() ? 'Simpl' : 'Invoicing';
+const APP_BRAND_NAME = 'Simpl';   // the product is Simpl on both homes now
 const APP_BRAND_URL = launchActive() ? 'https://simpl.money' : 'https://leebenjaminrael.github.io/simple-invoicing/';
 
 /* The <title> and the iOS home-screen label are static markup shared by both
@@ -2318,7 +2318,7 @@ try {
 
 /* Don't advertise "install" while we're still on the old origin — an install
    made there pins the app (and its data) to a domain we're about to leave. */
-const INSTALL_PROMPT_ENABLED = launchActive();
+const INSTALL_PROMPT_ENABLED = onNewOrigin();  // never offer an install pinned to the old home
 
 const TRIAL_DAYS = 7;
 const LICENCE_KEY_STORE = 'seed-licence-v1';      // the signed licence string
@@ -2503,7 +2503,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.23.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.24.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8917,7 +8917,55 @@ async function buildPdfDoc(d) {
   return { doc, filename };
 }
 
+/* An invoice is a legal document: it has to say who issued it, from where and
+   how to reach them. Rather than quietly producing one with blank details —
+   which is what gets a document bounced by a client's accounts department —
+   every export route checks this first. */
+const REQUIRED_COMPANY_FIELDS = [
+  ['name', 'Business name'],
+  ['address', 'Address'],
+  ['email', 'Email address'],
+];
+
+function missingCompanyDetails() {
+  const co = (state && state.settings && state.settings.company) || {};
+  return REQUIRED_COMPANY_FIELDS
+    .filter(([key]) => !String(co[key] || '').trim())
+    .map(([, label]) => label);
+}
+
+/* Returns true when it's safe to proceed; otherwise explains what's missing
+   and offers a way straight to the form that fixes it. */
+function requireCompanyDetails(action) {
+  const missing = missingCompanyDetails();
+  if (!missing.length) return true;
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:440px;">
+        <div class="modal-head"><div class="ttl">Add your business details first</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            You can't ${escapeHtml(action)} until this business has the details that have to appear on it. Still to fill in:
+            <ul style="margin:12px 0 0 18px;padding:0;">
+              ${missing.map((m) => `<li style="margin-bottom:6px;"><strong>${escapeHtml(m)}</strong></li>`).join('')}
+            </ul>
+            <div style="margin-top:14px;">You'll only need to do this once per business.</div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Not now</button>
+          <button class="btn btn-primary" id="fix-company">Go to Company settings</button>
+        </div>
+      </div>
+    </div>
+  `);
+  const fix = document.getElementById('fix-company');
+  if (fix) fix.addEventListener('click', () => { closeModal(); setRoute('settings'); });
+  return false;
+}
+
 async function generatePdf(d) {
+  if (!requireCompanyDetails('download this document')) return;
   const { doc, filename } = await buildPdfDoc(d);
   doc.save(filename);
   toast('PDF downloaded');
@@ -8926,6 +8974,7 @@ async function generatePdf(d) {
 // Share the PDF via the native share sheet (attaches the file on supported
 // devices, e.g. phones); falls back to download + open the email composer.
 async function shareDoc(d) {
+  if (!requireCompanyDetails('send this document')) return;
   let built;
   try { built = await buildPdfDoc(d); } catch (e) { toast('Could not build PDF'); return; }
   const file = new File([built.doc.output('blob')], built.filename, { type: 'application/pdf' });
@@ -8963,6 +9012,7 @@ function drawBlock(doc, M, PAGE_W, y, title, body) {
 }
 
 function composeEmail(d) {
+  if (!requireCompanyDetails('email this document')) return;
   const c = state.clients.find((x) => x.id === d.clientId) || {};
   const t = calcTotals(d);
   const num = docNumber(d);
