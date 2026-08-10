@@ -5,7 +5,7 @@
 <!-- Content-Security-Policy: the app is one inline bundle (needs 'unsafe-inline'),
      so the key protection here is connect-src — even if a script were injected, it
      can only reach these endpoints, not exfiltrate your decrypted vault elsewhere. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io; worker-src blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
 <meta name="referrer" content="no-referrer" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Invoicing</title>
@@ -2271,7 +2271,7 @@ const REBRAND_ENABLED = false;
      new origin → is Simpl, and accepts an incoming move
    That means one build, one deploy script, and no chance of the two drifting. */
 const MIGRATION = {
-  enabled: false,                                    // flip on switch-day
+  enabled: true,                                     // flipped on switch-day, 10 Aug 2026
   oldOrigin: 'https://leebenjaminrael.github.io',
   newOrigin: 'https://app.simpl.money',
   newAppUrl: 'https://app.simpl.money/',
@@ -2305,6 +2305,16 @@ function launchActive() {
 // prompt). Falls back to today's neutral naming while the rebrand is dark.
 const APP_BRAND_NAME = launchActive() ? 'Simpl' : 'Invoicing';
 const APP_BRAND_URL = launchActive() ? 'https://simpl.money' : 'https://leebenjaminrael.github.io/simple-invoicing/';
+
+/* The <title> and the iOS home-screen label are static markup shared by both
+   origins, so they can't be baked per-origin at build time. Set them here
+   instead: the new home reads as Simpl, the old one stays neutral while it
+   winds down, and there's still a sensible title if this script never runs. */
+try {
+  document.title = APP_BRAND_NAME;
+  const iosTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+  if (iosTitle) iosTitle.setAttribute('content', APP_BRAND_NAME);
+} catch (e) {}
 
 /* Don't advertise "install" while we're still on the old origin — an install
    made there pins the app (and its data) to a domain we're about to leave. */
@@ -2493,7 +2503,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.21.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.22.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================

@@ -3,7 +3,7 @@
  * gets the latest app), falling back to cache when offline. Cross-origin requests
  * (fonts, FX API) pass straight through to the network.
  */
-const CACHE = 'invoicing-cache-v1';
+const CACHE = 'invoicing-cache-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ const ASSETS = [
   './icon-192.png',
   './icon-512.png',
   './icon-180.png',
+  './icon-512-maskable.png',
 ];
 
 self.addEventListener('install', (event) => {
