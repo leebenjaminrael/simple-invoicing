@@ -1596,6 +1596,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 <div id="migrate-banner" class="update-banner migrate-banner" style="display:none;">
   <span id="migrate-banner-text">We've moved to a new address — bring your data across in one click.</span>
   <button class="ub-btn" id="migrate-go">Move my data</button>
+  <button class="ub-dismiss" id="migrate-guide" title="Do it step by step instead" style="width:auto;padding:0 10px;font-size:12px;">Step by step</button>
 </div>
 
 <div id="install-banner" class="update-banner install-banner" style="display:none;">
@@ -2503,7 +2504,7 @@ const SEED_DATA = {
 };
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.24.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.25.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -11223,6 +11224,79 @@ async function startMigration(btn) {
   }
 }
 
+/* Knowing who has actually landed on the new home is the only way to judge
+   when the old address can be retired. Fires once per device, only on the new
+   origin, and only once there's a vault here — so it means "this person has
+   moved", not "this person looked". Carries the same name/email they gave at
+   sign-up and nothing else; no financial data, same endpoint as sign-up. */
+const MIGRATED_PING_STORE = 'seed-migrated-ping-v1';
+
+async function reportMigrationArrival() {
+  if (!onNewOrigin()) return;
+  try {
+    if (localStorage.getItem(MIGRATED_PING_STORE) === '1') return;
+  } catch (e) { return; }
+  const o = getOnboarding() || {};
+  try {
+    const res = await fetch(ONBOARDING_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        _subject: 'Simpl — a user has moved to app.simpl.money',
+        type: 'migration-complete',
+        name: o.name || '',
+        email: o.email || '',
+        appVersion: APP_VERSION,
+        date: new Date().toISOString(),
+      }),
+    });
+    // Only mark it done if it actually landed, so a failed send retries later.
+    if (res.ok) { try { localStorage.setItem(MIGRATED_PING_STORE, '1'); } catch (e) {} }
+  } catch (e) { /* offline — it'll try again next time they unlock */ }
+}
+
+/* The one-click hand-over does all of this by itself, but it can't always run
+   (pop-up blocked, vault too big for a URL), and some people would simply
+   rather do it themselves. This is that path, spelled out — the sync screen is
+   buried in Settings, so every step says exactly where to look. */
+function openMigrationGuideModal() {
+  const step = (n, html) => `
+    <li style="margin-bottom:11px;padding-left:4px;">${html}</li>`;
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><div class="ttl">Move your data, step by step</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.65;">
+            This copies everything across a direct, encrypted link between the two
+            tabs. Nothing goes to a server, and <strong>this copy stays exactly as it is</strong>
+            until you're happy the new one is right.
+            <p style="margin:14px 0 6px;font-weight:500;color:var(--text);">You'll need both open at once</p>
+            <ol style="margin:10px 0 0 18px;padding:0;">
+              ${step(1, `Open <strong>app.simpl.money</strong> in a new tab — the button below does it.`)}
+              ${step(2, `On that new tab, enter your name and email, then <strong>create a password</strong>. It can be the same one you use here.`)}
+              ${step(3, `Still on the new tab, go to <strong>Settings → Device sync</strong> and press <strong>“Start sync — show code”</strong>. A code appears.`)}
+              ${step(4, `<strong>Leave that tab open.</strong> Don't close it — both tabs have to stay open for the whole thing.`)}
+              ${step(5, `Come back to <em>this</em> tab, go to <strong>Settings → Device sync</strong>, and press <strong>“Join sync — I have a code”</strong>. Enter the code from the new tab.`)}
+              ${step(6, `The two swap a second code to confirm it's really you — just follow whichever prompt each side shows.`)}
+              ${step(7, `Wait for it to finish, then switch to the new tab and check your invoices, clients and expenses are all there.`)}
+              ${step(8, `Once you're happy: update your bookmark to <strong>app.simpl.money</strong>, and if you'd added the old one to your dock or home screen, remove it and add the new one instead.`)}
+            </ol>
+            <div class="text-sm text-muted" style="margin-top:14px;line-height:1.55;">
+              Sync not available in this browser? Use <strong>Settings → Backup → Download backup</strong>
+              here, then <strong>Restore from backup</strong> on the new address — it asks for the password this vault uses today.
+            </div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Close</button>
+          <a class="btn btn-primary" href="${MIGRATION.newAppUrl}" target="_blank" rel="noopener" style="text-decoration:none;">Open app.simpl.money</a>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
 function openMigrationFallbackModal(reason) {
   const why = reason === 'too-big'
     ? 'Your data is too large to hand over in one click (usually a big logo).'
@@ -11237,20 +11311,20 @@ function openMigrationFallbackModal(reason) {
         <div class="modal-head"><div class="ttl">Let's move your data the manual way</div><span class="modal-close" data-close>×</span></div>
         <div class="modal-body">
           <div class="text-sm text-mid" style="line-height:1.7;">
-            ${escapeHtml(why)} Nothing has been lost — your data is still right here. Two ways to move it:
-            <p style="margin:12px 0 6px;"><strong>Option 1 — sync (no files)</strong></p>
-            Open the new address in another tab, then use <strong>Settings → Device sync</strong> on both and pair them.
-            <p style="margin:12px 0 6px;"><strong>Option 2 — backup file</strong></p>
-            Here: <strong>Settings → Backup → Download backup</strong>. Then on the new address, set a password, and use <strong>Restore from backup</strong> — it'll ask for the password this vault uses today.
+            ${escapeHtml(why)} <strong>Nothing has been lost</strong> — your data is still right here, exactly as it was.
+            You can still move it yourself in a few minutes, and the guide walks you through
+            every step, including where to find the sync screen.
           </div>
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Close</button>
-          <a class="btn btn-primary" href="${MIGRATION.newAppUrl}" target="_blank" rel="noopener" style="text-decoration:none;">Open the new address</a>
+          <button class="btn btn-primary" id="migrate-guide-from-fallback">Show me the steps</button>
         </div>
       </div>
     </div>
   `);
+  const g = document.getElementById('migrate-guide-from-fallback');
+  if (g) g.addEventListener('click', () => { closeModal(); openMigrationGuideModal(); });
 }
 
 /* ---------- NEW side: accept an incoming move ---------- */
@@ -11771,6 +11845,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
 });
 
 function enterApp() {
+  reportMigrationArrival();   // no-op unless this is the new home, first time
   // Don't leave the password sitting in the DOM while the app is open.
   document.getElementById('lock-pwd').value = '';
   document.getElementById('lock-pwd-2').value = '';
@@ -11997,6 +12072,8 @@ function initPwa() {
   // "We've moved" banner (only ever visible on the old origin, post-switch)
   const migrateGo = document.getElementById('migrate-go');
   if (migrateGo) migrateGo.addEventListener('click', (e) => startMigration(e.currentTarget));
+  const migrateGuide = document.getElementById('migrate-guide');
+  if (migrateGuide) migrateGuide.addEventListener('click', () => openMigrationGuideModal());
 
   // Install prompt banner (only ever visible once INSTALL_PROMPT_ENABLED)
   const installGo = document.getElementById('install-go');
