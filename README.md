@@ -1,3 +1,21 @@
+<!-- ===================================================================
+     BUILD ARTIFACT — DO NOT EDIT index.html IN THIS REPOSITORY.
+
+     index.html is generated. It is ~2.7MB of assembled output and any
+     change made here is silently destroyed by the next deploy.
+
+     The editable source is  ~/Seed/src/  on Lee's machine:
+         src/app.js, app.css, shell.html, vault.js, merge.js,
+         sync.js, licence.js
+             -> node build.js
+             -> node .claude/regenerate-shareable.js
+             -> bash deploy.sh   (copies here, commits, pushes)
+
+     Read ~/Seed/CLAUDE.md before changing anything. Editing this repo
+     directly diverges it from source and reverts real user-facing work
+     the next time anyone deploys properly.
+     =================================================================== -->
+
 # Invoicing
 
 A simple, private invoicing & finance app that runs entirely in your browser. Create invoices and quotes, track clients and expenses, reconcile bank statements, and see your finances at a glance. Your data is encrypted and stays on your own device — there is no server and nothing is uploaded.
