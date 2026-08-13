@@ -5,7 +5,7 @@
 <!-- Content-Security-Policy: the app is one inline bundle (needs 'unsafe-inline'),
      so the key protection here is connect-src — even if a script were injected, it
      can only reach these endpoints, not exfiltrate your decrypted vault elsewhere. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io https://simpl-licence.lee-4e1.workers.dev; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
 <meta name="referrer" content="no-referrer" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Invoicing</title>
@@ -1167,6 +1167,97 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .lines td.vat-cell { text-align: center; }
   .lines td.row-actions { text-align: right; }
   .lines td.amount-cell { text-align: right; padding-right: 14px; font-family: 'DM Mono', monospace; color: var(--text); white-space: nowrap; }
+
+  /* Line items — stacked cards on mobile.
+     The six-column table is unusable at phone width: the description gets ~90px
+     and the number inputs collapse. Under 600px each row becomes a card, the
+     header row is dropped, and every cell carries its own label via
+     data-label (set in renderDocEditor). */
+  @media (max-width: 600px) {
+    .lines { border: 0; background: transparent; overflow: visible; }
+    .lines table, .lines tbody, .lines tr, .lines td { display: block; width: auto; }
+    .lines table { table-layout: auto; }
+    .lines thead { display: none; }
+
+    /* Two columns, so Qty and Unit price sit side by side instead of each
+       taking a full row of an already tall card. */
+    .lines tr {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-bottom: 10px;
+    }
+    .lines td { padding: 0; border: 0; }
+
+    /* Label sits above its control — beside it wastes half a narrow column. */
+    .lines td[data-label]::before {
+      content: attr(data-label);
+      display: block;
+      font-size: 12px;
+      color: var(--text-mid);
+      margin-bottom: 4px;
+    }
+
+    /* Description and the wide percent field span the card. */
+    .lines td.desc-cell,
+    .lines td[data-label="Percent"] { grid-column: 1 / -1; }
+    .lines td.desc-cell { padding-right: 28px; }
+    .lines td.desc-cell textarea.line-desc { font-size: 15px; }
+
+    /* Inputs need a visible edge here — on desktop the table grid does that job,
+       but a borderless input floating in a card reads as static text. */
+    .lines td input:not([type="checkbox"]) {
+      width: 100%;
+      border-color: var(--border);
+      background: var(--surface-2);
+      border-radius: 8px;
+      font-size: 16px;              /* 16px stops iOS Safari zooming on focus */
+    }
+    .lines td input.num-input { text-align: left; }
+    .lines td[data-label="Percent"] input { width: 90px; }
+
+    /* A checkbox does not need a row of its own — label and box sit inline. */
+    .lines td.vat-cell {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+    }
+    .lines td.vat-cell::before { margin-bottom: 0; }
+    .lines td.vat-cell .checkbox { justify-content: flex-start; }
+
+    /* Amount is the row's answer — full width, label left, figure right. */
+    .lines td.amount-cell {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      text-align: left;
+      padding-right: 0;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .lines td.amount-cell::before { margin-bottom: 0; font-weight: 400; }
+
+    /* Delete moves to the card corner rather than a column of its own. */
+    .lines td.row-actions { position: absolute; top: 6px; right: 6px; padding: 0; }
+    .lines .row-del { font-size: 20px; padding: 6px 8px; }
+
+    /* Section headings are a divider, not a card. */
+    .lines tr[data-line-type="heading"] { background: var(--surface-2); padding-bottom: 10px; }
+    .lines tr[data-line-type="heading"] td.heading-tag { display: none; }
+
+    .lines-foot { padding: 0; border-top: 0; flex-wrap: wrap; }
+    .lines-foot .btn { flex: 1 1 auto; }
+  }
 
   /* Reconcile review tables */
   .doc-list table select { min-width: 0; max-width: 100%; }
@@ -2333,6 +2424,17 @@ function launchActive() {
 const APP_BRAND_NAME = 'Simpl';   // the product is Simpl on both homes now
 const APP_BRAND_URL = launchActive() ? 'https://simpl.money' : 'https://leebenjaminrael.github.io/simple-invoicing/';
 
+/* The licence Worker — signs licences after a Paddle payment, and relays
+   sign-ups to Loops so the trial email sequence starts on the right date.
+   Must also be listed in connect-src in shell.html or the CSP blocks it. */
+const LICENCE_API = 'https://simpl-licence.lee-4e1.workers.dev';
+
+/* Checkout deliberately lives on the marketing site, not in here: the app's
+   CSP allows no third-party scripts, so Paddle.js can't run in this origin —
+   and loosening that to sell something would undercut the whole promise. The
+   site opens the Paddle overlay; this just points at it. */
+const BUY_URL = 'https://simpl.money/#pricing';
+
 /* The <title> and the iOS home-screen label are static markup shared by both
    origins, so they can't be baked per-origin at build time. Set them here
    instead: the new home reads as Simpl, the old one stays neutral while it
@@ -2437,6 +2539,26 @@ if (typeof module !== 'undefined' && module.exports) {
 
 const DEFAULT_LOGO_SVG = `<svg width="323" height="122" viewBox="0 0 323 122" xmlns="http://www.w3.org/2000/svg"><path d="M124.267 96.326C119.779 96.326 115.835 95.85 112.435 94.898C109.103 93.946 106.281 92.552 103.969 90.716C101.725 88.812 100.059 86.5 98.9706 83.78C97.8826 81.06 97.4066 77.898 97.5426 74.294L106.009 72.458C105.737 75.994 106.315 78.952 107.743 81.332C109.171 83.712 111.347 85.514 114.271 86.738C117.195 87.894 120.629 88.472 124.573 88.472C128.381 88.472 131.611 87.996 134.263 87.044C136.915 86.092 138.887 84.766 140.179 83.066C141.539 81.366 142.219 79.428 142.219 77.252C142.219 74.804 141.437 72.866 139.873 71.438C138.309 70.01 136.201 68.922 133.549 68.174C130.965 67.358 128.075 66.61 124.879 65.93C121.751 65.25 118.623 64.468 115.495 63.584C112.367 62.7 109.545 61.578 107.029 60.218C104.581 58.79 102.575 56.954 101.011 54.71C99.5146 52.398 98.7666 49.474 98.7666 45.938C98.7666 41.926 99.7526 38.458 101.725 35.534C103.765 32.61 106.621 30.366 110.293 28.802C113.965 27.17 118.283 26.354 123.247 26.354C128.143 26.354 132.495 27.136 136.303 28.7C140.179 30.264 143.239 32.576 145.483 35.636C147.727 38.628 148.917 42.334 149.053 46.754L140.281 48.896C140.281 46.448 139.839 44.306 138.955 42.47C138.139 40.566 136.983 39.036 135.487 37.88C133.991 36.656 132.189 35.738 130.081 35.126C127.973 34.446 125.661 34.106 123.145 34.106C120.085 34.106 117.399 34.582 115.087 35.534C112.775 36.486 110.973 37.778 109.681 39.41C108.389 41.042 107.743 42.98 107.743 45.224C107.743 47.876 108.661 49.984 110.497 51.548C112.401 53.044 114.849 54.234 117.841 55.118C120.833 56.002 124.029 56.818 127.429 57.566C130.353 58.178 133.209 58.926 135.997 59.81C138.853 60.626 141.437 61.748 143.749 63.176C146.061 64.536 147.897 66.338 149.257 68.582C150.617 70.826 151.297 73.682 151.297 77.15C151.297 81.026 150.277 84.392 148.237 87.248C146.265 90.104 143.273 92.348 139.261 93.98C135.249 95.544 130.251 96.326 124.267 96.326ZM183.301 96.326C179.153 96.326 175.481 95.714 172.285 94.49C169.157 93.198 166.505 91.362 164.329 88.982C162.153 86.602 160.521 83.78 159.433 80.516C158.345 77.252 157.801 73.58 157.801 69.5C157.801 65.352 158.345 61.544 159.433 58.076C160.521 54.608 162.119 51.582 164.227 48.998C166.335 46.414 168.919 44.442 171.979 43.082C175.039 41.654 178.541 40.94 182.485 40.94C185.953 40.94 189.115 41.518 191.971 42.674C194.827 43.83 197.241 45.632 199.213 48.08C201.253 50.46 202.783 53.486 203.803 57.158C204.823 60.762 205.231 65.012 205.027 69.908L163.615 70.214V63.89L199.417 63.584L196.255 67.868C196.595 63.584 196.187 60.048 195.031 57.26C193.875 54.472 192.209 52.364 190.033 50.936C187.925 49.508 185.409 48.794 182.485 48.794C179.357 48.794 176.603 49.61 174.223 51.242C171.843 52.874 170.007 55.22 168.715 58.28C167.491 61.34 166.879 65.046 166.879 69.398C166.879 75.654 168.273 80.448 171.061 83.78C173.849 87.044 177.997 88.676 183.505 88.676C185.613 88.676 187.449 88.438 189.013 87.962C190.645 87.418 192.005 86.704 193.093 85.82C194.249 84.868 195.167 83.78 195.847 82.556C196.595 81.332 197.173 80.006 197.581 78.578L205.741 80.516C205.129 82.964 204.177 85.174 202.885 87.146C201.661 89.05 200.097 90.682 198.193 92.042C196.357 93.402 194.215 94.456 191.767 95.204C189.319 95.952 186.497 96.326 183.301 96.326ZM236.994 96.326C232.846 96.326 229.174 95.714 225.978 94.49C222.85 93.198 220.198 91.362 218.022 88.982C215.846 86.602 214.214 83.78 213.126 80.516C212.038 77.252 211.494 73.58 211.494 69.5C211.494 65.352 212.038 61.544 213.126 58.076C214.214 54.608 215.812 51.582 217.92 48.998C220.028 46.414 222.612 44.442 225.672 43.082C228.732 41.654 232.234 40.94 236.178 40.94C239.646 40.94 242.808 41.518 245.664 42.674C248.52 43.83 250.934 45.632 252.906 48.08C254.946 50.46 256.476 53.486 257.496 57.158C258.516 60.762 258.924 65.012 258.72 69.908L217.308 70.214V63.89L253.11 63.584L249.948 67.868C250.288 63.584 249.88 60.048 248.724 57.26C247.568 54.472 245.902 52.364 243.726 50.936C241.618 49.508 239.102 48.794 236.178 48.794C233.05 48.794 230.296 49.61 227.916 51.242C225.536 52.874 223.7 55.22 222.408 58.28C221.184 61.34 220.572 65.046 220.572 69.398C220.572 75.654 221.966 80.448 224.754 83.78C227.542 87.044 231.69 88.676 237.198 88.676C239.306 88.676 241.142 88.438 242.706 87.962C244.338 87.418 245.698 86.704 246.786 85.82C247.942 84.868 248.86 83.78 249.54 82.556C250.288 81.332 250.866 80.006 251.274 78.578L259.434 80.516C258.822 82.964 257.87 85.174 256.578 87.146C255.354 89.05 253.79 90.682 251.886 92.042C250.05 93.402 247.908 94.456 245.46 95.204C243.012 95.952 240.19 96.326 236.994 96.326ZM286.807 96.326C282.319 96.326 278.477 95.136 275.281 92.756C272.085 90.376 269.637 87.112 267.937 82.964C266.305 78.816 265.489 74.056 265.489 68.684C265.489 63.312 266.305 58.552 267.937 54.404C269.569 50.256 271.949 46.992 275.077 44.612C278.205 42.232 282.047 41.042 286.603 41.042C290.343 41.042 293.403 41.824 295.783 43.388C298.163 44.952 300.067 46.992 301.495 49.508C302.991 51.956 304.079 54.642 304.759 57.566H306.595C306.255 55.594 305.949 53.554 305.677 51.446C305.405 49.27 305.167 47.162 304.963 45.122C304.759 43.014 304.657 41.144 304.657 39.512V23.6H314.041V68.99V95H305.677L306.187 80.72H304.555C303.739 83.78 302.583 86.5 301.087 88.88C299.591 91.192 297.687 93.028 295.375 94.388C293.063 95.68 290.207 96.326 286.807 96.326ZM288.949 88.166C291.397 88.166 293.607 87.588 295.579 86.432C297.551 85.276 299.217 83.78 300.577 81.944C301.937 80.04 302.957 78 303.637 75.824C304.385 73.648 304.759 71.54 304.759 69.5V68.276C304.759 66.848 304.555 65.318 304.147 63.686C303.739 61.986 303.127 60.286 302.311 58.586C301.563 56.886 300.543 55.322 299.251 53.894C298.027 52.398 296.565 51.242 294.865 50.426C293.165 49.542 291.261 49.1 289.153 49.1C286.093 49.1 283.509 49.984 281.401 51.752C279.361 53.452 277.797 55.798 276.709 58.79C275.689 61.782 275.179 65.148 275.179 68.888C275.179 72.764 275.723 76.164 276.811 79.088C277.899 81.944 279.463 84.188 281.503 85.82C283.611 87.384 286.093 88.166 288.949 88.166Z" fill="black"/><circle cx="37.8606" cy="61" r="37.8606" fill="#00D2B0"/></svg>`;
 
+const STANDARD_TERMS_INVOICE = 'Payment due within 7 days of invoice date. Any items not quoted on will be charged in addition at our hourly rate.';
+const STANDARD_TERMS_QUOTE = 'Our terms are: 50% of total upfront, and 50% balance on completion of the project. Any items not quoted on will be charged in addition at our hourly rate of R1000. Any changes in original brief might incur an additional charge at R1000 per hour. This quote is valid until [expiry date].';
+
+const DEFAULT_EXPENSE_CATEGORIES = ['Software', 'Hosting', 'Hardware', 'Travel', 'Office', 'Subcontractor', 'Bank fees', 'FX fees', 'Marketing', 'Professional fees', 'Drawings / Salary', 'Other'];
+
+/* Personal defaults and first-run seed data. Kept out of this file so real
+   business details never enter version control — see src/personal.js, or
+   src/personal.example.js for the neutral template build.js falls back to. */
+/* ============================================================
+   PERSONAL DEFAULTS — NOT IN VERSION CONTROL
+   ============================================================
+   First-run seed data and fallbacks for Lee's own build. Your real
+   data lives in the encrypted vault, so these only ever apply to a
+   fresh start on a machine with no vault yet.
+
+   This file is gitignored. build.js falls back to
+   personal.example.js when it is absent, so a clean checkout still
+   builds — it just seeds with neutral placeholders.
+   ============================================================ */
+
 const COMPANY_DEFAULT = {
   name: '',
   attention: '',
@@ -2480,12 +2602,7 @@ const BANKING_DEFAULT = [
   },
 ];
 
-const STANDARD_TERMS_INVOICE = 'Payment due within 7 days of invoice date. Any items not quoted on will be charged in addition at our hourly rate.';
-const STANDARD_TERMS_QUOTE = 'Our terms are: 50% of total upfront, and 50% balance on completion of the project. Any items not quoted on will be charged in addition at our hourly rate of R1000. Any changes in original brief might incur an additional charge at R1000 per hour. This quote is valid until [expiry date].';
-
 const ACF_CLIENT = null; // (removed in shareable build)
-
-const DEFAULT_EXPENSE_CATEGORIES = ['Software', 'Hosting', 'Hardware', 'Travel', 'Office', 'Subcontractor', 'Bank fees', 'FX fees', 'Marketing', 'Professional fees', 'Drawings / Salary', 'Other'];
 
 const SEED_DATA = {
   version: 6,
@@ -2529,8 +2646,11 @@ const SEED_DATA = {
   },
 };
 
+const FNB_ACCOUNT_REF = ''; // optionally set per-user later
+
+
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.25.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.27.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2932,14 +3052,62 @@ function brandingOnDocuments() {
    record and must always be reachable. */
 function ensureCanCreate() {
   if (licenceState.canCreate) return true;
-  const trial = licenceState.state === 'trial-expired';
-  alert(
-    (trial ? `Your ${TRIAL_DAYS}-day free trial has ended.` : 'Your licence has expired.') +
-    `\n\nYou can still open, view, print and back up everything you've already created — your data is always yours.` +
-    `\n\nTo create new documents, add a licence under Settings → Licence.`
-  );
-  setRoute('settings');
+  openPaywallModal(licenceState.state === 'trial-expired' ? 'trial' : 'licence');
   return false;
+}
+
+/* Shown when someone tries to create something after the trial or licence has
+   run out. Two things it must do: give a real way to pay (there wasn't one
+   before — the old alert just said "add a licence" and left you stranded),
+   and be unambiguous that nothing has been taken away. */
+function openPaywallModal(reason) {
+  const trial = reason === 'trial';
+  const keeps = [
+    'Open, read and search everything',
+    'Print and re-send any document',
+    'Export CSV for your accountant',
+    'Download a full encrypted backup',
+  ];
+  const paused = [
+    'Creating new invoices and quotes',
+    'New expenses, projects and time',
+    'Recurring invoice drafts',
+  ];
+  const col = (title, items, tone) => `
+    <div style="flex:1 1 0;min-width:0;">
+      <div class="text-sm text-muted" style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;">${title}</div>
+      ${items.map((i) => `<div class="text-sm" style="line-height:1.5;margin-bottom:7px;color:${tone};">${escapeHtml(i)}</div>`).join('')}
+    </div>`;
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:560px;">
+        <div class="modal-head">
+          <div class="ttl">${trial ? 'Your free trial has ended' : 'Your licence has expired'}</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            Everything you have made is still here, and still yours. Nothing has been
+            locked, hidden or deleted — and it never will be.
+          </div>
+          <div style="display:flex;gap:24px;margin-top:20px;padding-top:18px;border-top:1px solid var(--border);">
+            ${col('Still available, forever', keeps, 'var(--text)')}
+            ${col('Paused until you renew', paused, 'var(--text-mid)')}
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Carry on in read-only</button>
+          <a class="btn btn-primary" href="${BUY_URL}" target="_blank" rel="noopener" style="text-decoration:none;">
+            ${trial ? 'Buy a licence' : 'Renew'} — $100/year
+          </a>
+        </div>
+      </div>
+    </div>
+  `);
+  const link = document.querySelector('#modal-overlay a.btn-primary');
+  // Already bought on another device? Coming back to Settings is where the
+  // licence field is, so leave them there rather than on whatever they clicked.
+  if (link) link.addEventListener('click', () => { closeModal(); setRoute('settings'); });
 }
 
 let quotaWarned = false; // one nudge per session is enough
@@ -3870,7 +4038,7 @@ function render() {
 
 // Make custom clickable elements keyboard-accessible + labelled, without
 // editing every template: add tabindex/role and aria-labels after each render.
-const A11Y_CLICKABLE = '.tab, .opt, .row-clickable, [data-route-link], [data-deposit], [data-basis], [data-vat-basis], [data-conv], [data-saved-line], [data-exp-cat]';
+const A11Y_CLICKABLE = '.tab, .opt, .row-clickable, [data-route-link], [data-deposit], [data-basis], [data-vat-basis], [data-conv], [data-saved-line], [data-exp-cat], [data-line-del]';
 function enhanceA11y(scope) {
   scope = scope || document;
   scope.querySelectorAll(A11Y_CLICKABLE).forEach((el) => {
@@ -5499,8 +5667,6 @@ let reconcileSession = null;
 //   kind: 'credit' | 'debit'
 //   action: 'invoice-paid' | 'expense' | 'internal-transfer' | 'skip' | 'fx-fee'
 //   status: 'auto' | 'suggested' | 'manual' | 'skip' | 'imported'
-
-const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 function renderReconcile() {
   const archive = (state.statements || []).slice().sort((a, b) => (b.importedAt || '').localeCompare(a.importedAt || ''));
@@ -7787,15 +7953,17 @@ function renderDocEditor() {
   const t = calcTotals(d);
   const isZAR = docHasVat(d);
   const linesHtml = d.lines.map((l, i) => {
-    const descCell = `<td><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Description">${escapeHtml(l.desc || '')}</textarea></td>`;
-    const vatCell = isZAR ? `<td class="vat-cell"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
-    const amtCell = `<td class="amount-cell">${fmtMoney(calcLine(l, d), d.currency)}</td>`;
+    // data-label drives the stacked card layout under 600px (see .lines in app.css):
+    // each cell renders its own label there, since the table header is hidden.
+    const descCell = `<td class="desc-cell"><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Description">${escapeHtml(l.desc || '')}</textarea></td>`;
+    const vatCell = isZAR ? `<td class="vat-cell" data-label="VAT"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
+    const amtCell = `<td class="amount-cell" data-label="Amount">${fmtMoney(calcLine(l, d), d.currency)}</td>`;
     const delCell = `<td class="row-actions"><span class="row-del" data-line-del="${i}">×</span></td>`;
     if (l.type === 'heading') {
       return `
     <tr data-line-idx="${i}" data-line-type="heading">
-      <td colspan="${isZAR ? 4 : 3}"><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Section heading" style="font-weight:600;">${escapeHtml(l.desc || '')}</textarea></td>
-      <td class="amount-cell text-muted" style="font-size:11px;">heading</td>
+      <td class="desc-cell" colspan="${isZAR ? 4 : 3}"><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Section heading" style="font-weight:600;">${escapeHtml(l.desc || '')}</textarea></td>
+      <td class="amount-cell heading-tag text-muted" style="font-size:11px;">heading</td>
       ${delCell}
     </tr>`;
     }
@@ -7803,15 +7971,15 @@ function renderDocEditor() {
       return `
     <tr data-line-idx="${i}" data-line-type="percent">
       ${descCell}
-      <td colspan="2"><div style="display:flex;align-items:center;gap:6px;"><input data-lf="percent" class="num-input" type="number" step="any" value="${Number(l.percent) || 0}" style="width:72px;" /><span class="text-sm text-muted">% of subtotal</span></div></td>
+      <td colspan="2" data-label="Percent"><div style="display:flex;align-items:center;gap:6px;"><input data-lf="percent" class="num-input" type="number" step="any" value="${Number(l.percent) || 0}" style="width:72px;" /><span class="text-sm text-muted">% of subtotal</span></div></td>
       ${vatCell}${amtCell}${delCell}
     </tr>`;
     }
     return `
     <tr data-line-idx="${i}">
       ${descCell}
-      <td><input data-lf="qty" class="num-input" type="number" step="any" value="${Number(l.qty) || 0}" /></td>
-      <td><input data-lf="price" class="num-input" type="number" step="any" value="${Number(l.price) || 0}" /></td>
+      <td data-label="Qty"><input data-lf="qty" class="num-input" type="number" step="any" inputmode="decimal" value="${Number(l.qty) || 0}" /></td>
+      <td data-label="Unit price"><input data-lf="price" class="num-input" type="number" step="any" inputmode="decimal" value="${Number(l.price) || 0}" /></td>
       ${vatCell}${amtCell}${delCell}
     </tr>`;
   }).join('');
@@ -8088,7 +8256,9 @@ function bindEditorEvents() {
     host.querySelectorAll('[data-line-idx]').forEach((r) => {
       const i = +r.dataset.lineIdx;
       const cell = r.querySelector('.amount-cell');
-      if (cell) cell.textContent = fmtMoney(calcLine(editingDoc.lines[i], editingDoc), editingDoc.currency);
+      // Headings carry no amount — their cell is a type tag, not a figure.
+      if (!cell || cell.classList.contains('heading-tag')) return;
+      cell.textContent = fmtMoney(calcLine(editingDoc.lines[i], editingDoc), editingDoc.currency);
     });
   };
   host.querySelectorAll('[data-line-idx]').forEach((row) => {
@@ -8208,6 +8378,18 @@ function autoGrow(ta) {
   ta.style.height = 'auto';
   ta.style.height = Math.max(34, ta.scrollHeight) + 'px';
 }
+
+// autoGrow bakes in a pixel height, which is wrong as soon as the column width
+// changes — rotating a phone, or crossing the 600px breakpoint where the line
+// table becomes stacked cards. Re-measure every visible description field.
+let regrowTimer = null;
+function regrowLineDescs() {
+  document.querySelectorAll('textarea.line-desc').forEach(autoGrow);
+}
+window.addEventListener('resize', () => {
+  clearTimeout(regrowTimer);
+  regrowTimer = setTimeout(regrowLineDescs, 120);
+});
 
 // Debounced auto-save of the open document.
 let autoSaveTimer = null;
@@ -9279,7 +9461,9 @@ function renderSettings() {
         <textarea id="lic-input" rows="3" style="width:100%;resize:vertical;font-family:'DM Mono',monospace;font-size:11px;word-break:break-all;" placeholder="LIC1.…">${escapeHtml(((() => { try { return localStorage.getItem(LICENCE_KEY_STORE) || ''; } catch (e) { return ''; } })()))}</textarea>
         <div class="row-flex" style="margin-top:8px;">
           <button class="btn btn-primary btn-sm" id="lic-apply">Apply licence</button>
-          ${licenceState.state === 'licensed' ? `<button class="btn btn-sm btn-ghost" id="lic-remove">Remove</button>` : ''}
+          ${licenceState.state === 'licensed'
+            ? `<button class="btn btn-sm btn-ghost" id="lic-remove">Remove</button>`
+            : `<a class="btn btn-sm" href="${BUY_URL}" target="_blank" rel="noopener" style="text-decoration:none;">Buy a licence — $100/year</a>`}
         </div>
         <div class="err" id="lic-err"></div>
       </div>
@@ -12545,6 +12729,18 @@ function openFeedbackModal() {
 
 async function sendOnboarding(payload) {
   if (!ONBOARDING_ENDPOINT) return false; // not configured yet → keep as pending
+  // Tell the licence Worker too, so the trial email sequence starts counting
+  // from today rather than from whenever the contact happens to reach Loops.
+  // Loops refuses cross-origin calls from the browser, so it has to go through
+  // the Worker — and it must never delay or fail the user's sign-up, hence
+  // fire-and-forget with its own catch.
+  try {
+    fetch(`${LICENCE_API}/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: payload.name || '', email: payload.email || '' }),
+    }).catch(() => {});
+  } catch (e) {}
   try {
     const res = await fetch(ONBOARDING_ENDPOINT, {
       method: 'POST',
