@@ -2650,7 +2650,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.28.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.29.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -2993,6 +2993,35 @@ async function refreshLicenceState() {
   return licenceState;
 }
 
+/* Tells the licence service that a licence actually reached a device. Without
+   this, "issued" and "working" are indistinguishable — someone can pay, never
+   manage to activate, and nobody finds out until they complain.
+
+   It reports the email already embedded in the licence and nothing else. No
+   invoice, client or financial data is involved, and none of it could be:
+   this runs from the licence payload, not from the vault. Fire-and-forget,
+   because a reporting failure must never stop someone using what they bought.
+   Once per licence per device — the flag is keyed on the licence itself, so
+   renewing or moving device reports again, but opening the app daily doesn't. */
+const LICENCE_PING_STORE = 'seed-licence-reported-v1';
+
+function reportLicenceActivated(payload, how) {
+  if (!payload || !payload.e) return;
+  const stamp = String(payload.e) + ':' + String(payload.exp);
+  try {
+    if (localStorage.getItem(LICENCE_PING_STORE) === stamp) return;
+  } catch (e) { return; }
+  try {
+    fetch(`${LICENCE_API}/activated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: payload.e, plan: payload.p || 'pro', expiresAt: payload.exp, via: how }),
+    }).then((r) => {
+      if (r && r.ok) { try { localStorage.setItem(LICENCE_PING_STORE, stamp); } catch (e) {} }
+    }).catch(() => {});
+  } catch (e) {}
+}
+
 /* One-click licence links: app.simpl.money/#licence=LIC1.…
    Sent to a customer after purchase so they never have to paste anything.
    Deliberately in the URL *fragment*, not the query string — fragments are
@@ -3020,6 +3049,7 @@ async function applyLicenceFromUrl() {
 
   try { localStorage.setItem(LICENCE_KEY_STORE, raw); } catch (e) {}
   await refreshLicenceState();
+  reportLicenceActivated(payload, 'link');
   const until = new Date(payload.exp).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
@@ -9752,6 +9782,7 @@ function bindSettingsEvents() {
       if (Date.now() > payload.exp) { err.textContent = 'That licence has expired — please renew.'; return; }
       try { localStorage.setItem(LICENCE_KEY_STORE, val); } catch (e2) {}
       await refreshLicenceState();
+      reportLicenceActivated(payload, 'paste');
       render();
       toast('Licence applied — thank you!');
     });
