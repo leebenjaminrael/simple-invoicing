@@ -1259,6 +1259,73 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     .lines-foot .btn { flex: 1 1 auto; }
   }
 
+  /* List tables become cards on mobile.
+     These tables run to nine columns; at 375px that is ~40px each, which
+     truncates every value into uselessness. Under 600px each row becomes a
+     card: the thing you scan for on the first line with its figure beside it,
+     and every remaining field on its own labelled line rather than crammed
+     into a run-on string. Projects has seven fields and is why the secondary
+     rows each get their own line instead of flowing together. */
+  @media (max-width: 600px) {
+    .doc-list { border: 0; background: transparent; overflow: visible; }
+    .doc-list table, .doc-list tbody, .doc-list tr, .doc-list td { display: block; width: auto; }
+    .doc-list table { table-layout: auto; min-width: 0; }
+    .doc-list thead { display: none; }
+
+    .doc-list tr {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    .doc-list td { padding: 0; border: 0; vertical-align: baseline; }
+
+    /* Line one: what you are looking for, and the number that matters. */
+    /* Both are pinned to row 1. Without this the figure is auto-placed after
+       the full-width label rows and drifts to the bottom of the card, on its
+       own, with nothing saying what it is. */
+    .doc-list td.pri {
+      grid-column: 1; grid-row: 1;
+      font-size: 15px; color: var(--text); line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .doc-list td.pri strong { font-weight: 500; }
+    .doc-list td.fig {
+      grid-column: 2; grid-row: 1;
+      text-align: right; white-space: nowrap; align-self: baseline;
+      font-size: 15px; font-weight: 600; font-family: 'DM Mono', monospace;
+    }
+
+    /* Everything else: its own line, label left, value right. */
+    .doc-list td[data-label] {
+      grid-column: 1 / -1;
+      display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+      font-size: 12.5px; padding-top: 5px; text-align: right;
+    }
+    .doc-list td[data-label]::before {
+      content: attr(data-label);
+      color: var(--text-mid); flex: 0 0 auto; text-align: left;
+    }
+    .doc-list td[data-label]:first-of-type { padding-top: 8px; }
+
+    /* Row actions sit along the bottom rather than in a column of their own. */
+    .doc-list td.actions {
+      grid-column: 1 / -1; text-align: left;
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+      display: flex; flex-wrap: wrap; gap: 8px;
+    }
+    .doc-list td.actions .btn { flex: 0 1 auto; }
+
+    /* Empty-state rows are prose, not records. */
+    .doc-list td.empty { grid-column: 1 / -1; text-align: center; }
+    .doc-list tr:has(td.empty) { display: block; }
+  }
+
   /* Reconcile review tables */
   .doc-list table select { min-width: 0; max-width: 100%; }
   .doc-list table { table-layout: auto; }
@@ -2829,7 +2896,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.31.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.32.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4517,7 +4584,7 @@ function renderDocTableInline(docs) {
         <td>${escapeHtml(clientName(d.clientId))}</td>
         <td>${escapeHtml(d.projectTitle || '—')}</td>
         <td>${fmtDate(d.date)}</td>
-        <td class="amount">${d.type === 'credit' ? '−' + fmtMoney(t.total, d.currency) : fmtMoney(t.due, d.currency)}${t.depositPct > 0 && d.type !== 'credit' ? ` <span class="text-muted text-sm">(${portionLabelOf(d)} ${t.depositPct}%)</span>` : ''}</td>
+        <td class="amount fig">${d.type === 'credit' ? '−' + fmtMoney(t.total, d.currency) : fmtMoney(t.due, d.currency)}${t.depositPct > 0 && d.type !== 'credit' ? ` <span class="text-muted text-sm">(${portionLabelOf(d)} ${t.depositPct}%)</span>` : ''}</td>
         <td>${statusBadge(d)}</td>
       </tr>
     `;
@@ -5434,14 +5501,14 @@ function renderTimer() {
     const billed = !!e.invoiceId;
     return `
       <tr>
-        <td>${fmtDate((e.start || '').slice(0, 10))}</td>
-        <td>${escapeHtml(clientName(e.clientId))}</td>
-        <td>${escapeHtml(e.projectId ? projectLabel(e.projectId) : '—')}${e.taskId ? `<div class="text-sm text-muted">${escapeHtml(taskLabel(e.taskId))}</div>` : ''}</td>
-        <td>${escapeHtml(e.description || '')}</td>
-        <td class="amount">${fmtHours(e.durationSec)}</td>
-        <td class="amount">${fmtMoney(Number(e.rate) || 0, ccy)}</td>
-        <td class="amount">${fmtMoney(val, ccy)}</td>
-        <td>${billed ? `<span style="color:#2f7d32;font-weight:600;">Billed</span>` : `<span class="text-muted">Unbilled</span>`}</td>
+        <td data-label="Date">${fmtDate((e.start || '').slice(0, 10))}</td>
+        <td data-label="Client">${escapeHtml(clientName(e.clientId))}</td>
+        <td data-label="Project">${escapeHtml(e.projectId ? projectLabel(e.projectId) : '—')}${e.taskId ? `<div class="text-sm text-muted">${escapeHtml(taskLabel(e.taskId))}</div>` : ''}</td>
+        <td class="pri">${escapeHtml(e.description || '')}</td>
+        <td class="amount fig">${fmtHours(e.durationSec)}</td>
+        <td class="amount" data-label="Rate">${fmtMoney(Number(e.rate) || 0, ccy)}</td>
+        <td class="amount" data-label="Value">${fmtMoney(val, ccy)}</td>
+        <td data-label="Status">${billed ? `<span style="color:#2f7d32;font-weight:600;">Billed</span>` : `<span class="text-muted">Unbilled</span>`}</td>
         <td class="actions">
           <button class="btn btn-sm btn-ghost" data-te-resume="${e.id}" title="Resume — start a new timer for this project/task">${ICONS.play} Resume</button>
           ${billed ? '' : `<button class="btn btn-sm btn-ghost" data-te-edit="${e.id}">Edit</button>`}
@@ -5659,11 +5726,11 @@ function renderExpensesView() {
     const iv = inputVatOf(e);
     return `
     <tr class="row-clickable" data-exp-id="${e.id}">
-      <td>${fmtDate(e.date)}</td>
-      <td>${escapeHtml(e.desc)}</td>
-      <td>${escapeHtml(e.category || '—')}</td>
-      <td class="amount">${fmtMoney(e.amount, e.currency)}</td>
-      <td class="amount">${iv > 0 ? fmtMoney(iv, e.currency) : '<span class="text-muted">—</span>'}</td>
+      <td data-label="Date">${fmtDate(e.date)}</td>
+      <td class="pri">${escapeHtml(e.desc)}</td>
+      <td data-label="Category">${escapeHtml(e.category || '—')}</td>
+      <td class="amount fig">${fmtMoney(e.amount, e.currency)}</td>
+      <td class="amount" data-label="Input VAT">${iv > 0 ? fmtMoney(iv, e.currency) : '<span class="text-muted">—</span>'}</td>
       <td class="actions">
         <button class="btn btn-sm" data-exp-action="edit" data-id="${e.id}">Edit</button>
         <button class="btn btn-sm btn-ghost danger" data-exp-action="delete" data-id="${e.id}">Delete</button>
@@ -7402,13 +7469,13 @@ function renderProjects() {
     const dates = (p.startDate || p.endDate) ? `${p.startDate ? fmtDate(p.startDate) : '…'} → ${p.endDate ? fmtDate(p.endDate) : '…'}` : '—';
     return `
       <tr class="row-clickable" data-pj-open="${p.id}">
-        <td><strong>${escapeHtml(p.name)}</strong></td>
-        <td>${escapeHtml(p.clientId ? clientName(p.clientId) : '—')}</td>
-        <td class="text-sm">${dates}</td>
-        <td><span class="badge badge-${p.status === 'wrapped' ? 'paid' : p.status === 'quoting' ? 'quote' : 'sent'}">${p.status}</span></td>
-        <td class="amount">${b.billTotal ? fmtMoney(b.billTotal, baseCcy()) : '—'}</td>
-        <td class="amount">${b.billTotal ? fmtMoney(b.margin, baseCcy()) + ' <span class="text-muted text-sm">' + Math.round(b.marginPct * 100) + '%</span>' : '—'}</td>
-        <td class="amount">${a.invoiced ? fmtMoney(a.invoiced, baseCcy()) : '—'}</td>
+        <td class="pri"><strong>${escapeHtml(p.name)}</strong></td>
+        <td data-label="Client">${escapeHtml(p.clientId ? clientName(p.clientId) : '—')}</td>
+        <td class="text-sm" data-label="Dates">${dates}</td>
+        <td data-label="Status"><span class="badge badge-${p.status === 'wrapped' ? 'paid' : p.status === 'quoting' ? 'quote' : 'sent'}">${p.status}</span></td>
+        <td class="amount fig">${b.billTotal ? fmtMoney(b.billTotal, baseCcy()) : '—'}</td>
+        <td class="amount" data-label="Planned margin">${b.billTotal ? fmtMoney(b.margin, baseCcy()) + ' <span class="text-muted text-sm">' + Math.round(b.marginPct * 100) + '%</span>' : '—'}</td>
+        <td class="amount" data-label="Invoiced">${a.invoiced ? fmtMoney(a.invoiced, baseCcy()) : '—'}</td>
       </tr>`;
   }).join('');
   return `
@@ -7947,12 +8014,12 @@ function renderDocTable(docs, opts = {}) {
     }
     return `
       <tr class="row-clickable" data-row-id="${d.id}">
-        <td class="num">${num}${d.repeatMonthly ? ' <span title="Repeats monthly" style="opacity:0.6;">↻</span>' : ''}</td>
-        <td>${escapeHtml(clientName(d.clientId))}</td>
-        <td>${escapeHtml(d.projectTitle || '—')}</td>
-        <td>${fmtDate(d.date)}</td>
+        <td class="num" data-label="Number">${num}${d.repeatMonthly ? ' <span title="Repeats monthly" style="opacity:0.6;">↻</span>' : ''}</td>
+        <td class="pri">${escapeHtml(clientName(d.clientId))}</td>
+        <td data-label="Project">${escapeHtml(d.projectTitle || '—')}</td>
+        <td data-label="Date">${fmtDate(d.date)}</td>
         <td class="amount">${d.type === 'credit' ? '−' + fmtMoney(t.total, d.currency) : fmtMoney(t.due, d.currency)}${t.depositPct > 0 && d.type !== 'credit' ? ` <span class="text-muted text-sm" title="${t.depositPct}% of ${fmtMoney(t.total, d.currency)}">(${portionLabelOf(d)} ${t.depositPct}%)</span>` : ''}</td>
-        <td>${statusBadge(d)}</td>
+        <td data-label="Status">${statusBadge(d)}</td>
         <td class="actions">${actions.join('')}</td>
       </tr>
     `;
@@ -7992,10 +8059,10 @@ function renderClients() {
     const outStr = Object.entries(outstanding).map(([c, v]) => fmtMoney(v, c)).join(' · ') || '<span class="text-muted">—</span>';
     return `
       <tr class="row-clickable" data-client-id="${c.id}">
-        <td><strong>${escapeHtml(c.name)}</strong>${c.contact ? `<div class="text-sm text-mid">${escapeHtml(c.contact)}</div>` : ''}</td>
-        <td class="text-sm">${escapeHtml(c.email || '')}</td>
-        <td class="text-sm">${escapeHtml(c.vat || '')}</td>
-        <td class="amount">${outStr}</td>
+        <td class="pri"><strong>${escapeHtml(c.name)}</strong>${c.contact ? `<div class="text-sm text-mid">${escapeHtml(c.contact)}</div>` : ''}</td>
+        <td class="text-sm" data-label="Email">${escapeHtml(c.email || '')}</td>
+        <td class="text-sm" data-label="VAT">${escapeHtml(c.vat || '')}</td>
+        <td class="amount fig">${outStr}</td>
         <td class="actions">
           <button class="btn btn-sm" data-client-action="edit" data-id="${c.id}">Edit</button>
           <button class="btn btn-sm btn-ghost danger" data-client-action="delete" data-id="${c.id}">Delete</button>
