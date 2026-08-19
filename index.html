@@ -2544,6 +2544,173 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { verifyLicence, licenceStatusFrom, TRIAL_DAYS };
 }
 </script>
+<script>/* ============================================================
+   ENCRYPTED SERVER BACKUP — transport
+
+   What leaves the device is the SAME blob src/vault.js already writes to
+   IndexedDB: AES-256-GCM ciphertext with the data key wrapped under both the
+   master password and the recovery phrase. The server has no wrapper it can
+   open, so "we cannot read your backup" is a property of the format, not a
+   promise about our conduct.
+
+   WHY THIS EXISTS AT ALL. WebKit deletes every byte of script-writable
+   storage, IndexedDB included, after 7 days without the site being opened.
+   "Clear cookies and site data" does the same in every browser, instantly and
+   with no undo. An invoicing app opened once a month is exactly the profile
+   that loses everything, and tax records must be kept for five years.
+
+   WHY IDENTITY IS AN EMAIL ADDRESS. The failure this defends against destroys
+   local storage, so any credential kept on the device would be destroyed with
+   it — precisely when it is needed. The address is the one thing the user
+   still has. A device token makes the common path silent; a code emailed to
+   that address re-issues one on a machine that has nothing.
+
+   The token is a bearer for an encrypted file, never key material, so it lives
+   in localStorage. Stealing it buys ciphertext the thief still cannot open.
+   Never put the password, the DEK or the recovery phrase here.
+   ============================================================ */
+
+const CLOUD_TOKEN_STORE = 'seed-cloud-token-v1';
+const CLOUD_EMAIL_STORE = 'seed-cloud-email-v1';
+const CLOUD_VERSION_STORE = 'seed-cloud-version-v1';   // last version this device wrote or read
+const CLOUD_LAST_STORE = 'seed-cloud-last-v1';         // ISO time of the last successful upload
+
+function cloudGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function cloudSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, String(v)); } catch (e) {} }
+
+function cloudToken() { return cloudGet(CLOUD_TOKEN_STORE); }
+function cloudEmail() { return cloudGet(CLOUD_EMAIL_STORE); }
+function cloudEnrolled() { return !!cloudToken(); }
+function cloudKnownVersion() { return Number(cloudGet(CLOUD_VERSION_STORE) || 0); }
+function cloudLastBackupAt() { return cloudGet(CLOUD_LAST_STORE); }
+
+function cloudForget() {
+  cloudSet(CLOUD_TOKEN_STORE, null);
+  cloudSet(CLOUD_VERSION_STORE, null);
+  cloudSet(CLOUD_LAST_STORE, null);
+}
+
+async function cloudFetch(path, opts) {
+  const o = opts || {};
+  const headers = Object.assign({}, o.headers || {});
+  const token = cloudToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(LICENCE_API + path, {
+    method: o.method || 'GET',
+    headers,
+    body: o.body,
+  });
+  return res;
+}
+
+/* Ask for a six-digit code. Answers the same whether or not the address is
+   known, so this cannot be used to find out who is a customer. */
+async function cloudRequestCode(email) {
+  const res = await fetch(LICENCE_API + '/backup/code', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: String(email || '').trim().toLowerCase() }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error((body && body.error) || 'code_request_failed');
+    err.retryAfter = body && body.retryAfter;
+    throw err;
+  }
+  return true;
+}
+
+/* Swap a code for a device token. */
+async function cloudVerifyCode(email, code) {
+  const clean = String(email || '').trim().toLowerCase();
+  const res = await fetch(LICENCE_API + '/backup/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: clean, code: String(code || '').replace(/\D/g, ''), deviceId: getDeviceId() }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'verify_failed');
+  cloudSet(CLOUD_TOKEN_STORE, body.token);
+  cloudSet(CLOUD_EMAIL_STORE, clean);
+  return body;
+}
+
+/* Upload. `expectVersion` is what this device believes the server holds; the
+   server refuses a mismatch rather than applying it, so an old device coming
+   back to life cannot quietly replace newer work. A conflict is returned, not
+   thrown, because the caller has to ask the user what to do about it. */
+async function cloudUpload(blobText, counts) {
+  if (!cloudEnrolled()) throw new Error('not_enrolled');
+  const bytes = new TextEncoder().encode(blobText);
+  const res = await cloudFetch('/backup', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Simpl-Expect-Version': String(cloudKnownVersion()),
+      'X-Simpl-Device': getDeviceId(),
+      'X-Simpl-Counts': JSON.stringify(counts || {}),
+    },
+    body: bytes,
+  });
+
+  if (res.status === 409) {
+    const body = await res.json().catch(() => ({}));
+    return { conflict: true, server: (body && body.current) || null };
+  }
+  if (res.status === 401) { cloudForget(); throw new Error('unauthorised'); }
+  if (res.status === 413) throw new Error('too_large');
+  if (!res.ok) throw new Error('upload_failed');
+
+  const body = await res.json();
+  cloudSet(CLOUD_VERSION_STORE, body.version);
+  cloudSet(CLOUD_LAST_STORE, new Date().toISOString());
+  return { conflict: false, version: body.version, size: body.size };
+}
+
+/* Fetch the newest backup. Returns the raw blob text plus the metadata the
+   restore screen needs to tell the user what they are about to replace. */
+async function cloudLatest() {
+  if (!cloudEnrolled()) throw new Error('not_enrolled');
+  const res = await cloudFetch('/backup/latest');
+  if (res.status === 404) return null;
+  if (res.status === 401) { cloudForget(); throw new Error('unauthorised'); }
+  if (!res.ok) throw new Error('download_failed');
+  const text = await res.text();
+  let counts = null;
+  try { counts = JSON.parse(res.headers.get('X-Simpl-Counts') || 'null'); } catch (e) {}
+  return {
+    text,
+    version: Number(res.headers.get('X-Simpl-Version') || 0),
+    createdAt: Number(res.headers.get('X-Simpl-Created') || 0),
+    counts,
+  };
+}
+
+async function cloudList() {
+  if (!cloudEnrolled()) throw new Error('not_enrolled');
+  const res = await cloudFetch('/backup/list');
+  if (res.status === 401) { cloudForget(); throw new Error('unauthorised'); }
+  if (!res.ok) throw new Error('list_failed');
+  return res.json();
+}
+
+/* What the restore screen shows on both sides of the comparison. Counts only:
+   never a client name, an amount, or anything else that would turn metadata
+   into a leak. */
+function cloudCounts(s) {
+  try {
+    const st = s || state;
+    return {
+      invoices: (st.documents || []).filter((d) => d.type === 'invoice').length,
+      quotes: (st.documents || []).filter((d) => d.type === 'quote').length,
+      credits: (st.documents || []).filter((d) => d.type === 'credit').length,
+      clients: (st.clients || []).length,
+      projects: (st.projects || []).length,
+      expenses: (st.expenses || []).length,
+    };
+  } catch (e) { return {}; }
+}
+</script>
 <script>
 /* ============================================================
    SEED INVOICING — single-file local app
@@ -2662,7 +2829,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.30.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.31.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3170,6 +3337,7 @@ async function saveState() {
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
+  try { scheduleCloudBackup(); } catch (e) {}
   // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
   // is effectively unlimited.
   if (where === 'localStorage' && !quotaWarned && blob.length > 3.5 * 1024 * 1024) {
@@ -9531,8 +9699,20 @@ function renderSettings() {
     </div>
 
     <div class="settings-section">
-      <h3>Backup</h3>
-      <div class="text-sm text-mid" style="margin-bottom:12px;">Export all data, or restore from a previous backup. Backup files are encrypted with your master password — you'll need it (as it was at backup time) to restore. Older unencrypted backups still restore fine.</div>
+      <h3>Server backup</h3>
+      <div class="text-sm text-mid" style="margin-bottom:12px;">An encrypted copy, kept for you. It is encrypted on this device with a key we never receive, so we cannot open it. Browsers delete stored data: Safari clears it after 7 days without opening the app, and &ldquo;clear cookies and site data&rdquo; wipes it in every browser.</div>
+      <div id="cloud-status" class="text-sm text-mid" style="margin-bottom:12px;">Checking&hellip;</div>
+      <div class="row-flex">
+        <button class="btn btn-primary" id="cloud-enrol">Turn on backup</button>
+        <button class="btn" id="cloud-now">Back up now</button>
+        <button class="btn" id="cloud-restore">Restore from backup</button>
+        <button class="btn btn-danger btn-sm" id="cloud-off" title="Stop backing up from this device">Turn off on this device</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Local backup</h3>
+      <div class="text-sm text-mid" style="margin-bottom:12px;">An encrypted file you keep yourself. Useful as a second copy, and the only option if you would rather we held nothing at all. Backup files are encrypted with your master password, so you will need it as it was at backup time to restore. Older unencrypted backups still restore fine.</div>
       <div class="row-flex">
         <button class="btn" id="backup-export">Download backup (JSON)</button>
         <button class="btn" id="backup-import">Restore from backup</button>
@@ -9727,6 +9907,27 @@ function bindSettingsEvents() {
     const ok = await requestPersistentStorage();
     toast(ok ? 'Storage is now persistent' : 'Browser declined — keep regular backups');
     refreshStorageStatus();
+  });
+
+  // Server backup
+  refreshCloudStatus();
+  const cloudEnrolBtn = host.querySelector('#cloud-enrol');
+  const cloudNowBtn = host.querySelector('#cloud-now');
+  const cloudRestoreBtn = host.querySelector('#cloud-restore');
+  const cloudOffBtn = host.querySelector('#cloud-off');
+  const on = cloudEnrolled();
+  if (cloudEnrolBtn) cloudEnrolBtn.style.display = on ? 'none' : '';
+  if (cloudNowBtn) cloudNowBtn.style.display = on ? '' : 'none';
+  if (cloudRestoreBtn) cloudRestoreBtn.style.display = on ? '' : 'none';
+  if (cloudOffBtn) cloudOffBtn.style.display = on ? '' : 'none';
+  if (cloudEnrolBtn) cloudEnrolBtn.addEventListener('click', () => openCloudEnrolModal());
+  if (cloudNowBtn) cloudNowBtn.addEventListener('click', (e) => withBusy(e.currentTarget, 'Backing up\u2026', async () => { await runCloudBackup({ silent: false }); }));
+  if (cloudRestoreBtn) cloudRestoreBtn.addEventListener('click', () => openCloudRestoreModal());
+  if (cloudOffBtn) cloudOffBtn.addEventListener('click', () => {
+    if (!confirm('Stop backing up from this device?\n\nThe copy already on the server is kept, and you can turn backup on again any time.')) return;
+    cloudForget();
+    render();
+    toast('Backup turned off on this device');
   });
 
   const backupImport = host.querySelector('#backup-import');
@@ -11833,6 +12034,341 @@ function openIosInstallModal() {
   `);
   const b = document.getElementById('install-modal-backup');
   if (b) b.addEventListener('click', (e) => withBusy(e.currentTarget, 'Encrypting\u2026', async () => { await exportBackup(); closeModal(); }));
+}
+
+
+/* ============================================================
+   SERVER BACKUP — UI
+
+   Three names, three different things, and they must not blur:
+     Export        readable CSV for an accountant
+     Local backup  encrypted file the user keeps themselves
+     Server backup encrypted copy we hold and cannot read
+
+   Restore is never silently destructive. Where the device already holds
+   data, merge is offered first and preselected, because the merge engine
+   in src/merge.js can combine both sides and a replace cannot be undone.
+   ============================================================ */
+
+const CLOUD_DEBOUNCE_MS = 5 * 60 * 1000;   // at most one upload per 5 minutes
+let cloudTimer = null;
+let cloudBusy = false;
+let cloudLastError = null;
+
+/* Called from saveState. Must never throw and never block a save: the user's
+   data reaching local storage always matters more than it reaching us. */
+function scheduleCloudBackup() {
+  try {
+    if (!cloudEnrolled()) return;
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(() => { runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
+  } catch (e) {}
+}
+
+async function runCloudBackup(opts) {
+  const o = opts || {};
+  if (cloudBusy || !cloudEnrolled() || !currentDek) return null;
+  cloudBusy = true;
+  cloudLastError = null;
+  try {
+    const blob = await backupFileText();
+    const res = await cloudUpload(blob, cloudCounts(state));
+    if (res.conflict) {
+      // Never resolve this quietly. The stale-device case looks exactly like
+      // the normal case from here, and guessing wrong costs real work.
+      openCloudConflictModal(res.server, blob);
+      return res;
+    }
+    if (!o.silent) toast('Backed up');
+    refreshCloudStatus();
+    return res;
+  } catch (err) {
+    cloudLastError = err && err.message;
+    if (!o.silent) {
+      if (cloudLastError === 'unauthorised') {
+        toast('Your device needs to sign in again for backup');
+        openCloudEnrolModal();
+      } else if (cloudLastError === 'too_large') {
+        alert('This vault is too large to back up. Get in touch and I will sort it out.');
+      } else {
+        toast('Backup failed. Your data is safe on this device, and we will try again shortly.');
+      }
+    }
+    refreshCloudStatus();
+    return null;
+  } finally {
+    cloudBusy = false;
+  }
+}
+
+/* A tab can be closed well inside the debounce window, so flush on the way
+   out. runCloudBackup no-ops unless the vault is unlocked and enrolled. */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'hidden') return;
+  try { clearTimeout(cloudTimer); runCloudBackup({ silent: true }); } catch (e) {}
+});
+
+function cloudRelative(iso) {
+  if (!iso) return null;
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + (mins === 1 ? ' minute ago' : ' minutes ago');
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + (hrs === 1 ? ' hour ago' : ' hours ago');
+  const days = Math.round(hrs / 24);
+  return days + (days === 1 ? ' day ago' : ' days ago');
+}
+
+function refreshCloudStatus() {
+  const el = document.getElementById('cloud-status');
+  if (!el) return;
+  if (!cloudEnrolled()) {
+    el.innerHTML = `<span style="color:#b4690e;">Not backed up.</span> This device is the only copy of your data.`;
+    return;
+  }
+  const last = cloudLastBackupAt();
+  if (cloudLastError) {
+    el.innerHTML = `<span style="color:var(--danger);">Last backup failed.</span> Your data is safe on this device${last ? `, and the copy from ${escapeHtml(cloudRelative(last))} is still on the server` : ''}.`;
+    return;
+  }
+  if (!last) { el.textContent = 'Backup is on. Nothing sent yet.'; return; }
+  const mins = (Date.now() - new Date(last).getTime()) / 60000;
+  const stale = mins > 60 * 48;
+  el.innerHTML = stale
+    ? `<span style="color:#b4690e;">Last backup ${escapeHtml(cloudRelative(last))}.</span>`
+    : `Backed up <strong>${escapeHtml(cloudRelative(last))}</strong> · ${escapeHtml(cloudEmail() || '')}`;
+}
+
+/* ---- enrolment: email, then a code. No password, no account to manage. ---- */
+
+function openCloudEnrolModal(prefill) {
+  let email = prefill || cloudEmail() || '';
+  try {
+    const onb = JSON.parse(localStorage.getItem('seed-onboarding-v2') || 'null');
+    if (!email && onb && onb.email) email = onb.email;
+  } catch (e) {}
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:440px;">
+        <div class="modal-head"><div class="ttl">Turn on backup</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.65;margin-bottom:14px;">
+            Your data is encrypted on this device before anything leaves it, with a key we never receive. We keep the encrypted file and cannot open it, so a cleared browser or a lost laptop is no longer the end of your records.
+          </div>
+          <div class="field">
+            <label>Your email</label>
+            <input id="cloud-email" type="email" value="${escapeHtml(email)}" placeholder="you@yourbusiness.com" />
+          </div>
+          <div id="cloud-code-wrap" style="display:none;margin-top:12px;">
+            <div class="field">
+              <label>Six-digit code</label>
+              <input id="cloud-code" inputmode="numeric" maxlength="6" placeholder="123456" />
+            </div>
+            <div class="text-sm text-muted" style="margin-top:6px;">Sent to your inbox. It expires in 10 minutes.</div>
+          </div>
+          <div id="cloud-enrol-err" class="text-sm" style="color:var(--danger);margin-top:10px;min-height:16px;"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="cloud-send">Send me a code</button>
+          <button class="btn btn-primary" id="cloud-verify" style="display:none;">Turn on backup</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const err = () => document.getElementById('cloud-enrol-err');
+  document.getElementById('cloud-send').addEventListener('click', (e) => withBusy(e.currentTarget, 'Sending…', async () => {
+    const v = (document.getElementById('cloud-email').value || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { err().textContent = 'That does not look like an email address.'; return; }
+    try {
+      await cloudRequestCode(v);
+      document.getElementById('cloud-code-wrap').style.display = '';
+      document.getElementById('cloud-send').style.display = 'none';
+      document.getElementById('cloud-verify').style.display = '';
+      err().textContent = '';
+      document.getElementById('cloud-code').focus();
+    } catch (ex) {
+      const m = ex && ex.message;
+      err().textContent = m === 'too_soon'
+        ? `A code was just sent. Check your inbox, or try again in ${ex.retryAfter || 60} seconds.`
+        : m === 'too_many_requests'
+        ? 'Too many codes requested for that address. Wait an hour and try again.'
+        : 'Could not send the code. Check your connection and try again.';
+    }
+  }));
+
+  document.getElementById('cloud-verify').addEventListener('click', (e) => withBusy(e.currentTarget, 'Checking…', async () => {
+    const v = (document.getElementById('cloud-email').value || '').trim();
+    const code = (document.getElementById('cloud-code').value || '').replace(/\D/g, '');
+    if (code.length !== 6) { err().textContent = 'Enter the six digits from the email.'; return; }
+    try {
+      await cloudVerifyCode(v, code);
+      closeModal();
+      toast('Backup is on');
+      await runCloudBackup({ silent: false });
+      render();
+    } catch (ex) {
+      const m = ex && ex.message;
+      err().textContent = m === 'wrong_code' ? 'That code is not right.'
+        : m === 'code_expired' ? 'That code has expired. Send a new one.'
+        : m === 'too_many_attempts' ? 'Too many tries. Wait a few minutes and start again.'
+        : 'Could not turn on backup. Try again.';
+    }
+  }));
+}
+
+/* ---- conflict: the server moved on since this device last looked ---- */
+
+function openCloudConflictModal(server, pendingBlob) {
+  const when = server && server.createdAt ? fmtDate(new Date(server.createdAt).toISOString().slice(0, 10)) : 'unknown';
+  const sc = (server && server.counts) || {};
+  const lc = cloudCounts(state);
+  const row = (label, a, b) => `<tr><td>${label}</td><td class="mono" style="text-align:right;">${a == null ? '·' : a}</td><td class="mono" style="text-align:right;">${b == null ? '·' : b}</td></tr>`;
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><div class="ttl">The backup is newer than this device</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="phrase-warn" style="margin:0 0 14px;">
+            Another device backed up on <strong>${escapeHtml(when)}</strong>, after this one last did. Sending this device&rsquo;s copy now would replace that work with what this device happens to have.
+          </div>
+          <table style="width:100%;font-size:13px;">
+            <thead><tr><th></th><th style="text-align:right;">On the server</th><th style="text-align:right;">On this device</th></tr></thead>
+            <tbody>
+              ${row('Invoices', sc.invoices, lc.invoices)}
+              ${row('Quotes', sc.quotes, lc.quotes)}
+              ${row('Clients', sc.clients, lc.clients)}
+              ${row('Projects', sc.projects, lc.projects)}
+              ${row('Expenses', sc.expenses, lc.expenses)}
+            </tbody>
+          </table>
+          <div class="text-sm text-muted" style="margin-top:14px;line-height:1.55;">
+            <strong>Merge</strong> keeps both: anything only on the server is added here, and where both changed the same record the newer edit wins. It is the safe choice and nothing is lost.
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Leave it for now</button>
+          <button class="btn" id="cloud-force">Replace the backup</button>
+          <button class="btn btn-primary" id="cloud-merge">Merge them</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  document.getElementById('cloud-merge').addEventListener('click', (e) => withBusy(e.currentTarget, 'Merging…', async () => {
+    try {
+      const latest = await cloudLatest();
+      if (!latest) { toast('Nothing on the server to merge'); closeModal(); return; }
+      const remote = await decodeBackupText(latest.text);
+      if (remote == null) return;                 // password prompt cancelled
+      const report = await applySyncMerge(remote);
+      cloudSet(CLOUD_VERSION_STORE, latest.version);
+      closeModal();
+      showMergeReport(report);
+      await runCloudBackup({ silent: true });     // push the merged result back
+    } catch (ex) {
+      alert('Merge failed. Nothing on this device was changed.\n\n' + (ex && ex.message));
+    }
+  }));
+
+  document.getElementById('cloud-force').addEventListener('click', (e) => withBusy(e.currentTarget, 'Replacing…', async () => {
+    if (!confirm('Replace the backup with this device\'s copy?\n\nWork done on the other device that has not reached this one will be lost.')) return;
+    try {
+      const list = await cloudList();
+      cloudSet(CLOUD_VERSION_STORE, (list.backups[0] && list.backups[0].version) || 0);
+      const res = await cloudUpload(pendingBlob || await backupFileText(), cloudCounts(state));
+      closeModal();
+      toast(res.conflict ? 'Still out of date. Try again.' : 'Backup replaced');
+      refreshCloudStatus();
+    } catch (ex) { alert('Could not replace the backup: ' + (ex && ex.message)); }
+  }));
+}
+
+/* ---- restore ---- */
+
+async function openCloudRestoreModal() {
+  let latest;
+  try { latest = await cloudLatest(); }
+  catch (ex) {
+    if (ex && ex.message === 'unauthorised') { openCloudEnrolModal(); return; }
+    alert('Could not reach the backup. Check your connection and try again.');
+    return;
+  }
+  if (!latest) { alert('There is no backup on the server yet.'); return; }
+
+  const sc = latest.counts || {};
+  const lc = cloudCounts(state);
+  const when = latest.createdAt ? new Date(latest.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown';
+  const deviceHasData = (lc.invoices + lc.quotes + lc.clients + lc.projects + lc.expenses) > 0;
+  const row = (label, a, b) => `<tr><td>${label}</td><td class="mono" style="text-align:right;">${a == null ? '·' : a}</td><td class="mono" style="text-align:right;">${b == null ? '·' : b}</td></tr>`;
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><div class="ttl">Restore from backup</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="margin-bottom:12px;">Backup from <strong>${escapeHtml(when)}</strong>.</div>
+          <table style="width:100%;font-size:13px;">
+            <thead><tr><th></th><th style="text-align:right;">In the backup</th><th style="text-align:right;">On this device</th></tr></thead>
+            <tbody>
+              ${row('Invoices', sc.invoices, lc.invoices)}
+              ${row('Quotes', sc.quotes, lc.quotes)}
+              ${row('Clients', sc.clients, lc.clients)}
+              ${row('Projects', sc.projects, lc.projects)}
+              ${row('Expenses', sc.expenses, lc.expenses)}
+            </tbody>
+          </table>
+          ${deviceHasData ? `
+          <div class="phrase-warn" style="margin-top:14px;">
+            This device already has data. <strong>Merge</strong> keeps both sides. <strong>Replace</strong> throws away everything currently here, and cannot be undone.
+          </div>` : `
+          <div class="text-sm text-muted" style="margin-top:14px;">This device is empty, so restoring simply brings your data back.</div>`}
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          ${deviceHasData ? `<button class="btn" id="cloud-replace">Replace everything</button>` : ''}
+          <button class="btn btn-primary" id="cloud-restore-go">${deviceHasData ? 'Merge them' : 'Restore my data'}</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const apply = async (mode) => {
+    const remote = await decodeBackupText(latest.text);
+    if (remote == null) return false;             // password prompt cancelled
+    if (mode === 'merge') {
+      const report = await applySyncMerge(remote);
+      cloudSet(CLOUD_VERSION_STORE, latest.version);
+      closeModal();
+      showMergeReport(report);
+    } else {
+      state = remote;
+      migrateState();
+      installEntityAccessors();
+      await saveState();
+      cloudSet(CLOUD_VERSION_STORE, latest.version);
+      applyBrand();
+      closeModal();
+      render();
+      toast('Restored');
+    }
+    return true;
+  };
+
+  document.getElementById('cloud-restore-go').addEventListener('click', (e) => withBusy(e.currentTarget, 'Restoring…', async () => {
+    try { await apply(deviceHasData ? 'merge' : 'replace'); }
+    catch (ex) { alert('Restore failed. Nothing on this device was changed.\n\n' + (ex && ex.message)); }
+  }));
+
+  const rep = document.getElementById('cloud-replace');
+  if (rep) rep.addEventListener('click', (e) => withBusy(e.currentTarget, 'Replacing…', async () => {
+    if (!confirm('Replace everything on this device with the backup?\n\nAnything here that is not in the backup will be gone. This cannot be undone.')) return;
+    try { await apply('replace'); }
+    catch (ex) { alert('Restore failed. Nothing on this device was changed.\n\n' + (ex && ex.message)); }
+  }));
 }
 
 /* ============================================================
