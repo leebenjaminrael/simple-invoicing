@@ -1428,6 +1428,18 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     background: rgba(180, 105, 14, 0.10); border: 1px solid rgba(180, 105, 14, 0.35);
     border-radius: 8px; padding: 11px 13px; font-size: 13px; line-height: 1.55; margin: 12px 0;
   }
+  /* Safari's 7-day storage deletion is a data-loss risk, not a growth nudge —
+     the banner is coloured as a warning and can only be snoozed. */
+  .install-banner.is-warning {
+    background: rgba(180, 105, 14, 0.14); border-color: rgba(180, 105, 14, 0.45);
+  }
+  .install-banner.is-warning .ub-btn { background: var(--accent-bright); color: var(--bg); border-color: var(--accent-bright); }
+  .ub-dismiss.is-text {
+    font-size: 12px; line-height: 1; padding: 7px 10px; width: auto; height: auto;
+    border-radius: 8px; color: var(--text-mid);
+  }
+  .ub-dismiss.is-text:hover { color: var(--text); }
+
   .lock-hint { font-size: 12px; color: var(--text-mid); margin-top: 10px; line-height: 1.5; }
 
   /* Help & FAQ accordions (settings) */
@@ -2650,7 +2662,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.29.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.30.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -11670,6 +11682,7 @@ function showMigrationWelcome() {
    ============================================================ */
 
 const INSTALL_DISMISS_STORE = 'seed-install-dismissed-v1';
+const INSTALL_SNOOZE_STORE = 'seed-install-snooze-v1';
 let deferredInstallEvent = null;
 
 function isStandalone() {
@@ -11680,7 +11693,35 @@ function isIosSafari() {
   const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   return iOS && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
 }
+function isMacSafari() {
+  const ua = navigator.userAgent;
+  if (/iPad|iPhone|iPod/.test(ua)) return false;
+  return /Macintosh/.test(ua) && /Safari/.test(ua) && !/Chrome|Chromium|Edg|OPR|Firefox/.test(ua);
+}
+
+/* WebKit's Intelligent Tracking Prevention deletes ALL script-writable storage
+   — IndexedDB included, so the whole vault — after 7 days without the user
+   opening the site. It is on by default. The only documented exemption is a
+   Home Screen web app. An invoicing app opened monthly is exactly the profile
+   that trips this, so on Safari the install prompt is not marketing: it is the
+   only mitigation that exists, and it must not be dismissible for good. */
+function safariStorageAtRisk() {
+  return (isIosSafari() || isMacSafari()) && !isStandalone();
+}
+
+function installSnoozed() {
+  try {
+    const until = Number(localStorage.getItem(INSTALL_SNOOZE_STORE) || 0);
+    return Date.now() < until;
+  } catch (e) { return false; }
+}
+function snoozeInstall() {
+  try { localStorage.setItem(INSTALL_SNOOZE_STORE, String(Date.now() + 24 * 60 * 60 * 1000)); } catch (e) {}
+}
+
 function installDismissed() {
+  // At-risk Safari can only ever snooze — see safariStorageAtRisk above.
+  if (safariStorageAtRisk()) return installSnoozed();
   try { return localStorage.getItem(INSTALL_DISMISS_STORE) === '1'; } catch (e) { return false; }
 }
 
@@ -11705,15 +11746,33 @@ function initInstallPrompt() {
 function canOfferInstall() {
   if (!INSTALL_PROMPT_ENABLED) return false;
   if (isStandalone() || installDismissed()) return false;
-  return !!deferredInstallEvent || isIosSafari();
+  return !!deferredInstallEvent || isIosSafari() || isMacSafari();
 }
 
 function refreshInstallUi() {
   const banner = document.getElementById('install-banner');
   if (!banner) return;
-  banner.style.display = canOfferInstall() ? 'flex' : 'none';
+  const show = canOfferInstall();
+  banner.style.display = show ? 'flex' : 'none';
+  if (!show) return;
+
+  const atRisk = safariStorageAtRisk();
+  banner.classList.toggle('is-warning', atRisk);
+
   const label = document.getElementById('install-banner-text');
-  if (label) label.textContent = `Add ${APP_BRAND_NAME} to your ${isIosSafari() ? 'home screen' : 'apps'} — it opens in its own window and works offline.`;
+  const go = document.getElementById('install-go');
+  const later = document.getElementById('install-later');
+
+  if (atRisk) {
+    // Consequence before instruction: the stakes are the user's whole ledger.
+    if (label) label.textContent = 'Safari deletes stored data after 7 days without opening a site. Install ' + APP_BRAND_NAME + ' and it stops.';
+    if (go) go.textContent = 'Show me how';
+    if (later) { later.textContent = 'Tomorrow'; later.title = 'Remind me tomorrow'; later.classList.add('is-text'); }
+  } else {
+    if (label) label.textContent = `Add ${APP_BRAND_NAME} to your apps — it opens in its own window and works offline.`;
+    if (go) go.textContent = 'Install';
+    if (later) { later.textContent = '\u00d7'; later.title = 'Not now'; later.classList.remove('is-text'); }
+  }
 }
 
 async function doInstall() {
@@ -11727,30 +11786,53 @@ async function doInstall() {
     refreshInstallUi();
     return;
   }
-  if (isIosSafari()) openIosInstallModal();
+  if (isIosSafari() || isMacSafari()) openIosInstallModal();
 }
 
 function openIosInstallModal() {
   const share = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px"><path d="M12 15V3"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/></svg>';
-  showModal(`
-    <div class="modal-overlay" id="modal-overlay">
-      <div class="modal" style="max-width:420px;">
-        <div class="modal-head"><div class="ttl">Add ${escapeHtml(APP_BRAND_NAME)} to your home screen</div><span class="modal-close" data-close>×</span></div>
-        <div class="modal-body">
-          <div class="text-sm text-mid" style="line-height:1.7;">
-            Safari doesn't offer a one-click install, so it takes two taps:
+  const mac = isMacSafari();
+
+  const steps = mac ? `
+            <ol style="margin:12px 0 0 18px;padding:0;">
+              <li style="margin-bottom:8px;">In Safari's menu bar, choose <strong>File &rarr; Add to Dock</strong>.</li>
+              <li>Click <strong>Add</strong>, then open ${escapeHtml(APP_BRAND_NAME)} from the Dock from now on.</li>
+            </ol>` : `
             <ol style="margin:12px 0 0 18px;padding:0;">
               <li style="margin-bottom:8px;">Tap the <strong>Share</strong> button ${share} in the Safari toolbar${/iPad/.test(navigator.userAgent) ? ' (top right)' : ' (bottom of the screen)'}.</li>
               <li style="margin-bottom:8px;">Scroll down and choose <strong>Add to Home Screen</strong>.</li>
-              <li>Tap <strong>Add</strong>. It'll appear with your other apps.</li>
-            </ol>
+              <li>Tap <strong>Add</strong>, then open ${escapeHtml(APP_BRAND_NAME)} from that icon from now on.</li>
+            </ol>`;
+
+  // Apple documents the storage exemption for Home Screen web apps. Whether
+  // "Add to Dock" on macOS inherits it is undocumented, so we don't claim it.
+  const footNote = mac
+    ? `Apple documents this exemption for iPhone and iPad home-screen apps. On the Mac it is not documented either way, so keep downloading a local backup as well.`
+    : `Installing is the only thing Apple documents as exempt from the 7-day deletion. Your data still lives on this device, so keep downloading a local backup too.`;
+
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:440px;">
+        <div class="modal-head"><div class="ttl">Stop Safari deleting your data</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="phrase-warn" style="margin:0 0 14px;">
+            Safari clears everything a site has stored after <strong>7 days without opening it</strong>. For ${escapeHtml(APP_BRAND_NAME)} that means your invoices, clients and time entries. Installing it stops that.
           </div>
-          <div class="text-sm text-muted" style="margin-top:14px;line-height:1.55;">Your data stays on this device either way — installing just gives it its own icon, its own window, and full offline use.</div>
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            It takes about ten seconds:
+            ${steps}
+          </div>
+          <div class="text-sm text-muted" style="margin-top:14px;line-height:1.55;">${footNote}</div>
         </div>
-        <div class="modal-foot"><button class="btn btn-primary" data-close>Got it</button></div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Close</button>
+          <button class="btn btn-primary" id="install-modal-backup">Download a backup now</button>
+        </div>
       </div>
     </div>
   `);
+  const b = document.getElementById('install-modal-backup');
+  if (b) b.addEventListener('click', (e) => withBusy(e.currentTarget, 'Encrypting\u2026', async () => { await exportBackup(); closeModal(); }));
 }
 
 /* ============================================================
@@ -12321,7 +12403,8 @@ function initPwa() {
   const installLater = document.getElementById('install-later');
   if (installGo) installGo.addEventListener('click', () => doInstall());
   if (installLater) installLater.addEventListener('click', () => {
-    try { localStorage.setItem(INSTALL_DISMISS_STORE, '1'); } catch (e) {}
+    if (safariStorageAtRisk()) snoozeInstall();   // never dismissible for good
+    else { try { localStorage.setItem(INSTALL_DISMISS_STORE, '1'); } catch (e) {} }
     refreshInstallUi();
   });
 }
