@@ -2896,7 +2896,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.32.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.33.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -5526,7 +5526,13 @@ function renderTimer() {
       <div class="page-actions">
         ${running ? `<span class="text-sm" style="color:var(--accent-bright);">● Timer running</span>` : `<button class="btn" id="tm-start">${ICONS.play} Start timer</button>`}
         <button class="btn" id="tm-add">+ Add time</button>
-        <button class="btn" id="tm-export">Export CSV</button>
+        <div style="position:relative;display:inline-block;">
+          <button class="btn" id="tm-export-toggle" type="button">Export ${ICONS.chevronDown}</button>
+          <div id="tm-export-menu" style="display:none;position:absolute;top:38px;right:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-md);z-index:5;min-width:160px;padding:4px;">
+            <button class="btn btn-ghost btn-sm" id="tm-export-csv" type="button" style="width:100%;justify-content:flex-start;">Export as CSV</button>
+            <button class="btn btn-ghost btn-sm" id="tm-export-pdf" type="button" style="width:100%;justify-content:flex-start;">Export as PDF</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -5571,7 +5577,20 @@ function bindTimerEvents() {
   const clr = document.getElementById('tm-f-clear'); if (clr) clr.addEventListener('click', () => { timeFilters = { clientId: '', projectId: '', from: '', to: '', status: 'all' }; render(); });
   const add = document.getElementById('tm-add'); if (add) add.addEventListener('click', () => openTimeEntryModal(null));
   const start = document.getElementById('tm-start'); if (start) start.addEventListener('click', () => openTimerStartModal());
-  const exp = document.getElementById('tm-export'); if (exp) exp.addEventListener('click', exportTimeReport);
+  const expToggle = document.getElementById('tm-export-toggle');
+  if (expToggle) {
+    expToggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const m = document.getElementById('tm-export-menu');
+      m.style.display = m.style.display === 'none' ? 'block' : 'none';
+    });
+    document.addEventListener('click', () => {
+      const m = document.getElementById('tm-export-menu');
+      if (m) m.style.display = 'none';
+    }, { once: true });
+  }
+  const expCsv = document.getElementById('tm-export-csv'); if (expCsv) expCsv.addEventListener('click', exportTimeReportCsv);
+  const expPdf = document.getElementById('tm-export-pdf'); if (expPdf) expPdf.addEventListener('click', (e) => withBusy(e.currentTarget, 'Building\u2026', exportTimeReportPdf));
   const bill = document.getElementById('tm-bill'); if (bill) bill.addEventListener('click', () => openBillTimeModal(timeFilters.clientId));
   document.querySelectorAll('[data-te-edit]').forEach((b) => b.addEventListener('click', () => {
     const e = state.timeEntries.find((x) => x.id === b.dataset.teEdit); if (e) openTimeEntryModal(e);
@@ -5594,7 +5613,7 @@ async function resumeEntry(e) {
   toast('Timer resumed');
 }
 
-function exportTimeReport() {
+function exportTimeReportCsv() {
   const entries = filteredTimeEntries();
   if (!entries.length) { toast('No entries to export'); return; }
   const esc = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
@@ -5615,6 +5634,179 @@ function exportTimeReport() {
   a.href = url; a.download = `time-report-${todayISO()}.csv`; a.click();
   URL.revokeObjectURL(url);
   toast('Report downloaded');
+}
+
+/* Time report PDF — deliberately styled to match buildPdfDoc (invoices/quotes):
+   same margins, same type scale, same muted-grey palette, same logo placement
+   and the same branded footer. It's a different document (a report, not a
+   legal one, so no VAT/bill-to block), but it should look like it came from
+   the same app, not a bolted-on afterthought. */
+async function exportTimeReportPdf() {
+  const entries = filteredTimeEntries();
+  if (!entries.length) { toast('No entries to export'); return; }
+  if (!requireCompanyDetails('download this report')) return;
+
+  const { jsPDF } = window.jspdf;
+  const co = state.settings.company || COMPANY_DEFAULT;
+  const ccy = baseCcy();
+
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const M = 48;
+  let y = M;
+  doc.setFont('helvetica', 'normal');
+
+  // Logo (right), same slot and proportions as the invoice PDF.
+  const LOGO_MAX_W = 60, LOGO_MAX_H = 28;
+  let logoBottom = y;
+  if (state.settings.logo) {
+    try {
+      const conv = await rasterizeLogoForPdf(state.settings.logo, 320);
+      const ratio = conv.w / conv.h;
+      let lw = LOGO_MAX_W, lh = LOGO_MAX_H;
+      if (ratio > LOGO_MAX_W / LOGO_MAX_H) { lw = LOGO_MAX_W; lh = lw / ratio; }
+      else { lh = LOGO_MAX_H; lw = lh * ratio; }
+      doc.addImage(conv.dataUrl, 'JPEG', PAGE_W - M - lw, y, lw, lh);
+      logoBottom = y + lh + 16;
+    } catch (e) { console.warn('Logo render error', e); }
+  }
+
+  // Heading (left) — same 24pt treatment as INVOICE / QUOTE.
+  doc.setFontSize(24);
+  doc.setTextColor(28, 27, 25);
+  doc.text('TIME REPORT', M, y + 18);
+
+  // From block (right) — identical layout to the invoice PDF's from-block.
+  const FROM_W = 240, LINE_H = 12;
+  let fromY = Math.max(logoBottom, y + 8);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(28, 27, 25);
+  doc.text(co.name || '', PAGE_W - M, fromY, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  let addrY = fromY + LINE_H;
+  doc.setTextColor(92, 91, 87);
+  const addrParts = (co.address || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (addrParts.length) {
+    addrY += 5;
+    for (const part of addrParts) {
+      const wrapped = doc.splitTextToSize(part, FROM_W);
+      for (const ln of wrapped) { doc.text(ln, PAGE_W - M, addrY, { align: 'right' }); addrY += LINE_H; }
+    }
+  }
+  const contactLines = [co.phone, co.email].filter(Boolean);
+  if (contactLines.length) {
+    addrY += 5;
+    for (const ln of contactLines) { doc.text(ln, PAGE_W - M, addrY, { align: 'right' }); addrY += LINE_H; }
+  }
+  y = Math.max(addrY, logoBottom + 8) + 18;
+
+  // Report period + filters (left) and meta (right) — the report's equivalent
+  // of the invoice's bill-to / meta blocks, so the two document types read
+  // the same way at a glance.
+  const f = timeFilters;
+  doc.setTextColor(158, 157, 153);
+  doc.setFontSize(8);
+  doc.text('PERIOD', M, y);
+  doc.setTextColor(28, 27, 25);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  const periodLabel = (f.from || f.to) ? `${f.from ? fmtDate(f.from) : 'Start'} → ${f.to ? fmtDate(f.to) : 'Today'}` : 'All time';
+  doc.text(periodLabel, M, y + 14);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(92, 91, 87);
+  let bly = y + 28;
+  if (f.clientId) { doc.text('Client: ' + clientName(f.clientId), M, bly); bly += 11; }
+  if (f.projectId) { doc.text('Project: ' + projectLabel(f.projectId), M, bly); bly += 11; }
+  if (f.status === 'billed') { doc.text('Status: Billed only', M, bly); bly += 11; }
+  else if (f.status === 'unbilled') { doc.text('Status: Unbilled only', M, bly); bly += 11; }
+
+  const metaX = PAGE_W - M - 180;
+  let my = y;
+  const metaRow = (l, v) => {
+    doc.setTextColor(92, 91, 87);
+    doc.text(l, metaX, my);
+    doc.setTextColor(28, 27, 25);
+    doc.text(String(v || ''), metaX + 80, my);
+    my += 14;
+  };
+  metaRow('Generated:', fmtDate(todayISO()));
+  metaRow('Entries:', String(entries.length));
+
+  y = Math.max(bly, my) + 16;
+
+  // Table — mirrors the on-screen Timer columns, not the CSV's fuller column
+  // set: this is a presentable report, the CSV stays the detailed data dump.
+  const head = [['Date', 'Client', 'Project', 'Description', 'Hours', 'Rate', 'Value', 'Status']];
+  const body = entries.map((e) => {
+    const val = (e.durationSec / 3600) * (Number(e.rate) || 0);
+    const proj = e.projectId ? projectLabel(e.projectId) + (e.taskId ? ' · ' + taskLabel(e.taskId) : '') : '—';
+    return [
+      fmtDate((e.start || '').slice(0, 10)),
+      clientName(e.clientId),
+      proj,
+      e.description || '',
+      fmtHours(e.durationSec),
+      fmtMoney(Number(e.rate) || 0, ccy),
+      fmtMoney(val, ccy),
+      e.invoiceId ? 'Billed' : 'Unbilled',
+    ];
+  });
+
+  doc.autoTable({
+    head, body,
+    startY: y,
+    margin: { left: M, right: M },
+    theme: 'plain',
+    styles: { font: 'helvetica', fontSize: 9, cellPadding: 6, textColor: [28, 27, 25] },
+    headStyles: { textColor: [92, 91, 87], fontStyle: 'normal', fontSize: 8, lineWidth: { top: 0.6, bottom: 0.6 }, lineColor: [28, 27, 25] },
+    bodyStyles: { lineWidth: { bottom: 0.4 }, lineColor: [224, 221, 215] },
+    columnStyles: {
+      0: { cellWidth: 48 },
+      1: { cellWidth: 60 },
+      2: { cellWidth: 55 },
+      3: { cellWidth: 'auto' },
+      4: { halign: 'right', cellWidth: 32 },
+      5: { halign: 'right', cellWidth: 58 },
+      6: { halign: 'right', cellWidth: 62 },
+      7: { cellWidth: 46 },
+    },
+  });
+
+  y = doc.lastAutoTable.finalY + 16;
+
+  // Totals — same bold-row-under-a-rule treatment as the invoice totals box.
+  const totalSec = entries.reduce((s, e) => s + (e.durationSec || 0), 0);
+  const totalValue = entries.reduce((s, e) => s + (e.durationSec / 3600) * (Number(e.rate) || 0), 0);
+  const tx = PAGE_W - M;
+  const lx = PAGE_W - M - 180;
+  doc.setDrawColor(28, 27, 25);
+  doc.setLineWidth(0.6);
+  doc.line(lx, y, tx, y);
+  y += 20;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(28, 27, 25);
+  doc.text('TOTAL HOURS', lx, y);
+  doc.text(fmtHours(totalSec) + ' hrs', tx, y, { align: 'right' });
+  y += 16;
+  doc.text('TOTAL VALUE ' + ccy, lx, y);
+  doc.text(fmtMoney(totalValue, ccy), tx, y, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+
+  // Footer — identical branding line to the invoice PDF: registered office,
+  // and the same "Created with Simpl" line under the same opt-in rule.
+  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`
+    + (brandingOnDocuments() ? `  ·  Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}` : '');
+  doc.setFontSize(8);
+  doc.setTextColor(158, 157, 153);
+  const footerLines = doc.splitTextToSize(footer, PAGE_W - 2 * M);
+  const footY = doc.internal.pageSize.getHeight() - M;
+  doc.text(footerLines, PAGE_W / 2, footY, { align: 'center' });
+
+  doc.save(`time-report-${todayISO()}.pdf`);
+  toast('PDF downloaded');
 }
 
 /* ---- bill time → invoice ---- */
