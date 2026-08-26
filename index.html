@@ -2894,7 +2894,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.34.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.34.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -12881,7 +12881,7 @@ function openRecoveryUnlockModal() {
       currentPassword = p1;
       await saveState();
       closeModal();
-      enterApp();
+      await enterApp();
       fetchFxRates();
       toast('Unlocked — your new password is set');
     });
@@ -13001,7 +13001,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
     installEntityAccessors();
     currentPassword = pwd;
     await saveState();
-    enterApp();
+    await enterApp();
     fetchFxRates();
     // New vault → set up recovery straight away, while they're in setup mode.
     setTimeout(() => openRecoverySetupModal(), 350);
@@ -13020,7 +13020,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
       unlockFails = 0;
       unlockLockedUntil = 0;
       await saveState();                      // performs the v2 → v3 upgrade
-      enterApp();
+      await enterApp();
       fetchFxRates();
     } catch (e) {
       unlockFails++;
@@ -13035,17 +13035,25 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
   }
 });
 
-function enterApp() {
+async function enterApp() {
   reportMigrationArrival();   // no-op unless this is the new home, first time
   // Don't leave the password sitting in the DOM while the app is open.
   document.getElementById('lock-pwd').value = '';
   document.getElementById('lock-pwd-2').value = '';
+  // Resolve licence/trial state BEFORE the app becomes visible, not after.
+  // "+ New invoice"/"+ New quote" are wired once at boot and are clickable
+  // the instant the lock screen is hidden, regardless of route. The previous
+  // version hid the lock screen first and refreshed licenceState in a
+  // fire-and-forget .then(), so anyone who clicked "+ New invoice" in that
+  // window created a document while licenceState still held its module-load
+  // default of canCreate:true — bypassing an expired trial entirely. This
+  // is a pure local ECDSA verify (see verifyLicence), single-digit ms, no
+  // network — awaiting it here is not a perceptible delay.
+  await refreshLicenceState();
   document.getElementById('lock-screen').style.display = 'none';
   document.getElementById('app').classList.add('unlocked');
   applyBrand();
   renderEntitySwitcher();
-  // Resolve licence/trial state before the first render (no-op when dormant).
-  refreshLicenceState().then(() => { if (commercialActive()) render(); });
   setRoute('dashboard');
   resetLockTimer();
   const ob = getOnboarding();
