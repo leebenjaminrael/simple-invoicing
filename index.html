@@ -1745,13 +1745,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <div class="nav-section">Main</div>
     <button class="nav-item" data-route="dashboard"><span class="dot"></span> Dashboard</button>
     <button class="nav-item" data-route="finances"><span class="dot"></span> Finances</button>
-    <button class="nav-item" data-route="vat"><span class="dot"></span> VAT</button>
     <button class="nav-item" data-route="documents"><span class="dot"></span> Documents</button>
     <button class="nav-item" data-route="projects"><span class="dot"></span> Projects</button>
     <button class="nav-item" data-route="clients"><span class="dot"></span> Clients</button>
     <button class="nav-item" data-route="timer"><span class="dot"></span> Timer</button>
     <button class="nav-item" data-route="expenses"><span class="dot"></span> Expenses</button>
-    <button class="nav-item" data-route="reconcile"><span class="dot"></span> Reconcile</button>
     <button class="nav-item" data-route="settings"><span class="dot"></span> Settings</button>
     <div class="sidebar-bottom">
       <button class="new-btn" id="new-invoice-btn">+ New invoice</button>
@@ -2896,7 +2894,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.33.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.34.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4257,6 +4255,7 @@ function setRoute(r) {
 document.querySelectorAll('.nav-item').forEach((n) => {
   n.addEventListener('click', () => {
     if (n.dataset.route === 'projects') currentProjectId = null; // nav always lands on the list
+    if (n.dataset.route === 'finances') financeTab = 'overview'; // nav always lands on Overview
     setRoute(n.dataset.route);
   });
 });
@@ -4300,13 +4299,11 @@ function render() {
   const host = document.getElementById('view-host');
   if (currentRoute === 'dashboard') host.innerHTML = renderDashboard();
   else if (currentRoute === 'finances') host.innerHTML = renderFinances();
-  else if (currentRoute === 'vat') host.innerHTML = renderVatView();
   else if (currentRoute === 'documents') host.innerHTML = renderDocuments();
   else if (currentRoute === 'projects') host.innerHTML = currentProjectId ? renderProjectDetail() : renderProjects();
   else if (currentRoute === 'clients') host.innerHTML = renderClients();
   else if (currentRoute === 'timer') host.innerHTML = renderTimer();
   else if (currentRoute === 'expenses') host.innerHTML = renderExpensesView();
-  else if (currentRoute === 'reconcile') host.innerHTML = renderReconcile();
   else if (currentRoute === 'settings') host.innerHTML = renderSettings();
   renderTimerWidget();
   bindViewEvents();
@@ -4698,7 +4695,36 @@ function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
     </div>`;
 }
 
+/* Finances, VAT and Reconcile used to be three separate top-level nav items
+   for what is fundamentally one workflow. Folded into one page with tabs:
+   each tab's renderer returns { actions, subtitle, body } instead of a full
+   page, so this function owns the one "Finances" heading and tab strip, and
+   nothing underneath repeats a heading of its own. */
+let financeTab = 'overview'; // 'overview' | 'vat' | 'reconcile'
+function goToFinanceTab(tab) { financeTab = tab; setRoute('finances'); }
+
 function renderFinances() {
+  const parts = financeTab === 'vat' ? renderVatViewParts()
+    : financeTab === 'reconcile' ? renderReconcileParts()
+    : renderFinancesOverviewParts();
+  return `
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
+      <h1 class="title-hero">Finances</h1>
+      <div class="page-actions">${parts.actions}</div>
+    </div>
+    <div class="title-hero-sub">${parts.subtitle}</div>
+
+    <div class="tabs" style="margin-top:20px;">
+      <div class="tab ${financeTab === 'overview' ? 'active' : ''}" data-fin-tab="overview">Overview</div>
+      <div class="tab ${financeTab === 'vat' ? 'active' : ''}" data-fin-tab="vat">VAT</div>
+      <div class="tab ${financeTab === 'reconcile' ? 'active' : ''}" data-fin-tab="reconcile">Reconcile</div>
+    </div>
+
+    ${parts.body}
+  `;
+}
+
+function renderFinancesOverviewParts() {
   const ty = taxYearFor(todayISO());
   const today = todayISO();
   const thisMonthYM = ymOf(today);
@@ -4763,18 +4789,16 @@ function renderFinances() {
     ? '<div class="text-sm text-mid" style="margin-top:8px;">FX rates missing for some currencies — values exclude those. Refresh on Dashboard.</div>'
     : '';
 
-  return `
-    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
-      <h1 class="title-hero">Finances</h1>
-      <div class="page-actions">
-        <div class="doc-toggle">
-          <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-basis="cash">Cash</div>
-          <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-basis="accrual">Accrual</div>
-        </div>
-        <button class="btn" id="refresh-fx-fin">Refresh FX</button>
+  return {
+    actions: `
+      <div class="doc-toggle">
+        <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-basis="cash">Cash</div>
+        <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-basis="accrual">Accrual</div>
       </div>
-    </div>
-    <div class="title-hero-sub">SA tax year ${ty.label} · ${financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis'}</div>
+      <button class="btn" id="refresh-fx-fin">Refresh FX</button>
+    `,
+    subtitle: `SA tax year ${ty.label} · ${financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis'}`,
+    body: `
 
     <!-- Headline bento -->
     <div class="bento" style="grid-template-columns:repeat(3,1fr);">
@@ -4904,7 +4928,8 @@ function renderFinances() {
         <div class="text-sm text-mid">Per-month overrides in Settings.</div>
       </div>
     </div>
-  `;
+    `,
+  };
 }
 
 function renderAgingTable(aging) {
@@ -5019,7 +5044,7 @@ function vatPeriodDetail(pStart, pEnd, basis) {
   return { invoices, noVatInvoices, expenses, ...vatForPeriod(pStart, pEnd, basis) };
 }
 
-function renderVatView() {
+function renderVatViewParts() {
   const reg = (activeEntity() && activeEntity().company && activeEntity().company.vat) || '';
   const periods = vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
   const rows = periods.map((p, i) => `
@@ -5037,17 +5062,15 @@ function renderVatView() {
     </tr>
   `).join('');
 
-  return `
-    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
-      <h1 class="title-hero">VAT</h1>
-      <div class="page-actions">
-        <div class="doc-toggle">
-          <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-vat-basis="cash">Cash basis</div>
-          <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-vat-basis="accrual">Invoice basis</div>
-        </div>
+  return {
+    actions: `
+      <div class="doc-toggle">
+        <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-vat-basis="cash">Cash basis</div>
+        <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-vat-basis="accrual">Invoice basis</div>
       </div>
-    </div>
-    <div class="title-hero-sub">${vatCycleLabel()} cycle · ${baseCcy()} @ ${vatRate()}%${reg ? ' · VAT no. ' + escapeHtml(reg) : ''} · ${financesBasis === 'cash' ? 'payments (cash) basis' : 'invoice (accrual) basis'}</div>
+    `,
+    subtitle: `${vatCycleLabel()} cycle · ${baseCcy()} @ ${vatRate()}%${reg ? ' · VAT no. ' + escapeHtml(reg) : ''} · ${financesBasis === 'cash' ? 'payments (cash) basis' : 'invoice (accrual) basis'}`,
+    body: `
 
     <div style="margin-bottom:16px;display:flex;gap:6px;align-items:center;">
       <span class="text-sm text-mid">Show:</span>
@@ -5075,7 +5098,8 @@ function renderVatView() {
     <div class="text-sm text-mid" style="margin-top:12px;">
       <strong>Invoiced with VAT</strong> is the value of your standard-rated supplies excluding the VAT itself, which is the figure a VAT return asks for. <strong>Invoiced without VAT</strong> covers zero-rated, exempt and non-VAT invoices. <strong>Output VAT</strong> is the VAT you charged; <strong>Input VAT</strong> is what you can claim back on ${baseCcy()} expenses marked VAT-inclusive. A <strong>positive net</strong> is payable to the tax authority; a negative net is a refund. Credit notes reduce the period they were issued in. Click a period for the full breakdown including what you paid VAT on, or export it as CSV.
     </div>
-  `;
+    `,
+  };
 }
 
 function openVatPeriodModal(p) {
@@ -6137,18 +6161,14 @@ let reconcileSession = null;
 //   action: 'invoice-paid' | 'expense' | 'internal-transfer' | 'skip' | 'fx-fee'
 //   status: 'auto' | 'suggested' | 'manual' | 'skip' | 'imported'
 
-function renderReconcile() {
+function renderReconcileParts() {
   const archive = (state.statements || []).slice().sort((a, b) => (b.importedAt || '').localeCompare(a.importedAt || ''));
 
   if (!reconcileSession) {
-    return `
-      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
-        <h1 class="title-hero">Reconcile</h1>
-        <div class="page-actions">
-          <button class="btn" id="rec-export-report">Export accountant report</button>
-        </div>
-      </div>
-      <div class="title-hero-sub">Upload a bank statement, auto-match to invoices, create expenses for review.</div>
+    return {
+      actions: `<button class="btn" id="rec-export-report">Export accountant report</button>`,
+      subtitle: `Upload a bank statement, auto-match to invoices, create expenses for review.`,
+      body: `
 
       <div class="card-v2 is-lime" id="rec-drop" style="padding:48px 40px;text-align:center;cursor:pointer;border:2px dashed rgba(15,14,13,0.18);">
         <div style="font-family:'DM Serif Display',serif;font-size:28px;margin-bottom:10px;color:#0F0E0D;">Drop a bank statement here</div>
@@ -6178,7 +6198,8 @@ function renderReconcile() {
           </table>
         </div>
       `}
-    `;
+      `,
+    };
   }
 
   // Active reconcile session — review screen
@@ -6200,15 +6221,13 @@ function renderReconcile() {
   }
   const toApply = s.matches.filter((m) => m.status !== 'imported' && m.action !== 'skip' && m.action !== 'unmatched').length;
 
-  return `
-    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:6px;">
-      <h1 class="title-hero" style="font-size:clamp(32px, 4vw, 48px);">Reconcile · ${escapeHtml(s.fileName)}</h1>
-      <div class="page-actions">
-        <button class="btn btn-ghost" id="rec-cancel">Cancel</button>
-        <button class="btn btn-primary" id="rec-apply">Apply ${toApply} action${toApply === 1 ? '' : 's'}</button>
-      </div>
-    </div>
-    <div class="title-hero-sub">${s.transactions.length} transactions · ${escapeHtml(s.currency || '')} · ${fmtDate(s.periodStart)} – ${fmtDate(s.periodEnd)}</div>
+  return {
+    actions: `
+      <button class="btn btn-ghost" id="rec-cancel">Cancel</button>
+      <button class="btn btn-primary" id="rec-apply">Apply ${toApply} action${toApply === 1 ? '' : 's'}</button>
+    `,
+    subtitle: `${escapeHtml(s.fileName)} · ${s.transactions.length} transactions · ${escapeHtml(s.currency || '')} · ${fmtDate(s.periodStart)} – ${fmtDate(s.periodEnd)}`,
+    body: `
 
     <div class="card-v2 is-dark" style="margin-bottom:24px;padding:24px 28px;">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:18px;">
@@ -6246,7 +6265,8 @@ function renderReconcile() {
     ${renderRecGroup('Unmatched — assign manually', groups.unmatched, 'unmatched')}
     ${renderRecGroup('Already imported (skipped)', groups.imported, 'imported')}
     ${groups.skip.length ? renderRecGroup('Skipped', groups.skip, 'skip') : ''}
-  `;
+    `,
+  };
 }
 
 function renderRecGroup(title, matches, kind) {
@@ -9723,11 +9743,22 @@ function composeReminderEmail(d) {
    SETTINGS
    ============================================================ */
 
-function renderSettings() {
-  const co = state.settings.company || COMPANY_DEFAULT;
-  const banking = state.settings.banking || BANKING_DEFAULT;
-  const saved = state.settings.savedLineItems || [];
+/* Settings was 16 sections in one long scroll. Grouped into four pages by
+   what a user is actually trying to do: describe the business, manage
+   day-to-day money categorisation, handle this device's account and data,
+   or get help. bindSettingsEvents() already null-checks every element it
+   looks up, so it needs no changes here — whichever page is rendered, only
+   that page's controls exist in the DOM and only those get wired up. */
+let settingsPage = 'business'; // 'business' | 'money' | 'account' | 'help'
 
+function renderSettings() {
+  const pages = {
+    business: renderSettingsBusiness,
+    money: renderSettingsMoney,
+    account: renderSettingsAccount,
+    help: renderSettingsHelp,
+  };
+  const body = (pages[settingsPage] || renderSettingsBusiness)();
   return `
     <div class="page-head">
       <div>
@@ -9736,6 +9767,21 @@ function renderSettings() {
       </div>
     </div>
 
+    <div class="tabs" style="margin-top:4px;">
+      <div class="tab ${settingsPage === 'business' ? 'active' : ''}" data-settings-page="business">Business</div>
+      <div class="tab ${settingsPage === 'money' ? 'active' : ''}" data-settings-page="money">Money</div>
+      <div class="tab ${settingsPage === 'account' ? 'active' : ''}" data-settings-page="account">Account</div>
+      <div class="tab ${settingsPage === 'help' ? 'active' : ''}" data-settings-page="help">Help &amp; Security</div>
+    </div>
+
+    ${body}
+  `;
+}
+
+function renderSettingsBusiness() {
+  const co = state.settings.company || COMPANY_DEFAULT;
+  const banking = state.settings.banking || BANKING_DEFAULT;
+  return `
     <div class="settings-section">
       <h3>Brand</h3>
       <div class="text-sm text-mid">Your logo (below) is used on PDFs — invoices and quotes — not in the app itself. Your company name and details live under Company.</div>
@@ -9847,7 +9893,12 @@ function renderSettings() {
         </div>
       `).join('')}
     </div>
+  `;
+}
 
+function renderSettingsMoney() {
+  const saved = state.settings.savedLineItems || [];
+  return `
     <div class="settings-section">
       <h3>Saved line items</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">Quick-insert these from the line-items section of the editor.</div>
@@ -9913,7 +9964,11 @@ function renderSettings() {
         }).join('')}
       </div>
     </div>
+  `;
+}
 
+function renderSettingsAccount() {
+  return `
     ${commercialActive() ? `
     <div class="settings-section">
       <h3>Licence</h3>
@@ -9986,7 +10041,11 @@ function renderSettings() {
         <div class="text-sm text-muted" style="margin-top:8px;line-height:1.5;">Your data lives only in this browser. "Persistent" storage stops the browser from auto-clearing it if your disk gets full — but it can't survive you choosing "Clear browsing data" for this site. The real safety net is a backup: download one regularly, especially before clearing anything.</div>
       </div>
     </div>
+  `;
+}
 
+function renderSettingsHelp() {
+  return `
     <div class="settings-section">
       <h3>Help &amp; FAQ</h3>
       <div class="faq">
@@ -10534,7 +10593,21 @@ function bindViewEvents() {
     });
   });
   document.querySelectorAll('[data-route-link]').forEach((el) => {
-    el.addEventListener('click', () => setRoute(el.dataset.routeLink));
+    el.addEventListener('click', () => {
+      const r = el.dataset.routeLink;
+      // VAT and Reconcile are tabs inside Finances now, not routes of their
+      // own — existing deep links (e.g. the dashboard's "Open VAT tab")
+      // still say data-route-link="vat", so resolve it here rather than
+      // hunting down and editing every link site.
+      if (r === 'vat' || r === 'reconcile') { goToFinanceTab(r); return; }
+      setRoute(r);
+    });
+  });
+  document.querySelectorAll('[data-fin-tab]').forEach((el) => {
+    el.addEventListener('click', () => { financeTab = el.dataset.finTab; render(); });
+  });
+  document.querySelectorAll('[data-settings-page]').forEach((el) => {
+    el.addEventListener('click', () => { settingsPage = el.dataset.settingsPage; render(); });
   });
   document.querySelectorAll('[data-filter]').forEach((el) => {
     el.addEventListener('click', () => { docFilter = el.dataset.filter; render(); });
@@ -10613,7 +10686,7 @@ function bindViewEvents() {
     });
   }
 
-  if (currentRoute === 'vat') {
+  if (currentRoute === 'finances' && financeTab === 'vat') {
     const getPeriods = () => vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
     document.querySelectorAll('[data-vat-basis]').forEach((el) => el.addEventListener('click', () => { financesBasis = el.dataset.vatBasis; render(); }));
     document.querySelectorAll('[data-vat-count]').forEach((el) => el.addEventListener('click', () => { vatPeriodCount = Number(el.dataset.vatCount); render(); }));
@@ -10624,7 +10697,7 @@ function bindViewEvents() {
     document.querySelectorAll('[data-vat-idx]').forEach((row) => row.addEventListener('click', (e) => { if (e.target.closest('button')) return; openIdx(+row.dataset.vatIdx); }));
   }
 
-  if (currentRoute === 'finances') {
+  if (currentRoute === 'finances' && financeTab === 'overview') {
     document.querySelectorAll('[data-basis]').forEach((el) => el.addEventListener('click', () => {
       financesBasis = el.dataset.basis;
       render();
@@ -10659,7 +10732,7 @@ function bindViewEvents() {
     }));
     document.getElementById('exp-add')?.addEventListener('click', () => openExpenseModal());
     document.getElementById('empty-exp-add')?.addEventListener('click', () => openExpenseModal());
-    document.getElementById('empty-exp-reconcile')?.addEventListener('click', () => setRoute('reconcile'));
+    document.getElementById('empty-exp-reconcile')?.addEventListener('click', () => goToFinanceTab('reconcile'));
     document.querySelectorAll('[data-exp-id]').forEach((row) => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-exp-action]')) return;
@@ -10695,7 +10768,7 @@ function bindViewEvents() {
     bindProjectsEvents();
   }
 
-  if (currentRoute === 'reconcile') {
+  if (currentRoute === 'finances' && financeTab === 'reconcile') {
     bindReconcileEvents();
   }
 
