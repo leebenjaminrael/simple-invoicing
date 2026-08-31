@@ -651,6 +651,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   /* App layout */
   #app { display: none; height: 100vh; }
   #app.unlocked { display: grid; grid-template-columns: 200px 1fr; grid-template-rows: auto 1fr; }
+  #app.unlocked > .sidebar, #app.unlocked > .content { grid-row: 2; }
 
   /* Persistent trial/licence notice — a real constraint (can't create new
      documents), not a dismissible nudge, so unlike the toast banners below
@@ -660,6 +661,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
      floating over anything. Amber matches the same #b4690e warning language
      Settings already uses for this exact state. */
   .licence-notice {
+    /* Explicit rows matter: when this notice is display:none — which is every
+       licensed and trialling user, i.e. almost everyone — auto-placement put
+       the sidebar and content into row 1 and left the 1fr row 2 empty, so the
+       sidebar stopped filling the viewport and .sidebar-bottom unpinned. An
+       empty `auto` row collapses to 0, so pinning the rows costs nothing when
+       the notice is hidden and works correctly when it is shown. */
+    grid-row: 1;
     grid-column: 1 / -1;
     align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 16px;
     padding: 10px 20px; text-align: center;
@@ -2788,14 +2796,24 @@ async function cloudList() {
 function cloudCounts(s) {
   try {
     const st = s || state;
-    return {
-      invoices: (st.documents || []).filter((d) => d.type === 'invoice').length,
-      quotes: (st.documents || []).filter((d) => d.type === 'quote').length,
-      credits: (st.documents || []).filter((d) => d.type === 'credit').length,
-      clients: (st.clients || []).length,
-      projects: (st.projects || []).length,
-      expenses: (st.expenses || []).length,
-    };
+    // Must sum across st.entities, not read st.documents/clients/… — those
+    // resolve through the active-entity accessors, so a multi-entity user was
+    // shown only the active business's counts against a blob that contains
+    // every entity. Those figures drive the restore and conflict modals, i.e.
+    // the merge-vs-replace decision, which is the worst place to understate.
+    const ents = (st && st.entities) || [];
+    const out = { invoices: 0, quotes: 0, credits: 0, clients: 0, projects: 0, expenses: 0 };
+    for (const e of ents) {
+      for (const d of (e.documents || [])) {
+        if (d.type === 'invoice') out.invoices++;
+        else if (d.type === 'quote') out.quotes++;
+        else if (d.type === 'credit') out.credits++;
+      }
+      out.clients += (e.clients || []).length;
+      out.projects += (e.projects || []).length;
+      out.expenses += (e.expenses || []).length;
+    }
+    return out;
   } catch (e) { return {}; }
 }
 </script>
@@ -2917,7 +2935,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.35.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.35.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3311,7 +3329,13 @@ function reportLicenceActivated(payload, how) {
     fetch(`${LICENCE_API}/activated`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: payload.e, plan: payload.p || 'pro', expiresAt: payload.exp, via: how }),
+      // Send the signed token so the Worker can verify this activation is real.
+      // Both call sites store the licence before pinging, so it is already here.
+      // Nothing new is disclosed: the server issued this token and holds it.
+      body: JSON.stringify({
+        email: payload.e, plan: payload.p || 'pro', expiresAt: payload.exp, via: how,
+        licence: (() => { try { return localStorage.getItem(LICENCE_KEY_STORE) || ''; } catch (e) { return ''; } })(),
+      }),
     }).then((r) => {
       if (r && r.ok) { try { localStorage.setItem(LICENCE_PING_STORE, stamp); } catch (e) {} }
     }).catch(() => {});
@@ -3337,6 +3361,24 @@ async function applyLicenceFromUrl() {
         <div class="modal" style="max-width:440px;">
           <div class="modal-head"><div class="ttl">That licence link didn't work</div><span class="modal-close" data-close>×</span></div>
           <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.7;">The link may have been broken across two lines by your email app, or it's meant for a different version. Try copying the whole link again — or paste the key straight into <strong>Settings → Licence</strong>.</div></div>
+          <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>
+        </div>
+      </div>`);
+    return false;
+  }
+
+  // Signatures never expire — the expiry lives in the signed payload, so a
+  // valid signature says nothing about whether the licence is still good.
+  // Storing an expired one demotes a mid-trial user straight to 'expired',
+  // blocks creation, and leaves no non-technical way back (Settings only
+  // offers Remove while state === 'licensed'). Settings → Licence already
+  // checks this; the link path must too.
+  if (Date.now() > payload.exp) {
+    showModal(`
+      <div class="modal-overlay" id="modal-overlay">
+        <div class="modal" style="max-width:440px;">
+          <div class="modal-head"><div class="ttl">That licence has expired</div><span class="modal-close" data-close>×</span></div>
+          <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.7;">This link is for a licence that ran out on ${escapeHtml(new Date(payload.exp).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }))}. Nothing on this device has changed. If you've renewed, open the most recent email — it will have a newer link.</div></div>
           <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div>
         </div>
       </div>`);
@@ -3553,6 +3595,25 @@ function inputVatOf(e) {
   if (e.vat) return calcInputVat(e.amount, e.currency, vatRate()); // legacy fallback
   return 0;
 }
+/* Round to the cent, half away from zero (so credit notes round symmetrically).
+   The +1e-9 nudge is deliberate: floats store 1.005 as 1.00499999999999989, so a
+   bare Math.round(v * 100) rounds it DOWN to 1.00. Money must not do that. */
+function round2(n) {
+  const v = Number(n) || 0;
+  if (!isFinite(v)) return 0;
+  return (v < 0 ? -1 : 1) * Math.round(Math.abs(v) * 100 + 1e-9) / 100;
+}
+/* One CSV cell: RFC 4180 quoting, PLUS neutralising spreadsheet formula
+   injection. Not paranoia — an imported bank-statement line becomes an expense
+   description verbatim (see the reconcile apply path), and the payer controls
+   their own EFT reference. A cell opening with = + - @ tab or CR is executed by
+   Excel/Sheets on open, so it would run in the accountant's spreadsheet. */
+function csvCell(v) {
+  if (v == null) return '';
+  let s = String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
 function fmtMoney(n, currency) {
   const num = Number(n) || 0;
   const sym = SYM[currency] || currency + ' ';
@@ -3632,21 +3693,33 @@ function calcLine(line, doc) {
   return (Number(line.qty) || 0) * (Number(line.price) || 0);
 }
 function calcTotals(doc) {
-  const subtotal = doc.lines.reduce((sum, l) => sum + calcLine(l, doc), 0);
+  // Round at the CENT, not at display time. fmtMoney rounds each figure
+  // independently for printing, so unrounded floats here produced invoices
+  // where the printed subtotal + printed VAT did not equal the printed total
+  // (~1.6% of realistic invoices). Every figure below is now the same number
+  // the document prints. VAT is computed per line and summed — deliberate, and
+  // it must stay consistent with the per-line VAT the PDF shows.
   const rate = docHasVat(doc) ? vatRate() / 100 : 0;
+  let subtotal = 0;
   let vat = 0;
-  if (rate > 0) vat = doc.lines.reduce((sum, l) => sum + (l.vat ? calcLine(l, doc) * rate : 0), 0);
-  const total = subtotal + vat;
+  for (const l of doc.lines) {
+    const lineTotal = round2(calcLine(l, doc));
+    subtotal += lineTotal;
+    if (rate > 0 && l.vat) vat += round2(lineTotal * rate);
+  }
+  subtotal = round2(subtotal);
+  vat = round2(vat);
+  const total = round2(subtotal + vat);
   const depositPct = Number(doc.depositPct) || 0;
-  const deposit = total * (depositPct / 100);
+  const deposit = round2(total * (depositPct / 100));
   const due = depositPct > 0 ? deposit : total;
   // When only a deposit is billed, the ex-VAT revenue and output VAT recognised
   // for THIS invoice are the same proportion of the whole. Aggregations
   // (income, profit, VAT, reconcile) use these; the invoice document itself
   // still shows the full subtotal/vat/total with the deposit called out.
   const dueFraction = depositPct > 0 ? depositPct / 100 : 1;
-  const dueSubtotal = subtotal * dueFraction;
-  const dueVat = vat * dueFraction;
+  const dueSubtotal = round2(subtotal * dueFraction);
+  const dueVat = round2(vat * dueFraction);
   return { subtotal, vat, total, deposit, due, depositPct, dueSubtotal, dueVat, dueFraction };
 }
 function statusBadge(d) {
@@ -5250,7 +5323,7 @@ function exportVatPeriod(p) {
   const co = (activeEntity() && activeEntity().company) || {};
   const orgName = co.name || 'Business';
   const lines = [];
-  const csvEsc = (v) => { if (v == null) return ''; const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csvEsc = csvCell;
   const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
 
   row(`${orgName} — VAT ${p.label}`);
@@ -5441,6 +5514,7 @@ function projectDatalist(clientId) {
   return list.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join('');
 }
 function openTimerStartModal() {
+  if (!ensureCanCreate()) return;
   if (!state.clients || !state.clients.length) { toast('Add a client first'); return; }
   const html = `
     <div class="modal-overlay" id="modal-overlay">
@@ -5483,6 +5557,7 @@ function openTimerStartModal() {
 
 /* ---- manual add / edit entry ---- */
 function openTimeEntryModal(entry) {
+  if (!entry && !ensureCanCreate()) return;
   if (!state.clients || !state.clients.length) { toast('Add a client first'); return; }
   const isNew = !entry;
   const e = entry || { id: uid('te-'), clientId: state.clients[0].id, projectId: null, description: '', durationSec: 3600, start: new Date().toISOString(), billable: true };
@@ -5658,12 +5733,15 @@ function bindTimerEvents() {
     expToggle.addEventListener('click', (e) => {
       e.stopPropagation();
       const m = document.getElementById('tm-export-menu');
-      m.style.display = m.style.display === 'none' ? 'block' : 'none';
+      const opening = m.style.display === 'none';
+      m.style.display = opening ? 'block' : 'none';
+      // Arm the outside-click closer HERE, per open. Previously it was armed
+      // once per render with { once: true }, so after the first dismissal it
+      // was spent and the menu became sticky on every subsequent open.
+      if (opening) {
+        document.addEventListener('click', () => { m.style.display = 'none'; }, { once: true });
+      }
     });
-    document.addEventListener('click', () => {
-      const m = document.getElementById('tm-export-menu');
-      if (m) m.style.display = 'none';
-    }, { once: true });
   }
   const expCsv = document.getElementById('tm-export-csv'); if (expCsv) expCsv.addEventListener('click', exportTimeReportCsv);
   const expPdf = document.getElementById('tm-export-pdf'); if (expPdf) expPdf.addEventListener('click', (e) => withBusy(e.currentTarget, 'Building\u2026', exportTimeReportPdf));
@@ -5692,7 +5770,7 @@ async function resumeEntry(e) {
 function exportTimeReportCsv() {
   const entries = filteredTimeEntries();
   if (!entries.length) { toast('No entries to export'); return; }
-  const esc = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const esc = csvCell;
   const lines = [['Date', 'Client', 'Project', 'Task', 'Description', 'Hours', 'Rate', 'Value', 'Billable', 'Status', 'Invoice'].join(',')];
   for (const e of entries) {
     const val = (e.durationSec / 3600) * (Number(e.rate) || 0);
@@ -6035,6 +6113,7 @@ function renderExpensesView() {
 }
 
 function openExpenseModal(expense) {
+  if (!expense && !ensureCanCreate()) return;
   const isNew = !expense;
   expense = expense || {
     id: uid('e-'),
@@ -7553,12 +7632,7 @@ function exportAccountantReport() {
   const periodEnd = todayISO();
 
   const lines = [];
-  const csvEsc = (v) => {
-    if (v == null) return '';
-    const s = String(v);
-    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-    return s;
-  };
+  const csvEsc = csvCell;
   const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
 
   const co = state.settings.company || {};
@@ -7877,6 +7951,7 @@ function renderProjectDetail() {
 }
 
 function openProjectModal(existing) {
+  if (!existing && !ensureCanCreate()) return;
   const p = existing || { name: '', clientId: '', description: '', startDate: '', endDate: '' };
   const clientOpts = ['<option value="">— no client yet —</option>']
     .concat((state.clients || []).map((c) => `<option value="${c.id}" ${c.id === p.clientId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`)).join('');
@@ -8363,6 +8438,7 @@ function renderClients() {
 }
 
 function openClientModal(client) {
+  if (!client && !ensureCanCreate()) return;
   const isNew = !client;
   client = client || { id: uid('cl-'), name: '', addr: '', email: '', contact: '', vat: '' };
   const html = `
@@ -9216,6 +9292,7 @@ function openMarkPaidModal(docId) {
    payment/recurrence state. Used by the list "Duplicate" action, the preview
    modal's Clone button, and recurring-invoice generation. */
 async function cloneDocument(docId, opts = {}) {
+  if (!ensureCanCreate()) return null;   // Duplicate mints a new numbered document
   const d = state.documents.find((x) => x.id === docId);
   if (!d) return null;
   const clone = JSON.parse(JSON.stringify(d));
@@ -9247,6 +9324,9 @@ function dueRecurringInvoices() {
 }
 
 function maybeOfferRecurring() {
+  // Silent check, not ensureCanCreate(): this runs unprompted after unlock, and
+  // firing a paywall modal at someone who just opened the app is not the ask.
+  if (!licenceState.canCreate) return;
   const due = dueRecurringInvoices();
   if (!due.length) return;
   const rows = due.map((d) => {
@@ -9303,6 +9383,7 @@ async function markDocAsSent(docId) {
    source and the new invoice share a billingGroupId so the app knows they're
    slices of one job; the new invoice bills the remaining %. */
 async function createBalanceInvoice(docId) {
+  if (!ensureCanCreate()) return;
   const src = state.documents.find((x) => x.id === docId);
   if (!src || src.type !== 'invoice') return;
   const remaining = groupRemainingPct(src);
@@ -9341,6 +9422,7 @@ async function setQuoteStatus(docId, status) {
    allocates against that invoice. Opens in the editor so wording can be
    trimmed (credit notes usually carry less detail). */
 async function createCreditNoteFromInvoice(invoiceId) {
+  if (!ensureCanCreate()) return;
   const inv = state.documents.find((x) => x.id === invoiceId);
   if (!inv || inv.type !== 'invoice') return;
   const today = todayISO();
@@ -9370,6 +9452,7 @@ async function createCreditNoteFromInvoice(invoiceId) {
 }
 
 async function convertQuoteToInvoice(quoteId) {
+  if (!ensureCanCreate()) return;
   const q = state.documents.find((x) => x.id === quoteId);
   if (!q || q.type !== 'quote') return;
   const today = todayISO();
@@ -12691,7 +12774,13 @@ async function openCloudRestoreModal() {
   const sc = latest.counts || {};
   const lc = cloudCounts(state);
   const when = latest.createdAt ? new Date(latest.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown';
-  const deviceHasData = (lc.invoices + lc.quotes + lc.clients + lc.projects + lc.expenses) > 0;
+  // Must not use cloudCounts here: it omits credits, and counts no timeEntries,
+  // tasks, statements or settings at all — so a device holding a weekend of
+  // tracked time read as "empty" and took the SILENT replace branch below,
+  // destroying it with no confirm and no undo. vaultIsPristine asks the same
+  // question sync already asks, across every entity, and keeps working as new
+  // arrays are added.
+  const deviceHasData = !vaultIsPristine(state);
   const row = (label, a, b) => `<tr><td>${label}</td><td class="mono" style="text-align:right;">${a == null ? '·' : a}</td><td class="mono" style="text-align:right;">${b == null ? '·' : b}</td></tr>`;
 
   showModal(`
