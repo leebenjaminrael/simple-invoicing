@@ -2935,7 +2935,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.35.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.35.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -9145,6 +9145,7 @@ function openDocPreview(docId) {
               <div class="bill-to">
                 <div class="l">${isInv ? 'Bill to' : d.type === 'credit' ? 'Credit to' : 'Quoted for'}</div>
                 <div class="name">${escapeHtml(c.name)}</div>
+                ${c.contact ? `<div class="addr">${escapeHtml(c.contact)}</div>` : ''}
                 <div class="addr">${escapeHtml(c.addr || '')}</div>
                 ${c.vat ? `<div class="addr">VAT: ${escapeHtml(c.vat)}</div>` : ''}
                 ${d.projectTitle ? `<div class="project">${escapeHtml(d.projectTitle)}</div>` : ''}
@@ -9603,6 +9604,9 @@ async function buildPdfDoc(d) {
   doc.setFontSize(9);
   doc.setTextColor(92, 91, 87);
   let bly = y + 28;
+  // Contact person sits directly under the company name, above the address —
+  // same 9pt grey as the address, so the company name stays the emphasis.
+  if (c.contact) { doc.text(c.contact, M, bly); bly += 11; }
   for (const ln of (c.addr || '').split('\n')) {
     doc.text(ln, M, bly);
     bly += 11;
