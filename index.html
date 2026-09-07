@@ -2640,6 +2640,13 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { verifyLicence, licenceStatusFrom, TRIAL_DAYS };
 }
 </script>
+<script>/* Simpl wordmark, inlined as a data URI — the app ships as one self-contained
+   HTML file, so it cannot reference an external image. 296x108 with alpha; the
+   high-res version deliberately, so it stays crisp when a PDF is printed.
+   Used in the ""Created with Simpl"" footer on documents. */
+const BRAND_MARK_PNG = 'data:image/png;base64,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';
+const BRAND_MARK_W = 296, BRAND_MARK_H = 108;
+</script>
 <script>/* ============================================================
    ENCRYPTED SERVER BACKUP — transport
 
@@ -2935,7 +2942,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.35.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.35.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3406,11 +3413,38 @@ async function applyLicenceFromUrl() {
 }
 
 // Should the "Created with <brand>" line appear on documents?
+/* "Created with [Simpl]" centred on one line, the wordmark as an image rather
+   than the word, with a clickable link over the whole group. Shared by the
+   document PDF and the timer report so the two can't drift apart. */
+function drawBrandFooter(doc, pageW, y) {
+  try {
+    const label = 'Created with ';
+    const h = 7;                                   // cap height that sits on an 8pt line
+    const w = h * (BRAND_MARK_W / BRAND_MARK_H);
+    doc.setFontSize(8);
+    doc.setTextColor(158, 157, 153);
+    const labelW = doc.getTextWidth(label);
+    const startX = (pageW - (labelW + w)) / 2;
+    doc.text(label, startX, y);
+    doc.addImage(BRAND_MARK_PNG, 'PNG', startX + labelW, y - h + 1.5, w, h);
+    // Link covers the words and the mark, so either half is clickable.
+    doc.link(startX, y - h, labelW + w, h + 3, { url: APP_BRAND_URL });
+  } catch (e) {
+    // Never let branding break a document the user actually needs.
+    try {
+      doc.setFontSize(8); doc.setTextColor(158, 157, 153);
+      doc.text(`Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}`, pageW / 2, y, { align: 'center' });
+    } catch (e2) {}
+  }
+}
+
 function brandingOnDocuments() {
   if (!commercialActive()) return false;
   if (!licenceState.showBranding) {
-    // Licensed users may opt IN to keep it on (referral rewards); default off.
-    try { return localStorage.getItem(BRANDING_OPT_IN_STORE) === '1'; } catch (e) { return false; }
+    // Licensed users keep it ON by default and may opt OUT in Settings. Reading
+    // !== '0' rather than === '1' matters: it leaves anyone who has already
+    // switched it off switched off, and flips only those who never chose.
+    try { return localStorage.getItem(BRANDING_OPT_IN_STORE) !== '0'; } catch (e) { return true; }
   }
   return true;   // trial / expired always carries it
 }
@@ -5951,13 +5985,14 @@ async function exportTimeReportPdf() {
 
   // Footer — identical branding line to the invoice PDF: registered office,
   // and the same "Created with Simpl" line under the same opt-in rule.
-  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`
-    + (brandingOnDocuments() ? `  ·  Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}` : '');
+  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`;
   doc.setFontSize(8);
   doc.setTextColor(158, 157, 153);
   const footerLines = doc.splitTextToSize(footer, PAGE_W - 2 * M);
-  const footY = doc.internal.pageSize.getHeight() - M;
+  const brand = brandingOnDocuments();
+  const footY = doc.internal.pageSize.getHeight() - M - (brand ? 12 : 0);
   doc.text(footerLines, PAGE_W / 2, footY, { align: 'center' });
+  if (brand) drawBrandFooter(doc, PAGE_W, footY + 12);
 
   doc.save(`time-report-${todayISO()}.pdf`);
   toast('PDF downloaded');
@@ -9207,7 +9242,7 @@ function openDocPreview(docId) {
 
             <div class="footer">
               Registered Office: Attention: ${escapeHtml(co.attention || '')}, ${escapeHtml(co.address || '')}.
-              ${brandingOnDocuments() ? `<br/>Created with ${escapeHtml(APP_BRAND_NAME)} · ${escapeHtml(APP_BRAND_URL.replace(/^https?:\/\//, ''))}` : ''}
+              ${brandingOnDocuments() ? `<br/><span style="display:inline-flex;align-items:center;gap:4px;">Created with <a href="${escapeHtml(APP_BRAND_URL)}" target="_blank" rel="noopener"><img src="${BRAND_MARK_PNG}" alt="${escapeHtml(APP_BRAND_NAME)}" style="height:11px;width:auto;vertical-align:-1px;" /></a></span>` : ''}
             </div>
           </div>
         </div>
@@ -9741,14 +9776,18 @@ async function buildPdfDoc(d) {
     y = drawBlock(doc, M, PAGE_W, y, 'PAYMENT DETAILS', bank.details);
   }
 
-  // Footer registered office (+ optional "Created with <brand>" marketing line)
-  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`
-    + (brandingOnDocuments() ? `  ·  Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}` : '');
+  // Footer: registered office, then the "Created with <logo>" attribution on its
+  // own line beneath — the wordmark rather than the word, and clickable.
+  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`;
   doc.setFontSize(8);
   doc.setTextColor(158, 157, 153);
   const footerLines = doc.splitTextToSize(footer, PAGE_W - 2 * M);
-  const footY = doc.internal.pageSize.getHeight() - M;
+  const brand = brandingOnDocuments();
+  // Reserve a line for the attribution so it sits BELOW the registered office
+  // without either running off the bottom of the page.
+  const footY = doc.internal.pageSize.getHeight() - M - (brand ? 12 : 0);
   doc.text(footerLines, PAGE_W / 2, footY, { align: 'center' });
+  if (brand) drawBrandFooter(doc, PAGE_W, footY + 12);
 
   const filename = `${docNumber(d)}-${(c.name || 'Client').replace(/[^a-z0-9]+/gi, '-')}.pdf`;
   return { doc, filename };
@@ -10114,7 +10153,7 @@ function renderSettingsAccount() {
       ${(() => {
         const s = licenceState;
         if (s.state === 'licensed') return `<div class="text-sm" style="color:#2f7d32;"><strong>Licensed</strong> — ${escapeHtml(s.email || '')} · ${s.plan || 'pro'} · renews ${fmtDate(new Date(s.expiry).toISOString().slice(0, 10))} (${s.daysLeft} days)</div>`;
-        if (s.state === 'trial') return `<div class="text-sm" style="color:#b4690e;"><strong>Free trial</strong> — ${s.daysLeft} day${s.daysLeft === 1 ? '' : 's'} left. Documents carry a small "Created with ${escapeHtml(APP_BRAND_NAME)}" line until you add a licence.</div>`;
+        if (s.state === 'trial') return `<div class="text-sm" style="color:#b4690e;"><strong>Free trial</strong> — ${s.daysLeft} day${s.daysLeft === 1 ? '' : 's'} left. Documents carry a small "Created with ${escapeHtml(APP_BRAND_NAME)}" line — it stays after you licence, and you can switch it off in Settings then.</div>`;
         if (s.state === 'trial-expired') return `<div class="text-sm" style="color:#b4690e;"><strong>Trial ended</strong> — your data is safe and fully exportable; add a licence to create new documents.</div>`;
         if (s.state === 'expired') return `<div class="text-sm" style="color:#b4690e;"><strong>Licence expired</strong> (${escapeHtml(s.email || '')}) — renew to create new documents. Existing data stays available and exportable.</div>`;
         return '';
@@ -12907,6 +12946,9 @@ function openRecoverySetupModal(opts = {}) {
           </div>
 
           <div style="border-top:1px solid var(--border);padding-top:14px;">
+            <div class="phrase-warn" style="margin:0 0 12px;">
+              <strong>This last step is what saves the phrase.</strong> Copying, downloading or printing only puts the words somewhere — nothing is stored on your vault until you confirm below. If you close now, these 12 words stop working and you'll be given a <strong>different</strong> set next time, so throw away any copy you just made.
+            </div>
             <div class="text-sm text-mid" style="margin-bottom:10px;">Confirm you've saved it — type the words below:</div>
             <div class="form-grid">
               ${quizIdx.map((i) => `<div class="field"><label>Word ${i + 1}</label><input data-rp-quiz="${i}" autocomplete="off" spellcheck="false" /></div>`).join('')}
