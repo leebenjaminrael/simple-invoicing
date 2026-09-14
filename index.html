@@ -2942,7 +2942,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.35.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.35.2.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7100,13 +7100,64 @@ function parseWithProfile(rows, fileName, profile) {
   return result;
 }
 
+/* "Is this money moving between the user's OWN accounts?" — answered from the
+   user's own company and banking details, never from constants. It used to be
+   Lee's business name hardcoded, plus `payeeAccount.includes(FNB_ACCOUNT_REF)`
+   — and in the public build that constant is '', which every string includes.
+   So for every customer but Lee, each Wise "Sent money to …" row carrying a
+   payee account number (i.e. every subcontractor paid) was silently classed as
+   an internal transfer and never offered as an expense. */
+function ownAccountIdentity() {
+  const names = [];
+  const accounts = [];
+  const push = (v) => { if (v && names.indexOf(v) === -1) names.push(v); };
+  const addName = (n) => {
+    const v = String(n || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (v.length >= 5) push(v);                                    // short trading names ("GSI") match too much
+    // Banks truncate and drop the legal form, so "Mokoena Creative (Pty) Ltd"
+    // arrives as "MOKOENA CREATIVE". Match the core name too — but only when it
+    // is still distinctive: a bare "Design" left over from "Design (Pty) Ltd"
+    // would claim every payee with "design" in their name as the user's own.
+    const core = v.replace(/\((pty|proprietary)\)|\b(pty|proprietary|ltd|limited|cc|inc|llc|plc|npc|soc)\b|[.,()]/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    if (core !== v && (core.split(' ').length >= 2 || core.length >= 8)) push(core);
+  };
+  const addAccount = (a) => {
+    const v = String(a || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (v.length >= 6 && accounts.indexOf(v) === -1) accounts.push(v);
+  };
+  try {
+    const co = (state && state.settings && state.settings.company) || {};
+    addName(co.name);
+    addName(co.tradingName);
+    for (const b of ((state && state.settings && state.settings.banking) || [])) {
+      const text = String(b.details || '');
+      if (text.includes('[')) continue;                                      // untouched placeholder
+      for (const m of text.match(/\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,32}\b/gi) || []) addAccount(m);   // IBAN
+      for (const m of text.match(/\d[\d \-]{4,}\d/g) || []) addAccount(m);                 // account numbers
+    }
+  } catch (e) {}
+  if (typeof FNB_ACCOUNT_REF === 'string') addAccount(FNB_ACCOUNT_REF);    // '' is ignored by the length guard
+  return { names, accounts };
+}
+function isOwnName(text, id) {
+  const t = String(text || '').toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return false;
+  return (id || ownAccountIdentity()).names.some((n) => t.includes(n));
+}
+function isOwnAccount(acct, id) {
+  const a = String(acct || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (a.length < 6) return false;
+  return (id || ownAccountIdentity()).accounts.some((x) => a.includes(x) || x.includes(a));
+}
+
 // Generic classifier — bank-agnostic patterns
 function classifyGenericTx(desc, amount) {
   if (!desc) return amount > 0 ? 'in' : 'out';
   const d = desc.toLowerCase();
   if (/wise charges|fee[-\s]|^#service fees|^#monthly account fee|^#archive|int on debit balance|service fee|bank charge/i.test(d)) return 'fee';
   if (/inward swift.*wise|^fnb app transfer (from|to)|^internet trf (to|from) loan/i.test(d)) return 'internal';
-  if (/seed web design cc/i.test(d) && amount < 0) return 'internal';
+  if (amount < 0 && isOwnName(d)) return 'internal';
   if (amount > 0) return 'in';
   return 'out';
 }
@@ -7279,15 +7330,13 @@ function parseWiseActivityCsv(rows, fileName) {
       });
     } else if (direction === 'OUT') {
       // Money leaving a Wise balance
-      const isInternalTransfer = /seed web design|seed\s*web/i.test(targetName);
+      const isInternalTransfer = isOwnName(targetName);
       transactions.push({
         id: txId,
         date,
         amount: -sourceAmount,
         currency: sourceCurrency,
-        description: isInternalTransfer
-          ? `Sent money to Seed Web Design CC`
-          : `Sent money to ${targetName}`,
+        description: `Sent money to ${targetName}`,
         reference,
         payerName: sourceName,
         payeeName: targetName,
@@ -7395,6 +7444,7 @@ function buildMatches(parsedStatement) {
 
   // Track invoices already matched in this session to avoid double-matching
   const matchedInvoiceIds = new Set();
+  const ownId = ownAccountIdentity();   // once per statement, not per row
   // Existing invoices already paid have status==='paid'
 
   const unpaidInvoices = state.documents.filter((d) => d.type === 'invoice' && d.status !== 'paid');
@@ -7439,7 +7489,7 @@ function buildMatches(parsedStatement) {
         continue;
       }
       // Internal transfer to FNB (own ZAR account)
-      if (lcDesc.includes('seed web design cc') || (tx.payeeAccount && tx.payeeAccount.includes(FNB_ACCOUNT_REF))) {
+      if (isOwnName(lcDesc, ownId) || isOwnAccount(tx.payeeAccount, ownId)) {
         matches.push({ id: newMatch(), tx, status: 'auto', action: 'internal-transfer' });
         continue;
       }
