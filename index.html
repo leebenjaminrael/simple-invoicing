@@ -2942,7 +2942,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.35.2.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.36.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8438,7 +8438,7 @@ function renderDocTable(docs, opts = {}) {
     }
     return `
       <tr class="row-clickable" data-row-id="${d.id}">
-        <td class="num" data-label="Number">${num}${d.repeatMonthly ? ' <span title="Repeats monthly" style="opacity:0.6;">↻</span>' : ''}</td>
+        <td class="num" data-label="Number">${num}${d.repeatMonthly ? ` <span title="Repeats monthly on day ${effectiveRepeatDay(d)}" style="opacity:0.6;">↻</span>` : ''}</td>
         <td class="pri">${escapeHtml(clientName(d.clientId))}</td>
         <td data-label="Project">${escapeHtml(d.projectTitle || '—')}</td>
         <td data-label="Date">${fmtDate(d.date)}</td>
@@ -8800,7 +8800,15 @@ function renderDocEditor() {
             <input type="checkbox" id="ed-repeat-toggle" ${d.repeatMonthly ? 'checked' : ''} />
             <span>Repeat monthly</span>
           </label>
-          ${d.repeatMonthly ? `<div class="text-sm text-muted" style="margin-top:4px;">Each month, on unlock, you'll be offered a fresh draft of this invoice.</div>` : ''}
+          ${d.repeatMonthly ? `
+          <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;flex-wrap:wrap;">
+            <span>On day</span>
+            <select id="ed-repeat-day" style="width:auto;">
+              ${Array.from({ length: 31 }, (_, i) => i + 1).map((n) => `<option value="${n}" ${n === effectiveRepeatDay(d) ? 'selected' : ''}>${n}</option>`).join('')}
+            </select>
+            <span>of each month</span>
+          </div>
+          <div class="text-sm text-muted" style="margin-top:4px;">Next draft: <strong>${fmtDate(nextRecurrenceDate(d))}</strong>. You'll be offered it when you open the app on or after that date${effectiveRepeatDay(d) > 28 ? ' — in shorter months it lands on the last day' : ''}.</div>` : ''}
         </div>` : ''}
       </div>
     </div>
@@ -8943,6 +8951,13 @@ function bindEditorEvents() {
   if (vatToggle) vatToggle.addEventListener('change', () => {
     editingDoc.chargeVat = vatToggle.checked;   // explicit per-document override
     renderDocEditor();                          // re-render to show/hide VAT column + update totals
+    scheduleAutoSave();
+  });
+
+  const repeatDaySel = host.querySelector('#ed-repeat-day');
+  if (repeatDaySel) repeatDaySel.addEventListener('change', () => {
+    editingDoc.repeatDay = Number(repeatDaySel.value);
+    renderDocEditor();                          // refresh the "Next draft" date
     scheduleAutoSave();
   });
 
@@ -9401,12 +9416,57 @@ async function cloneDocument(docId, opts = {}) {
 }
 
 /* ----- Recurring invoices -----
-   An invoice with repeatMonthly=true is the live end of its series. When a new
-   month starts, we offer to generate a fresh draft; the flag moves to the new
-   draft so each series only ever has one active recurring invoice. */
-function dueRecurringInvoices() {
-  const curYM = todayISO().slice(0, 7);
-  return state.documents.filter((d) => d.type === 'invoice' && d.repeatMonthly && (d.date || '').slice(0, 7) < curYM);
+   An invoice with repeatMonthly=true is the live end of its series. The flag
+   moves to each new draft, so a series only ever has one active invoice.
+
+   Each series repeats on a day of the month: `repeatDay` if the user picked
+   one, otherwise the day of the invoice's own date. It used to offer a draft
+   the moment a new calendar month began and date it whenever the app was
+   opened, so a series started on the 15th drifted to the 1st or 3rd.
+
+   The day is stored on the series and copied to every draft, rather than
+   re-read from each draft's date — otherwise a series on the 31st would
+   land on 28 Feb and then stay on the 28th for ever. */
+function effectiveRepeatDay(d) {
+  const n = Number(d && d.repeatDay);
+  if (n >= 1 && n <= 31) return Math.floor(n);
+  const day = Number(String((d && d.date) || '').slice(8, 10));
+  return day >= 1 && day <= 31 ? day : 1;
+}
+// Year/month may overflow (month0 = 12 is January next year); the day is
+// clamped to the month's length, so the 31st becomes 28/29 Feb or 30 Apr.
+function monthDate(year, month0, day) {
+  const y = year + Math.floor(month0 / 12);
+  const m = ((month0 % 12) + 12) % 12;
+  const last = new Date(y, m + 1, 0).getDate();
+  return `${y}-${String(m + 1).padStart(2, '0')}-${String(Math.min(day, last)).padStart(2, '0')}`;
+}
+// The occurrence in the month after `afterISO` (default: the invoice's date).
+function nextRecurrenceDate(d, afterISO) {
+  const base = afterISO || (d && d.date) || todayISO();
+  return monthDate(Number(base.slice(0, 4)), Number(base.slice(5, 7)), effectiveRepeatDay(d));
+}
+// Every occurrence due on or before `today`. Usually zero or one; more when the
+// app has not been opened for a while, so each missed month gets its own
+// invoice dated correctly. Capped so a years-old series cannot flood drafts.
+function recurrenceDatesDue(d, today) {
+  const t = today || todayISO();
+  const dates = [];
+  let cur = d && d.date;
+  if (!cur) return dates;
+  for (let i = 0; i < 36; i++) {
+    const next = nextRecurrenceDate(d, cur);
+    if (next > t) break;
+    dates.push(next);
+    cur = next;
+  }
+  return dates;
+}
+function dueRecurringInvoices(today) {
+  return state.documents
+    .filter((d) => d.type === 'invoice' && d.repeatMonthly)
+    .map((d) => ({ doc: d, dates: recurrenceDatesDue(d, today) }))
+    .filter((x) => x.dates.length);
 }
 
 function maybeOfferRecurring() {
@@ -9415,29 +9475,31 @@ function maybeOfferRecurring() {
   if (!licenceState.canCreate) return;
   const due = dueRecurringInvoices();
   if (!due.length) return;
-  const rows = due.map((d) => {
+  const count = due.reduce((n, x) => n + x.dates.length, 0);
+  const rows = due.map(({ doc: d, dates }) => {
     const t = calcTotals(d);
     return `
       <div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);">
-        <span>${escapeHtml(clientName(d.clientId))}${d.projectTitle ? ' — ' + escapeHtml(d.projectTitle) : ''}</span>
-        <span class="nowrap">${fmtMoney(t.due, d.currency)}</span>
+        <span>${escapeHtml(clientName(d.clientId))}${d.projectTitle ? ' — ' + escapeHtml(d.projectTitle) : ''}
+          <span class="text-sm text-muted" style="display:block;">${dates.map((x) => fmtDate(x)).join(', ')}</span></span>
+        <span class="nowrap">${fmtMoney(t.due, d.currency)}${dates.length > 1 ? ` × ${dates.length}` : ''}</span>
       </div>`;
   }).join('');
   const html = `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:460px;">
         <div class="modal-head">
-          <div class="ttl">Recurring invoice${due.length === 1 ? '' : 's'} due</div>
+          <div class="ttl">Recurring invoice${count === 1 ? '' : 's'} due</div>
           <span class="modal-close" data-close>×</span>
         </div>
         <div class="modal-body">
-          <div class="text-sm text-mid" style="margin-bottom:8px;">A new month has started — create fresh draft${due.length === 1 ? '' : 's'} for:</div>
+          <div class="text-sm text-mid" style="margin-bottom:8px;">These have reached their repeat date — create draft${count === 1 ? '' : 's'} for:</div>
           ${rows}
           <div class="text-sm text-muted" style="margin-top:10px;">Drafts are created for you to review and send — nothing goes out automatically.</div>
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Not now</button>
-          <button class="btn btn-primary" id="rec-gen-all">Create draft${due.length === 1 ? '' : 's'}</button>
+          <button class="btn btn-primary" id="rec-gen-all">Create draft${count === 1 ? '' : 's'}</button>
         </div>
       </div>
     </div>
@@ -9445,9 +9507,25 @@ function maybeOfferRecurring() {
   showModal(html);
   document.getElementById('rec-gen-all').addEventListener('click', async () => {
     let created = 0;
-    for (const d of due) {
-      const c = await cloneDocument(d.id, { repeatMonthly: true }); // flag moves to the new draft
-      if (c) { d.repeatMonthly = false; created++; }
+    for (const { doc: d, dates } of due) {
+      // Keep the series' payment terms rather than cloneDocument's flat 7 days.
+      const gap = Math.round((new Date((d.dueDate || '') + 'T00:00:00') - new Date(d.date + 'T00:00:00')) / 86400000);
+      const termDays = Number.isFinite(gap) && gap >= 0 ? gap : 7;
+      const day = effectiveRepeatDay(d);   // freeze the day onto the series
+      let last = null;
+      for (let i = 0; i < dates.length; i++) {
+        const isLatest = i === dates.length - 1;
+        const c = await cloneDocument(d.id, {
+          date: dates[i],
+          dueDate: addDays(dates[i], termDays),
+          repeatDay: day,
+          repeatMonthly: isLatest,        // only the newest draft carries the series on
+        });
+        if (!c) break;                    // paywall or missing source — stop, don't half-move the flag
+        last = c;
+        created++;
+      }
+      if (last && last.repeatMonthly) d.repeatMonthly = false;
     }
     await saveState();
     closeModal();
