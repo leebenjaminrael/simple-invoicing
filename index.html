@@ -2947,7 +2947,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.36.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.36.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -6503,8 +6503,8 @@ function renderRecGroup(title, matches, kind) {
                 subControl = `<select data-rec-doc="${m.id}" style="max-width:240px;">${docOpts || '<option>No invoices</option>'}</select>`;
               } else if (m.action === 'expense' || m.action === 'fx-fee') {
                 const canVat = m.action === 'expense' && m.tx.currency === baseCcy() && vatRate() > 0;
-                const vatCtl = canVat ? `<label class="checkbox" style="white-space:nowrap;" title="Claim input VAT"><input type="checkbox" data-rec-vat="${m.id}" ${m.vat ? 'checked' : ''} /><span class="text-sm">VAT</span></label>` : '';
-                subControl = `<select data-rec-cat="${m.id}" style="max-width:190px;">${cats.map((c) => `<option ${c === m.category ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>${vatCtl}<button class="btn btn-sm btn-ghost" data-rec-like="${m.id}" title="Select all similar transactions">like</button>`;
+                const vatCtl = canVat ? `<label class="checkbox" style="white-space:nowrap;display:inline-flex;align-items:center;gap:4px;margin:0;" title="Claim input VAT"><input type="checkbox" data-rec-vat="${m.id}" ${m.vat ? 'checked' : ''} style="margin:0;" /><span class="text-sm">VAT</span></label>` : '';
+                subControl = `<select data-rec-cat="${m.id}" style="max-width:190px;">${cats.map((c) => `<option ${c === m.category ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>${vatCtl}<button class="btn btn-sm btn-ghost" data-rec-like="${m.id}" title="Tick every transaction that looks like this one, so you can set them all at once" style="white-space:nowrap;flex:0 0 auto;">Select similar</button>`;
               } else if (m.action === 'internal-transfer') {
                 subControl = `<span class="text-mid text-sm">Logged, no effect</span>`;
               } else if (m.action === 'skip') {
@@ -6518,7 +6518,7 @@ function renderRecGroup(title, matches, kind) {
                   <td><input type="checkbox" data-rec-sel="${m.id}" ${m._sel ? 'checked' : ''} /></td>
                   <td>${fmtDate(tx.date)}</td>
                   <td><div style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(tx.description || '')}">${escapeHtml(tx.description || '')}</div>${tx.reference ? `<div class="text-sm text-mid">Ref: ${escapeHtml(tx.reference)}${rememberedTag}</div>` : (rememberedTag ? `<div class="text-sm">${rememberedTag}</div>` : '')}</td>
-                  <td class="amount" style="color:${tx.amount >= 0 ? 'var(--accent)' : 'var(--dark)'};">${sign}${fmtMoney(Math.abs(tx.amount), tx.currency)}</td>
+                  <td class="amount" style="color:${tx.amount >= 0 ? 'var(--accent)' : 'var(--text)'};">${sign}${fmtMoney(Math.abs(tx.amount), tx.currency)}</td>
                   <td><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${actionSelect}${subControl}</div></td>
                 </tr>
               `;
