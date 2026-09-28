@@ -2947,7 +2947,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.36.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.36.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -6850,6 +6850,18 @@ const CUR_SYMBOL = { 'R': 'ZAR', '$': 'USD', '€': 'EUR', '£': 'GBP' };
 // "R2 023.48", "-1,234.56", "(89.00)", "55.20 Dr"). Requires 2 decimal places
 // so it never matches card numbers, references or dates. Returns { val (>=0),
 // neg, cur } or null.
+/* A PDF table cell is money only if the WHOLE cell is a money value — not if a
+   number happens to appear inside it. parseMoney matches a decimal anywhere,
+   which is right for "R 1,234.56 Cr" but wrong for a description cell like
+   "POS Purchase 5.00 Buzzsprout Inv": that counted as an amount column, so the
+   real amount and balance were misread, the running balance never reconciled,
+   and the statement was rejected as low-confidence. */
+function pdfMoneyCell(s) {
+  if (s == null) return null;
+  const t = String(s).trim();
+  if (!/^[-(]?\s*[R$€£]?\s*\d[\d ,]*\.\d{2}\s*\)?\s*(cr|dr)?$/i.test(t)) return null;
+  return parseMoney(t);
+}
 function parseMoney(s) {
   if (s == null) return null;
   s = String(s).trim();
@@ -6934,8 +6946,12 @@ function parsePdfStatementTable(lines, fileName) {
     const t = l.items.map((i) => i.str).join(' ');
     if (!OPENING_RE.test(t)) continue;
     for (let k = 0; k < l.items.length; k++) {
-      const p = parseMoney(l.items[k].str);
+      const p = pdfMoneyCell(l.items[k].str);
       if (p) { const neg = p.neg || crdrAfter(l.items, k) === 'DR'; openingBal = neg ? -p.val : p.val; break; }
+    }
+    if (openingBal === null) {   // opening balance packed into one text cell
+      const p = parseMoney(t);
+      if (p) openingBal = p.neg ? -p.val : p.val;
     }
     if (openingBal !== null) break;
   }
@@ -6964,7 +6980,7 @@ function parsePdfStatementTable(lines, fileName) {
     }
     const monies = [];
     for (let k = 1; k < items.length; k++) {
-      const p = parseMoney(items[k].str);
+      const p = pdfMoneyCell(items[k].str);
       if (p) { monies.push({ k, ...p }); if (p.cur) curCount[p.cur] = (curCount[p.cur] || 0) + 1; }
     }
     if (!monies.length) continue;
@@ -6987,7 +7003,20 @@ function parsePdfStatementTable(lines, fileName) {
   for (const r of raw) {
     let amtVal, balMag = null, sign = null;
     if (balanceMode && r.monies.length >= 2) {
-      const amt = r.monies[r.monies.length - 2], bal = r.monies[r.monies.length - 1];
+      /* Which two cells are amount and balance? FNB Gold Business adds a third
+         "Charges" column (6,000.00 | 8,408.15 Cr | 15.00), so the last two are
+         balance and bank charge — taking them made the balance 15.00. Prefer
+         the adjacent pair that actually reconciles against the running balance;
+         fall back to the first two, which is amount-then-balance order. */
+      let amt = null, bal = null;
+      if (prevBal !== null) {
+        for (let i = 0; i + 1 < r.monies.length; i++) {
+          const a = r.monies[i], b = r.monies[i + 1];
+          if (Math.abs(Math.abs(prevBal + a.val) - b.val) < 0.05 ||
+              Math.abs(Math.abs(prevBal - a.val) - b.val) < 0.05) { amt = a; bal = b; break; }
+        }
+      }
+      if (!amt) { amt = r.monies[0]; bal = r.monies[1]; }
       amtVal = amt.val; balMag = bal.val;
       const sfx = crdrAfter(r.items, bal.k);
       if (prevBal !== null) {
@@ -11232,6 +11261,10 @@ async function handleStatementFile(file) {
     finishStatementParse(parsed);
   } catch (e) {
     if (e && e.unknownFormat) {
+      // A PDF has no real columns to map — pdf.js gives text positions, so the
+      // mapper shows invented headers like "Date Description" and truncated
+      // samples, and there is no sane answer to give it. Explain instead.
+      if (isPdf) { openPdfImportHelp(file.name, e.rows); return; }
       openColumnMapper(e.rows, e.fileName);
       return;
     }
@@ -11241,6 +11274,36 @@ async function handleStatementFile(file) {
     }
     alert('Could not read statement: ' + e.message);
   }
+}
+
+/* Shown when a PDF statement cannot be read confidently. The old behaviour —
+   dropping the user into the CSV column mapper — was baffling: it asked which
+   column was which, about a document that has no columns. */
+function openPdfImportHelp(fileName, rows) {
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><div class="ttl">Couldn't read this PDF</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.7;">
+            <strong>${escapeHtml(fileName)}</strong> opened fine, but its layout doesn't match anything ${escapeHtml(APP_BRAND_NAME)} recognises, so the figures couldn't be trusted. Nothing has been imported.
+          </div>
+          <div class="text-sm text-mid" style="line-height:1.7;margin-top:12px;">
+            <strong>The quickest fix:</strong> download the same period as <strong>CSV</strong> from your online banking instead — look for "Download" or "Export" on the transactions screen. CSV imports are far more reliable, and ${escapeHtml(APP_BRAND_NAME)} remembers your bank's layout after the first time.
+          </div>
+          <div class="text-sm text-muted" style="line-height:1.6;margin-top:12px;">
+            If CSV isn't available, you can try mapping the text by hand — it works for simple layouts, but a PDF has no real columns, so it often can't be done accurately.
+          </div>
+        </div>
+        <div class="modal-foot">
+          ${rows && rows.length ? '<button class="btn" id="pdf-help-map" style="margin-right:auto;">Try mapping by hand</button>' : ''}
+          <button class="btn btn-primary" data-close>OK</button>
+        </div>
+      </div>
+    </div>
+  `);
+  const m = document.getElementById('pdf-help-map');
+  if (m) m.addEventListener('click', () => { closeModal(); openColumnMapper(rows, fileName); });
 }
 
 function finishStatementParse(parsed) {
@@ -11293,7 +11356,7 @@ function openColumnMapper(rows, fileName) {
       return `
         <tr>
           <td style="font-family:'DM Mono',monospace;font-size:12px;padding:8px 12px;">${escapeHtml((h || '').toString())}</td>
-          ${sample.map((r) => `<td style="font-size:11px;color:var(--text-mid);padding:6px 12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(((r || [])[i] || '').toString())}</td>`).join('')}
+          ${sample.map((r) => `<td style="font-size:11px;color:var(--text-mid);padding:6px 12px;max-width:220px;overflow-wrap:anywhere;white-space:normal;line-height:1.45;">${escapeHtml(((r || [])[i] || '').toString())}</td>`).join('')}
           <td style="padding:6px 12px;">
             <select data-map-col="${i}" style="max-width:180px;">
               ${fieldOpts.map(([v, l]) => `<option value="${v}" ${current === v ? 'selected' : ''}>${l}</option>`).join('')}
@@ -11311,7 +11374,7 @@ function openColumnMapper(rows, fileName) {
             <span class="modal-close" data-close>×</span>
           </div>
           <div class="modal-body">
-            <div class="text-sm text-mid" style="margin-bottom:14px;">This CSV isn't a format I know yet. Tell me which column is what, and I'll remember this for next time. Required: <strong>Date</strong> and one of: signed Amount · positive Amount + Direction column · Money In + Money Out. Description is recommended.</div>
+            <div class="text-sm text-mid" style="margin-bottom:14px;line-height:1.7;">This file's layout isn't one I know yet. Using the sample rows below, tell me what each column holds — then I'll remember it for every future statement from this bank.<br><span class="text-muted">You must set <strong>Date</strong>, and the amount in whichever way your bank writes it: one <strong>Amount</strong> column with +/− signs, or an Amount plus a Direction column, or separate <strong>Money in</strong> and <strong>Money out</strong> columns. Setting <strong>Description</strong> is recommended; leave anything else as Ignore.</span></div>
             <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;">
               <div class="field">
                 <label>Header row</label>
