@@ -2541,7 +2541,12 @@ const LICENCE_API = 'https://simpl-licence.lee-4e1.workers.dev';
    CSP allows no third-party scripts, so Paddle.js can't run in this origin —
    and loosening that to sell something would undercut the whole promise. The
    site opens the Paddle overlay; this just points at it. */
-const BUY_URL = 'https://simpl.money/#pricing';
+/* ?buy=1 opens the Paddle overlay on arrival (site.js handles it), so a buy
+   button in the app is one click to a payment form rather than a landing on
+   the pricing section and another click. Checkout stays on simpl.money — the
+   only Paddle-approved domain, and the one origin that is NOT holding a
+   decrypted vault. Paddle.js must never load here. */
+const BUY_URL = 'https://simpl.money/?buy=1';
 
 /* The <title> and the iOS home-screen label are static markup shared by both
    origins, so they can't be baked per-origin at build time. Set them here
@@ -2942,7 +2947,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.36.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.36.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
