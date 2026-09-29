@@ -2947,7 +2947,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.36.1.2';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.37.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4419,6 +4419,7 @@ function setRoute(r) {
 document.querySelectorAll('.nav-item').forEach((n) => {
   n.addEventListener('click', () => {
     if (n.dataset.route === 'projects') currentProjectId = null; // nav always lands on the list
+    if (n.dataset.route === 'clients') currentClientId = null;
     if (n.dataset.route === 'finances') financeTab = 'overview'; // nav always lands on Overview
     setRoute(n.dataset.route);
   });
@@ -4465,7 +4466,7 @@ function render() {
   else if (currentRoute === 'finances') host.innerHTML = renderFinances();
   else if (currentRoute === 'documents') host.innerHTML = renderDocuments();
   else if (currentRoute === 'projects') host.innerHTML = currentProjectId ? renderProjectDetail() : renderProjects();
-  else if (currentRoute === 'clients') host.innerHTML = renderClients();
+  else if (currentRoute === 'clients') host.innerHTML = currentClientId ? renderClientDetail() : renderClients();
   else if (currentRoute === 'timer') host.innerHTML = renderTimer();
   else if (currentRoute === 'expenses') host.innerHTML = renderExpensesView();
   else if (currentRoute === 'settings') host.innerHTML = renderSettings();
@@ -8535,6 +8536,140 @@ function renderDocTable(docs, opts = {}) {
    CLIENTS
    ============================================================ */
 
+let currentClientId = null;   // null = the list; an id = that client's page
+
+/* Everything owed by, billed to, and worked on for one client. Pure apart from
+   reading `state`, so the statement of account (phase 2) can reuse it rather
+   than assembling the same figures a second time and drifting. */
+function clientLedger(clientId) {
+  const docs = (state.documents || []).filter((d) => d.clientId === clientId);
+  const ofType = (t) => docs.filter((d) => d.type === t)
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  // Per currency, never combined: a mixed-currency balance means nothing.
+  const totals = {};
+  const add = (ccy, key, val) => {
+    totals[ccy] = totals[ccy] || { billed: 0, outstanding: 0, credited: 0 };
+    totals[ccy][key] = round2(totals[ccy][key] + val);
+  };
+  for (const d of docs) {
+    if (d.status === 'draft') continue;                    // not money yet
+    if (d.type === 'invoice') {
+      add(d.currency, 'billed', calcTotals(d).due);        // deposit-aware
+      if (d.status === 'sent' || d.status === 'overdue') add(d.currency, 'outstanding', invoiceDueNet(d));
+    } else if (d.type === 'credit') {
+      add(d.currency, 'credited', calcTotals(d).due);
+    }
+  }
+  return {
+    invoices: ofType('invoice'),
+    quotes: ofType('quote'),
+    credits: ofType('credit'),
+    projects: (state.projects || []).filter((pj) => pj.clientId === clientId && !pj.archived),
+    timeEntries: (state.timeEntries || []).filter((e) => e.clientId === clientId)
+      .sort((a, b) => (b.start || '').localeCompare(a.start || '')),
+    totals,
+  };
+}
+
+function renderClientDetail() {
+  const c = state.clients.find((x) => x.id === currentClientId);
+  if (!c) { currentClientId = null; return renderClients(); }
+  const led = clientLedger(c.id);
+  const ccys = Object.keys(led.totals);
+
+  const figures = ccys.length ? ccys.map((ccy) => {
+    const t = led.totals[ccy];
+    return `
+      <div class="card" style="flex:1 1 220px;">
+        <div class="text-sm text-muted">${escapeHtml(ccy)}</div>
+        <div style="font-family:'DM Mono',monospace;font-size:22px;margin-top:4px;">${fmtMoney(t.outstanding, ccy)}</div>
+        <div class="text-sm text-mid">outstanding · ${fmtMoney(t.billed, ccy)} billed${t.credited ? ' · ' + fmtMoney(t.credited, ccy) + ' credited' : ''}</div>
+      </div>`;
+  }).join('') : '<div class="card" style="flex:1;"><div class="text-sm text-mid">Nothing issued to this client yet.</div></div>';
+
+  const docTable = (title, list) => !list.length ? '' : `
+    <div class="card" style="margin-bottom:18px;">
+      <div class="section-head" style="margin-top:0;"><h2>${title}</h2><span class="text-sm text-mid">${list.length}</span></div>
+      <div class="doc-list">
+        <table>
+          <thead><tr><th>Number</th><th>Date</th><th>Status</th><th class="amount">Amount</th></tr></thead>
+          <tbody>
+            ${list.map((d) => `
+              <tr class="row-clickable" data-row-id="${d.id}">
+                <td class="pri">${docNumber(d)}${d.projectTitle ? `<div class="text-sm text-mid">${escapeHtml(d.projectTitle)}</div>` : ''}</td>
+                <td data-label="Date">${fmtDate(d.date)}</td>
+                <td data-label="Status">${statusBadge(d)}</td>
+                <td class="amount fig">${fmtMoney(calcTotals(d).due, d.currency)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  const projectsCard = !led.projects.length ? '' : `
+    <div class="card" style="margin-bottom:18px;">
+      <div class="section-head" style="margin-top:0;"><h2>Projects</h2><span class="text-sm text-mid">${led.projects.length}</span></div>
+      <div class="doc-list">
+        <table>
+          <thead><tr><th>Project</th><th>Status</th><th class="amount">Budget</th></tr></thead>
+          <tbody>
+            ${led.projects.map((pj) => `
+              <tr class="row-clickable" data-cl-project="${pj.id}">
+                <td class="pri">${escapeHtml(pj.name)}</td>
+                <td data-label="Status">${escapeHtml(pj.status || '')}</td>
+                <td class="amount fig">${fmtMoney(projectBudget(pj).billTotal, baseCcy())}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  const hours = led.timeEntries.reduce((n, e) => n + (e.durationSec || 0), 0);
+  const timeCard = !led.timeEntries.length ? '' : `
+    <div class="card" style="margin-bottom:18px;">
+      <div class="section-head" style="margin-top:0;"><h2>Time</h2><span class="text-sm text-mid">${fmtHours(hours)} hrs · ${led.timeEntries.length} entr${led.timeEntries.length === 1 ? 'y' : 'ies'}</span></div>
+      <div class="doc-list">
+        <table>
+          <thead><tr><th>Date</th><th>Description</th><th class="amount">Hours</th><th class="amount">Value</th><th>Status</th></tr></thead>
+          <tbody>
+            ${led.timeEntries.slice(0, 50).map((e) => `
+              <tr>
+                <td data-label="Date">${fmtDate((e.start || '').slice(0, 10))}</td>
+                <td class="pri">${escapeHtml(e.description || '')}${e.projectId ? `<div class="text-sm text-mid">${escapeHtml(projectLabel(e.projectId))}</div>` : ''}</td>
+                <td class="amount fig">${fmtHours(e.durationSec)}</td>
+                <td class="amount">${fmtMoney((e.durationSec / 3600) * (Number(e.rate) || 0), baseCcy())}</td>
+                <td data-label="Status">${e.invoiceId ? '<span style="color:#2f7d32;font-weight:600;">Billed</span>' : '<span class="text-muted">Unbilled</span>'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${led.timeEntries.length > 50 ? `<div class="text-sm text-muted" style="margin-top:8px;">Showing the 50 most recent — the rest are on the Timer page.</div>` : ''}
+    </div>`;
+
+  return `
+    <div class="page-head">
+      <div>
+        <button class="btn btn-sm btn-ghost" id="cl-back" style="margin-bottom:8px;">← All clients</button>
+        <div class="title">${escapeHtml(c.name)}</div>
+        <div class="sub">${[c.contact, c.email, c.vat ? 'VAT ' + c.vat : ''].filter(Boolean).map((x) => escapeHtml(x)).join(' · ') || 'No contact details yet'}</div>
+      </div>
+      <div class="page-actions">
+        <button class="btn" id="cl-edit">Edit details</button>
+        <button class="btn" id="cl-new-quote">+ New quote</button>
+        <button class="btn btn-primary" id="cl-new-invoice">+ New invoice</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;">${figures}</div>
+    ${docTable('Invoices', led.invoices)}
+    ${docTable('Quotes', led.quotes)}
+    ${docTable('Credit notes', led.credits)}
+    ${projectsCard}
+    ${timeCard}
+    ${!led.invoices.length && !led.quotes.length && !led.credits.length ? '<div class="card"><div class="text-sm text-mid">No documents for this client yet.</div></div>' : ''}
+  `;
+}
+
 function renderClients() {
   const rows = state.clients.map((c) => {
     const outstanding = state.documents
@@ -8668,7 +8803,7 @@ function openClientModal(client) {
 
 let editingDoc = null; // working copy
 
-function openDocEditor(docId, defaultType) {
+function openDocEditor(docId, defaultType, presetClientId) {
   // Creating something NEW is the only gated action (editing/viewing existing
   // documents always works, even on an expired licence).
   if (!docId && !ensureCanCreate()) return;
@@ -8680,7 +8815,7 @@ function openDocEditor(docId, defaultType) {
   } else {
     const type = defaultType || 'invoice';
     const today = todayISO();
-    const firstClient = state.clients[0];
+    const firstClient = (presetClientId && state.clients.find((x) => x.id === presetClientId)) || state.clients[0];
     const startCcy = (firstClient && firstClient.currency) || baseCcy();
     const num = type === 'invoice' ? state.settings.nextInv : type === 'credit' ? state.settings.nextCredit : state.settings.nextQt;
     doc = {
@@ -11000,11 +11135,22 @@ function bindViewEvents() {
     const ca = document.getElementById('client-add');
     if (ca) ca.addEventListener('click', () => openClientModal());
     document.getElementById('empty-client-add')?.addEventListener('click', () => openClientModal());
+    document.getElementById('cl-back')?.addEventListener('click', () => { currentClientId = null; render(); });
+    document.getElementById('cl-edit')?.addEventListener('click', () => {
+      const c = state.clients.find((x) => x.id === currentClientId);
+      if (c) openClientModal(c);
+    });
+    document.getElementById('cl-new-invoice')?.addEventListener('click', () => openDocEditor(null, 'invoice', currentClientId));
+    document.getElementById('cl-new-quote')?.addEventListener('click', () => openDocEditor(null, 'quote', currentClientId));
+    document.querySelectorAll('[data-cl-project]').forEach((row) => row.addEventListener('click', () => {
+      currentProjectId = row.dataset.clProject;
+      setRoute('projects');
+    }));
     document.querySelectorAll('[data-client-id]').forEach((row) => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-client-action]')) return;
-        const c = state.clients.find((x) => x.id === row.dataset.clientId);
-        if (c) openClientModal(c);
+        currentClientId = row.dataset.clientId;
+        render();
       });
     });
     document.querySelectorAll('[data-client-action]').forEach((btn) => {
