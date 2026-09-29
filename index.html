@@ -512,7 +512,6 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     --c-cream-warm: #E5D5BA;
     --c-chocolate: #251608;
     --c-lime: #C7F659;
-    --c-amber: #B4690E;         /* the burnt orange already used by the warning banners */
     --danger: #FF6B5C;
     /* Aliases for legacy code paths */
     --dark: var(--bg);
@@ -822,15 +821,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     background: radial-gradient(circle at 100% 0%, rgba(199,246,89,0.06), transparent 55%);
     pointer-events: none;
   }
-  /* Money convention: lime = earned, amber = owed. White text at full opacity,
-     not tinted — on this orange every step down in opacity costs contrast. */
-  .card-v2.is-amber {
-    background: var(--c-amber);
-    color: #FFFFFF;
+  /* Money convention: lime = earned, coral = owed — the same var the Overdue
+     pill uses, so the card and the pill can never drift apart. Dark text at
+     full opacity, not tinted: on a colour this light every step down in
+     opacity costs contrast (full 6.9:1, at 0.55 only 3.1:1). */
+  .card-v2.is-coral {
+    background: var(--danger);
+    color: #0F0E0D;
     border-color: transparent;
   }
-  .stat-v2.is-amber .label { color: #FFFFFF; }
-  .stat-v2.is-amber .sub { color: #FFFFFF; }
+  .stat-v2.is-coral .label { color: #0F0E0D; }
+  .stat-v2.is-coral .sub { color: #0F0E0D; }
   .card-v2.is-cream-warm {
     background: var(--c-cream-warm);
     color: #2A1F12;
@@ -2957,7 +2958,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.38.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.38.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8923,8 +8924,8 @@ function renderClientDetail() {
   const paidCount = led.invoices.filter((d) => d.status === 'paid').length;
 
   const figures = `
-    <div class="card-v2 is-amber b-cell" style="flex:1 1 240px;">
-      <div class="stat-v2 is-amber">
+    <div class="card-v2 is-coral b-cell" style="flex:1 1 240px;">
+      <div class="stat-v2 is-coral">
         <div class="label">Owing</div>
         <div class="value">${lead ? fmtMoney(t.outstanding, lead) : '—'}</div>
         <div class="sub">${unpaidCount ? `${unpaidCount} unpaid invoice${unpaidCount === 1 ? '' : 's'}` : 'Nothing outstanding'}${others('outstanding') ? ' · also ' + others('outstanding') : ''}</div>
