@@ -2957,7 +2957,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.37.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.38.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8583,6 +8583,330 @@ function clientLedger(clientId) {
   };
 }
 
+/* A statement of account for one client, in ONE currency.
+
+   Two modes, both built on clientLedger so the page and the statement can
+   never disagree:
+     open      what is unpaid right now — the "please pay these" statement
+     activity  opening balance, everything that happened between two dates,
+               closing balance — what an accountant expects
+
+   The arithmetic that keeps it honest: an invoice adds its billed portion, a
+   credit note subtracts, and a payment subtracts what actually arrived
+   (invoiceDueNet — the invoice less any credit already raised against it), so
+   a credited invoice is never counted twice. Partial payments do not exist in
+   the app yet, so "payment received" means an invoice marked paid. */
+function clientStatement(clientId, opts = {}) {
+  const mode = opts.mode === 'activity' ? 'activity' : 'open';
+  const asAt = opts.asAt || todayISO();
+  const from = opts.from || '';
+  const to = opts.to || asAt;
+  const led = clientLedger(clientId);
+  const currencies = Object.keys(led.totals);
+  const currency = opts.currency || (led.totals[baseCcy()] ? baseCcy() : currencies[0] || baseCcy());
+  const mine = (d) => d.currency === currency && d.status !== 'draft';
+  const invoices = led.invoices.filter(mine);
+  const credits = led.credits.filter(mine);
+
+  const lines = [];
+  let opening = 0;
+
+  if (mode === 'activity') {
+    for (const d of invoices) {
+      const amt = calcTotals(d).due;
+      if (from && d.date < from) opening = round2(opening + amt);
+      else if (d.date <= to) lines.push({ date: d.date, ref: docNumber(d), label: 'Invoice', amount: amt });
+      const paid = d.status === 'paid' && d.paidDate ? invoiceDueNet(d) : 0;
+      if (paid) {
+        if (from && d.paidDate < from) opening = round2(opening - paid);
+        else if (d.paidDate <= to) lines.push({ date: d.paidDate, ref: docNumber(d), label: 'Payment received', amount: -paid });
+      }
+    }
+    for (const d of credits) {
+      const amt = calcTotals(d).due;
+      if (from && d.date < from) opening = round2(opening - amt);
+      else if (d.date <= to) lines.push({ date: d.date, ref: docNumber(d), label: 'Credit note', amount: -amt });
+    }
+  } else {
+    for (const d of invoices) {
+      if (d.status !== 'sent' && d.status !== 'overdue') continue;
+      const owed = invoiceDueNet(d);
+      if (owed) lines.push({ date: d.date, ref: docNumber(d), label: 'Invoice', dueDate: d.dueDate, amount: owed });
+    }
+    for (const d of credits) {
+      // A credit raised against an invoice already reduced that invoice's
+      // balance; listing it again would take it off twice.
+      if (d.appliesToInvoiceId) continue;
+      const amt = calcTotals(d).due;
+      if (amt) lines.push({ date: d.date, ref: docNumber(d), label: 'Credit note', amount: -amt });
+    }
+  }
+  lines.sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.label.localeCompare(b.label));
+  const closing = round2(lines.reduce((n, l) => n + l.amount, opening));
+
+  // Ageing of what is still open, measured from each invoice's due date.
+  const ageing = { current: 0, d30: 0, d60: 0, d90: 0, d90plus: 0 };
+  for (const d of invoices) {
+    if (d.status !== 'sent' && d.status !== 'overdue') continue;
+    const owed = invoiceDueNet(d);
+    if (!owed) continue;
+    const days = Math.floor((new Date(asAt + 'T00:00:00') - new Date((d.dueDate || d.date) + 'T00:00:00')) / 86400000);
+    const bucket = days <= 0 ? 'current' : days <= 30 ? 'd30' : days <= 60 ? 'd60' : days <= 90 ? 'd90' : 'd90plus';
+    ageing[bucket] = round2(ageing[bucket] + owed);
+  }
+
+  return { mode, currency, currencies, from, to, asAt, opening, lines, closing, ageing };
+}
+
+/* The statement as a PDF, built with the same vocabulary as buildPdfDoc so it
+   arrives looking like the invoices it is chasing: same margins, same 24pt
+   title, same logo slot, same branded footer. */
+async function buildStatementPdf(clientId, st) {
+  const { jsPDF } = window.jspdf;
+  const c = state.clients.find((x) => x.id === clientId) || { name: '—' };
+  const co = state.settings.company || COMPANY_DEFAULT;
+
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const M = 48;
+  let y = M;
+  doc.setFont('helvetica', 'normal');
+
+  const LOGO_MAX_W = 60, LOGO_MAX_H = 28, LINE_H = 12;
+  let logoBottom = y;
+  if (state.settings.logo) {
+    try {
+      const conv = await rasterizeLogoForPdf(state.settings.logo, 320);
+      const ratio = conv.w / conv.h;
+      let lw = LOGO_MAX_W, lh = LOGO_MAX_H;
+      if (ratio > LOGO_MAX_W / LOGO_MAX_H) lh = lw / ratio; else lw = lh * ratio;
+      doc.addImage(conv.dataUrl, 'JPEG', PAGE_W - M - lw, y, lw, lh);
+      logoBottom = y + lh + 16;
+    } catch (e) { console.warn('Logo render error', e); }
+  }
+
+  doc.setFontSize(24);
+  doc.setTextColor(28, 27, 25);
+  doc.text('STATEMENT OF ACCOUNT', M, y + 18);
+
+  // From block (right)
+  let fromY = Math.max(logoBottom, y + 8);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.text(co.name || '', PAGE_W - M, fromY, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(92, 91, 87);
+  let addrY = fromY + LINE_H;
+  for (const part of (co.address || '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    doc.text(part, PAGE_W - M, addrY, { align: 'right' });
+    addrY += LINE_H;
+  }
+
+  y = Math.max(addrY, logoBottom + 8) + 18;
+
+  // Client (left) and the statement's terms (right)
+  doc.setTextColor(158, 157, 153);
+  doc.setFontSize(8);
+  doc.text('STATEMENT FOR', M, y);
+  doc.setTextColor(28, 27, 25);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'bold');
+  doc.text(c.name || '', M, y + 14);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(92, 91, 87);
+  let bly = y + 28;
+  if (c.contact) { doc.text(c.contact, M, bly); bly += 11; }
+  for (const ln of (c.addr || '').split('\n')) { if (ln.trim()) { doc.text(ln.trim(), M, bly); bly += 11; } }
+  if (c.vat) { doc.text('VAT: ' + c.vat, M, bly); bly += 11; }
+
+  const meta = [
+    ['As at:', fmtDate(st.asAt)],
+    st.mode === 'activity' ? ['Period:', `${fmtDate(st.from)} – ${fmtDate(st.to)}`] : ['Shows:', 'Unpaid items'],
+    ['Currency:', st.currency],
+  ];
+  let metaY = y + 14;
+  for (const [k, v] of meta) {
+    const vw = doc.getTextWidth(String(v));
+    doc.setTextColor(158, 157, 153);
+    doc.text(k, PAGE_W - M - vw - 10, metaY, { align: 'right' });
+    doc.setTextColor(28, 27, 25);
+    doc.text(String(v), PAGE_W - M, metaY, { align: 'right' });
+    metaY += 14;
+  }
+  y = Math.max(bly, metaY) + 14;
+
+  // Ledger. Activity runs a balance; open items show how late each one is.
+  const money = (n) => (n < 0 ? '-' + fmtMoney(Math.abs(n), st.currency) : fmtMoney(n, st.currency));
+  let running = st.opening;
+  const head = st.mode === 'activity'
+    ? [['Date', 'Reference', 'Detail', 'Amount', 'Balance']]
+    : [['Date', 'Invoice', 'Due', 'Overdue', 'Amount']];
+  const body = [];
+  if (st.mode === 'activity') {
+    body.push([fmtDate(st.from), '', 'Opening balance', '', money(st.opening)]);
+    for (const l of st.lines) {
+      running = round2(running + l.amount);
+      body.push([fmtDate(l.date), l.ref, l.label, money(l.amount), money(running)]);
+    }
+  } else {
+    for (const l of st.lines) {
+      const days = l.dueDate
+        ? Math.floor((new Date(st.asAt + 'T00:00:00') - new Date(l.dueDate + 'T00:00:00')) / 86400000) : 0;
+      body.push([fmtDate(l.date), l.ref, l.dueDate ? fmtDate(l.dueDate) : '—',
+        days > 0 ? `${days} day${days === 1 ? '' : 's'}` : '—', money(l.amount)]);
+    }
+  }
+  if (!body.length) body.push(['', '', 'Nothing outstanding', '', money(0)]);
+
+  doc.autoTable({
+    head, body, startY: y,
+    margin: { left: M, right: M },
+    theme: 'plain',
+    styles: { font: 'helvetica', fontSize: 9, cellPadding: 6, textColor: [28, 27, 25] },
+    headStyles: { textColor: [92, 91, 87], fontStyle: 'normal', fontSize: 8,
+      lineWidth: { top: 0.6, bottom: 0.6 }, lineColor: [28, 27, 25] },
+    bodyStyles: { lineWidth: { bottom: 0.4 }, lineColor: [224, 221, 215] },
+    columnStyles: { 0: { cellWidth: 70 }, 1: { cellWidth: 78 }, 2: { cellWidth: 'auto' },
+      3: { halign: 'right', cellWidth: 78 }, 4: { halign: 'right', cellWidth: 92 } },
+  });
+  y = doc.lastAutoTable.finalY + 16;
+
+  // Balance due
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.setTextColor(28, 27, 25);
+  const closingText = money(st.closing);
+  doc.text(closingText, PAGE_W - M, y, { align: 'right' });
+  doc.text(st.mode === 'activity' ? 'CLOSING BALANCE' : 'TOTAL DUE',
+    PAGE_W - M - doc.getTextWidth(closingText) - 16, y, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  y += 24;
+
+  // Ageing — only where something is actually outstanding
+  const ageTotal = Object.values(st.ageing).reduce((a, b) => a + b, 0);
+  if (ageTotal) {
+    const cols = [['Current', st.ageing.current], ['1–30 days', st.ageing.d30], ['31–60 days', st.ageing.d60],
+      ['61–90 days', st.ageing.d90], ['90+ days', st.ageing.d90plus]];
+    doc.autoTable({
+      head: [cols.map((x) => x[0])], body: [cols.map((x) => money(x[1]))],
+      startY: y, margin: { left: M, right: M }, theme: 'plain',
+      styles: { font: 'helvetica', fontSize: 9, cellPadding: 6, halign: 'right', textColor: [28, 27, 25] },
+      headStyles: { textColor: [92, 91, 87], fontStyle: 'normal', fontSize: 8, halign: 'right',
+        lineWidth: { top: 0.6, bottom: 0.6 }, lineColor: [28, 27, 25] },
+    });
+    y = doc.lastAutoTable.finalY + 16;
+  }
+
+  if (state.settings.banking && state.settings.banking.length) {
+    const bank = state.settings.banking.find((b) => b.currency === st.currency) || state.settings.banking[0];
+    if (bank && bank.details && !bank.details.includes('[')) y = drawBlock(doc, M, PAGE_W, y, 'PAYMENT DETAILS', bank.details);
+  }
+
+  const footer = `Registered Office: Attention: ${co.attention || ''}, ${co.address || ''}.`;
+  doc.setFontSize(8);
+  doc.setTextColor(158, 157, 153);
+  const footerLines = doc.splitTextToSize(footer, PAGE_W - 2 * M);
+  const brand = brandingOnDocuments();
+  const footY = doc.internal.pageSize.getHeight() - M - (brand ? 12 : 0);
+  doc.text(footerLines, PAGE_W / 2, footY, { align: 'center' });
+  if (brand) drawBrandFooter(doc, PAGE_W, footY + 12);
+
+  const safeName = (c.name || 'Client').replace(/[^a-z0-9]+/gi, '-');
+  return { doc, filename: `Statement-${safeName}-${st.asAt}.pdf` };
+}
+
+/* Download, or share where the device can (same path as sending a document). */
+async function sendStatement(clientId, st, share) {
+  if (!requireCompanyDetails('send a statement')) return;
+  let built;
+  try { built = await buildStatementPdf(clientId, st); } catch (e) { toast('Could not build the statement'); return; }
+  if (!share) { built.doc.save(built.filename); toast('Statement downloaded'); return; }
+  const c = state.clients.find((x) => x.id === clientId) || {};
+  const file = new File([built.doc.output('blob')], built.filename, { type: 'application/pdf' });
+  const fromName = (state.settings.company && state.settings.company.name) || '';
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ title: `Statement from ${fromName}`, text: `Statement of account as at ${fmtDate(st.asAt)}.`, files: [file] });
+      return;
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  built.doc.save(built.filename);
+  toast('Statement downloaded — attach it to the email');
+  const subject = `Statement of account from ${fromName}`;
+  const body = `Hi${c.contact ? ' ' + c.contact.split(' ')[0] : ''},\n\nPlease find attached your statement of account as at ${fmtDate(st.asAt)}.\n\n${st.closing > 0 ? `Balance outstanding: ${fmtMoney(st.closing, st.currency)}.` : 'There is nothing outstanding — thank you.'}\n\nKind regards`;
+  window.location.href = `mailto:${c.email || ''}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+function openStatementModal(clientId) {
+  const draw = () => {
+    const st = clientStatement(clientId, statementOpts);
+    const money = (n) => (n < 0 ? '-' + fmtMoney(Math.abs(n), st.currency) : fmtMoney(n, st.currency));
+    const rows = st.lines.map((l) => `
+      <tr>
+        <td>${fmtDate(l.date)}</td>
+        <td class="pri">${l.ref} <span class="text-sm text-mid">${escapeHtml(l.label)}</span></td>
+        <td class="amount fig" style="color:${l.amount < 0 ? 'var(--accent)' : 'var(--text)'};">${money(l.amount)}</td>
+      </tr>`).join('');
+    return `
+      <div class="modal-overlay" id="modal-overlay">
+        <div class="modal" style="max-width:620px;">
+          <div class="modal-head"><div class="ttl">Statement · ${escapeHtml(clientName(clientId))}</div><span class="modal-close" data-close>×</span></div>
+          <div class="modal-body">
+            <div class="row-flex" style="gap:10px;flex-wrap:wrap;align-items:flex-end;">
+              <div class="field" style="margin:0;"><label>Shows</label>
+                <select id="st-mode">
+                  <option value="open" ${st.mode === 'open' ? 'selected' : ''}>Unpaid items</option>
+                  <option value="activity" ${st.mode === 'activity' ? 'selected' : ''}>Activity for a period</option>
+                </select></div>
+              ${st.currencies.length > 1 ? `<div class="field" style="margin:0;"><label>Currency</label>
+                <select id="st-ccy">${st.currencies.map((x) => `<option ${x === st.currency ? 'selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select></div>` : ''}
+              ${st.mode === 'activity' ? `
+                <div class="field" style="margin:0;"><label>From</label><input type="date" id="st-from" value="${st.from}" /></div>
+                <div class="field" style="margin:0;"><label>To</label><input type="date" id="st-to" value="${st.to}" /></div>` : ''}
+            </div>
+            <div class="doc-list" style="margin-top:14px;">
+              <table>
+                <thead><tr><th>Date</th><th>Reference</th><th class="amount">Amount</th></tr></thead>
+                <tbody>${st.mode === 'activity' ? `<tr><td>${fmtDate(st.from)}</td><td class="pri">Opening balance</td><td class="amount fig">${money(st.opening)}</td></tr>` : ''}${rows || `<tr><td colspan="3" class="empty">Nothing outstanding.</td></tr>`}</tbody>
+              </table>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-weight:600;">
+              <span>${st.mode === 'activity' ? 'Closing balance' : 'Total due'}</span>
+              <span style="font-family:'DM Mono',monospace;">${money(st.closing)}</span>
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button class="btn" id="st-pdf" style="margin-right:auto;">Download PDF</button>
+            <button class="btn" data-close>Close</button>
+            <button class="btn btn-primary" id="st-send">Send</button>
+          </div>
+        </div>
+      </div>`;
+  };
+  const wire = () => {
+    const refresh = () => { closeModal(); openStatementModal(clientId); };
+    document.getElementById('st-mode').addEventListener('change', (e) => {
+      statementOpts.mode = e.target.value;
+      if (statementOpts.mode === 'activity' && !statementOpts.from) {
+        statementOpts.from = todayISO().slice(0, 4) + '-01-01';
+        statementOpts.to = todayISO();
+      }
+      refresh();
+    });
+    document.getElementById('st-ccy')?.addEventListener('change', (e) => { statementOpts.currency = e.target.value; refresh(); });
+    document.getElementById('st-from')?.addEventListener('change', (e) => { statementOpts.from = e.target.value; refresh(); });
+    document.getElementById('st-to')?.addEventListener('change', (e) => { statementOpts.to = e.target.value; refresh(); });
+    document.getElementById('st-pdf').addEventListener('click', (e) =>
+      withBusy(e.currentTarget, 'Building…', () => sendStatement(clientId, clientStatement(clientId, statementOpts), false)));
+    document.getElementById('st-send').addEventListener('click', (e) =>
+      withBusy(e.currentTarget, 'Building…', () => sendStatement(clientId, clientStatement(clientId, statementOpts), true)));
+  };
+  showModal(draw());
+  wire();
+}
+let statementOpts = { mode: 'open', currency: '', from: '', to: '' };
+
 function renderClientDetail() {
   const c = state.clients.find((x) => x.id === currentClientId);
   if (!c) { currentClientId = null; return renderClients(); }
@@ -8691,6 +9015,7 @@ function renderClientDetail() {
         <div class="sub">${led.invoices.length + led.quotes.length + led.credits.length} document${led.invoices.length + led.quotes.length + led.credits.length === 1 ? '' : 's'}</div>
       </div>
       <div class="page-actions">
+        <button class="btn" id="cl-statement">Statement</button>
         <button class="btn" id="cl-new-quote">+ New quote</button>
         <button class="btn btn-primary" id="cl-new-invoice">+ New invoice</button>
       </div>
@@ -11174,6 +11499,10 @@ function bindViewEvents() {
     document.getElementById('cl-edit')?.addEventListener('click', () => {
       const c = state.clients.find((x) => x.id === currentClientId);
       if (c) openClientModal(c);
+    });
+    document.getElementById('cl-statement')?.addEventListener('click', () => {
+      statementOpts = { mode: 'open', currency: '', from: '', to: '' };   // fresh each time
+      openStatementModal(currentClientId);
     });
     document.getElementById('cl-new-invoice')?.addEventListener('click', () => openDocEditor(null, 'invoice', currentClientId));
     document.getElementById('cl-new-quote')?.addEventListener('click', () => openDocEditor(null, 'quote', currentClientId));
