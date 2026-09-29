@@ -2958,7 +2958,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.38.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.38.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4484,6 +4484,46 @@ function render() {
   renderTimerWidget();
   bindViewEvents();
   enhanceA11y(host);
+  enhanceDatePickers(host);
+}
+
+// Re-rendering a view replaces the element the user is working in. Anything
+// driven by typing or by a filter control has to put focus and the caret back
+// afterwards, or the field goes dead mid-edit. The search boxes used to call
+// .focus() on the element they had just detached — a no-op — which is why search
+// felt like it acted on every character before you had finished typing.
+function renderKeepingFocus() {
+  const el = document.activeElement;
+  const id = el && el.id;
+  let caret = null;
+  // selectionStart throws on date/number inputs in some browsers.
+  try { if (id && el.setSelectionRange) caret = [el.selectionStart, el.selectionEnd]; } catch (e) {}
+  render();
+  const again = id && document.getElementById(id);
+  if (!again) return;
+  again.focus();
+  if (caret) { try { again.setSelectionRange(caret[0], caret[1]); } catch (e) {} }
+}
+
+// One render when typing stops, not one per keystroke.
+let searchDebounce = null;
+function wireSearchInput(el, set) {
+  el.addEventListener('input', () => {
+    set(el.value);
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(renderKeepingFocus, 160);
+  });
+}
+
+// A native date input only opens its calendar from the small icon; a click on the
+// text does nothing, which reads as the box being broken. Open the picker for a
+// click anywhere in the field, where the browser supports it.
+function enhanceDatePickers(scope) {
+  (scope || document).querySelectorAll('input[type="date"]').forEach((el) => {
+    if (el.dataset.dpWired || typeof el.showPicker !== 'function') return;
+    el.dataset.dpWired = '1';
+    el.addEventListener('click', () => { try { el.showPicker(); } catch (e) {} });
+  });
 }
 
 // Make custom clickable elements keyboard-accessible + labelled, without
@@ -5770,7 +5810,7 @@ function renderTimer() {
 }
 
 function bindTimerEvents() {
-  const setF = (k, v) => { timeFilters[k] = v; if (k === 'clientId') timeFilters.projectId = ''; render(); };
+  const setF = (k, v) => { timeFilters[k] = v; if (k === 'clientId') timeFilters.projectId = ''; renderKeepingFocus(); };
   const cl = document.getElementById('tm-f-client'); if (cl) cl.addEventListener('change', (e) => setF('clientId', e.target.value));
   const pj = document.getElementById('tm-f-project'); if (pj) pj.addEventListener('change', (e) => setF('projectId', e.target.value));
   const fr = document.getElementById('tm-f-from'); if (fr) fr.addEventListener('change', (e) => setF('from', e.target.value));
@@ -8840,8 +8880,11 @@ async function sendStatement(clientId, st, share) {
 }
 
 function openStatementModal(clientId) {
-  const draw = () => {
-    const st = clientStatement(clientId, statementOpts);
+  // The results redraw on their own, without the surrounding controls. Rebuilding
+  // the whole modal on a date change destroyed the very field being edited, which
+  // is why the From/To boxes read as broken: the browser fires `change` the moment
+  // a typed date becomes valid, so the box vanished mid-entry.
+  const result = (st) => {
     const money = (n) => (n < 0 ? '-' + fmtMoney(Math.abs(n), st.currency) : fmtMoney(n, st.currency));
     const rows = st.lines.map((l) => `
       <tr>
@@ -8849,6 +8892,20 @@ function openStatementModal(clientId) {
         <td class="pri">${l.ref} <span class="text-sm text-mid">${escapeHtml(l.label)}</span></td>
         <td class="amount fig" style="color:${l.amount < 0 ? 'var(--accent)' : 'var(--text)'};">${money(l.amount)}</td>
       </tr>`).join('');
+    return `
+      <div class="doc-list" style="margin-top:14px;">
+        <table>
+          <thead><tr><th>Date</th><th>Reference</th><th class="amount">Amount</th></tr></thead>
+          <tbody>${st.mode === 'activity' ? `<tr><td>${fmtDate(st.from)}</td><td class="pri">Opening balance</td><td class="amount fig">${money(st.opening)}</td></tr>` : ''}${rows || `<tr><td colspan="3" class="empty">Nothing outstanding.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-weight:600;">
+        <span>${st.mode === 'activity' ? 'Closing balance' : 'Total due'}</span>
+        <span style="font-family:'DM Mono',monospace;">${money(st.closing)}</span>
+      </div>`;
+  };
+  const draw = () => {
+    const st = clientStatement(clientId, statementOpts);
     return `
       <div class="modal-overlay" id="modal-overlay">
         <div class="modal" style="max-width:620px;">
@@ -8866,16 +8923,7 @@ function openStatementModal(clientId) {
                 <div class="field" style="margin:0;"><label>From</label><input type="date" id="st-from" value="${st.from}" /></div>
                 <div class="field" style="margin:0;"><label>To</label><input type="date" id="st-to" value="${st.to}" /></div>` : ''}
             </div>
-            <div class="doc-list" style="margin-top:14px;">
-              <table>
-                <thead><tr><th>Date</th><th>Reference</th><th class="amount">Amount</th></tr></thead>
-                <tbody>${st.mode === 'activity' ? `<tr><td>${fmtDate(st.from)}</td><td class="pri">Opening balance</td><td class="amount fig">${money(st.opening)}</td></tr>` : ''}${rows || `<tr><td colspan="3" class="empty">Nothing outstanding.</td></tr>`}</tbody>
-              </table>
-            </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-weight:600;">
-              <span>${st.mode === 'activity' ? 'Closing balance' : 'Total due'}</span>
-              <span style="font-family:'DM Mono',monospace;">${money(st.closing)}</span>
-            </div>
+            <div id="st-result">${result(st)}</div>
           </div>
           <div class="modal-foot">
             <button class="btn" id="st-pdf" style="margin-right:auto;">Download PDF</button>
@@ -8886,18 +8934,26 @@ function openStatementModal(clientId) {
       </div>`;
   };
   const wire = () => {
-    const refresh = () => { closeModal(); openStatementModal(clientId); };
+    // Only the results move. Switching mode is the one change that adds or removes
+    // the date fields, so that alone rebuilds the modal.
+    const update = () => {
+      const host = document.getElementById('st-result');
+      if (host) host.innerHTML = result(clientStatement(clientId, statementOpts));
+    };
+    const rebuild = () => { closeModal(); openStatementModal(clientId); };
     document.getElementById('st-mode').addEventListener('change', (e) => {
       statementOpts.mode = e.target.value;
       if (statementOpts.mode === 'activity' && !statementOpts.from) {
         statementOpts.from = todayISO().slice(0, 4) + '-01-01';
         statementOpts.to = todayISO();
       }
-      refresh();
+      rebuild();
     });
-    document.getElementById('st-ccy')?.addEventListener('change', (e) => { statementOpts.currency = e.target.value; refresh(); });
-    document.getElementById('st-from')?.addEventListener('change', (e) => { statementOpts.from = e.target.value; refresh(); });
-    document.getElementById('st-to')?.addEventListener('change', (e) => { statementOpts.to = e.target.value; refresh(); });
+    document.getElementById('st-ccy')?.addEventListener('change', (e) => { statementOpts.currency = e.target.value; update(); });
+    // A half-typed date arrives as '' — keep the last good range rather than
+    // recomputing the statement against an open-ended one.
+    document.getElementById('st-from')?.addEventListener('change', (e) => { if (e.target.value) { statementOpts.from = e.target.value; update(); } });
+    document.getElementById('st-to')?.addEventListener('change', (e) => { if (e.target.value) { statementOpts.to = e.target.value; update(); } });
     document.getElementById('st-pdf').addEventListener('click', (e) =>
       withBusy(e.currentTarget, 'Building…', () => sendStatement(clientId, clientStatement(clientId, statementOpts), false)));
     document.getElementById('st-send').addEventListener('click', (e) =>
@@ -11422,6 +11478,7 @@ function showModal(html) {
   });
   document.addEventListener('keydown', escClose);
   enhanceA11y(mh);
+  enhanceDatePickers(mh);
 }
 function closeModal() {
   // Cancelling the sync modal must tear the connection down too.
@@ -11480,9 +11537,7 @@ function bindViewEvents() {
 
   if (currentRoute === 'documents') {
     const search = document.getElementById('doc-search');
-    if (search) {
-      search.addEventListener('input', () => { docSearch = search.value; render(); search.focus(); });
-    }
+    if (search) wireSearchInput(search, (v) => { docSearch = v; });
     const ni = document.getElementById('doc-new-invoice');
     const nq = document.getElementById('doc-new-quote');
     if (ni) ni.addEventListener('click', () => openDocEditor(null, 'invoice'));
@@ -11605,7 +11660,7 @@ function bindViewEvents() {
 
   if (currentRoute === 'expenses') {
     const search = document.getElementById('exp-search');
-    if (search) search.addEventListener('input', () => { expSearch = search.value; render(); search.focus(); });
+    if (search) wireSearchInput(search, (v) => { expSearch = v; });
     document.querySelectorAll('[data-exp-cat]').forEach((el) => el.addEventListener('click', () => {
       expCategoryFilter = el.dataset.expCat;
       render();
