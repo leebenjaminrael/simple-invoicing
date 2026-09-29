@@ -2947,7 +2947,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.36.1.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.36.1.2';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -7623,11 +7623,40 @@ function payeeKey(desc) {
   s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' '); // month names
   s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
   s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = s.split(' ').filter(Boolean);
+  /* Drop banking filler so the key reaches the actual merchant. Without this,
+     "Payshap Account Off-Us Discovery Card" and "Payshap Account Off-Us
+     Vodacom Sa" both keyed on "account off us" — one rule for two different
+     payees, so categorising one silently pre-filled the other. */
+  const meaningful = words.filter((w) => PAYEE_STOPWORDS.indexOf(w) === -1);
+  const use = meaningful.length ? meaningful : words;   // never key on nothing
+  return use.slice(0, 3).join(' ');
+}
+/* Words that describe the payment, not who was paid. */
+const PAYEE_STOPWORDS = [
+  'account', 'accounts', 'off', 'us', 'to', 'from', 'the', 'and', 'of', 'for',
+  'payment', 'payments', 'pmt', 'purchase', 'card', 'transfer', 'trf',
+  'debit', 'credit', 'order', 'ref', 'reference',
+];
+/* The key this function produced before the stopword fix. Looked up as a
+   fallback so rules learned before the change keep working. */
+function payeeKeyLegacy(desc) {
+  let s = (desc || '').toLowerCase();
+  s = s.replace(/^(pos purchase|card payment|debit card|debit order|sent money to|magtape debit|magtape credit|online|payshap[^a-z]*|fnb app[^a-z]*|internet (pmt|trf)( to| from)?|byc debit|rtc[^a-z]*|eft)\s+/i, '');
+  s = s.replace(/yoco\s*\*?\s*/i, '');
+  s = s.replace(/\*+\d+/g, ' ');
+  s = s.replace(/\b\d[\d,./:-]*\b/g, ' ');
+  s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' ');
+  s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
+  s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s.split(' ').filter(Boolean).slice(0, 3).join(' ');
 }
 function payeeRuleFor(desc) {
+  if (!state.payeeRules) return null;
   const key = payeeKey(desc);
-  return key && state.payeeRules ? state.payeeRules[key] : null;
+  if (key && state.payeeRules[key]) return state.payeeRules[key];
+  const old = payeeKeyLegacy(desc);          // rules learned before the stopword fix
+  return old && state.payeeRules[old] ? state.payeeRules[old] : null;
 }
 function learnPayeeRule(desc, category, vat) {
   const key = payeeKey(desc);
