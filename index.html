@@ -512,6 +512,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     --c-cream-warm: #E5D5BA;
     --c-chocolate: #251608;
     --c-lime: #C7F659;
+    --c-amber: #B4690E;         /* the burnt orange already used by the warning banners */
     --danger: #FF6B5C;
     /* Aliases for legacy code paths */
     --dark: var(--bg);
@@ -821,6 +822,15 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     background: radial-gradient(circle at 100% 0%, rgba(199,246,89,0.06), transparent 55%);
     pointer-events: none;
   }
+  /* Money convention: lime = earned, amber = owed. White text at full opacity,
+     not tinted — on this orange every step down in opacity costs contrast. */
+  .card-v2.is-amber {
+    background: var(--c-amber);
+    color: #FFFFFF;
+    border-color: transparent;
+  }
+  .stat-v2.is-amber .label { color: #FFFFFF; }
+  .stat-v2.is-amber .sub { color: #FFFFFF; }
   .card-v2.is-cream-warm {
     background: var(--c-cream-warm);
     color: #2A1F12;
@@ -2947,7 +2957,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.37.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.37.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -8549,7 +8559,7 @@ function clientLedger(clientId) {
   // Per currency, never combined: a mixed-currency balance means nothing.
   const totals = {};
   const add = (ccy, key, val) => {
-    totals[ccy] = totals[ccy] || { billed: 0, outstanding: 0, credited: 0 };
+    totals[ccy] = totals[ccy] || { billed: 0, outstanding: 0, earned: 0, credited: 0 };
     totals[ccy][key] = round2(totals[ccy][key] + val);
   };
   for (const d of docs) {
@@ -8557,6 +8567,7 @@ function clientLedger(clientId) {
     if (d.type === 'invoice') {
       add(d.currency, 'billed', calcTotals(d).due);        // deposit-aware
       if (d.status === 'sent' || d.status === 'overdue') add(d.currency, 'outstanding', invoiceDueNet(d));
+      if (d.status === 'paid') add(d.currency, 'earned', invoiceDueNet(d));   // net of credits against it
     } else if (d.type === 'credit') {
       add(d.currency, 'credited', calcTotals(d).due);
     }
@@ -8578,15 +8589,40 @@ function renderClientDetail() {
   const led = clientLedger(c.id);
   const ccys = Object.keys(led.totals);
 
-  const figures = ccys.length ? ccys.map((ccy) => {
-    const t = led.totals[ccy];
-    return `
-      <div class="card" style="flex:1 1 220px;">
-        <div class="text-sm text-muted">${escapeHtml(ccy)}</div>
-        <div style="font-family:'DM Mono',monospace;font-size:22px;margin-top:4px;">${fmtMoney(t.outstanding, ccy)}</div>
-        <div class="text-sm text-mid">outstanding · ${fmtMoney(t.billed, ccy)} billed${t.credited ? ' · ' + fmtMoney(t.credited, ccy) + ' credited' : ''}</div>
-      </div>`;
-  }).join('') : '<div class="card" style="flex:1;"><div class="text-sm text-mid">Nothing issued to this client yet.</div></div>';
+  // One currency leads (the base, if this client uses it); any others are named
+  // underneath rather than added — a mixed-currency total means nothing.
+  const lead = ccys.includes(baseCcy()) ? baseCcy() : ccys[0];
+  const t = lead ? led.totals[lead] : { billed: 0, outstanding: 0, earned: 0, credited: 0 };
+  const others = (key) => ccys.filter((x) => x !== lead && led.totals[x][key])
+    .map((x) => fmtMoney(led.totals[x][key], x)).join(' · ');
+  const unpaidCount = led.invoices.filter((d) => d.status === 'sent' || d.status === 'overdue').length;
+  const paidCount = led.invoices.filter((d) => d.status === 'paid').length;
+
+  const figures = `
+    <div class="card-v2 is-amber b-cell" style="flex:1 1 240px;">
+      <div class="stat-v2 is-amber">
+        <div class="label">Owing</div>
+        <div class="value">${lead ? fmtMoney(t.outstanding, lead) : '—'}</div>
+        <div class="sub">${unpaidCount ? `${unpaidCount} unpaid invoice${unpaidCount === 1 ? '' : 's'}` : 'Nothing outstanding'}${others('outstanding') ? ' · also ' + others('outstanding') : ''}</div>
+      </div>
+    </div>
+    <div class="card-v2 is-lime b-cell" style="flex:1 1 240px;">
+      <div class="stat-v2 is-lime">
+        <div class="label">Earnings to date</div>
+        <div class="value">${lead ? fmtMoney(t.earned, lead) : '—'}</div>
+        <div class="sub">${paidCount ? `${paidCount} invoice${paidCount === 1 ? '' : 's'} paid` : 'Nothing paid yet'}${others('earned') ? ' · also ' + others('earned') : ''}</div>
+      </div>
+    </div>
+    <div class="card-v2 is-cream b-cell" style="flex:1 1 260px;">
+      <div class="stat-v2 is-cream">
+        <div class="label">Details</div>
+        <div class="text-sm" style="line-height:1.6;margin:8px 0 12px;">
+          ${[c.contact, c.email, c.vat ? 'VAT ' + c.vat : '', (c.addr || '').split('\n').join(', ')]
+            .filter(Boolean).map((x) => escapeHtml(x)).join('<br>') || 'No contact details yet'}
+        </div>
+        <button class="btn btn-sm" id="cl-edit" style="color:#0F0E0D;border-color:rgba(15,14,13,0.25);background:rgba(15,14,13,0.05);">Edit details</button>
+      </div>
+    </div>`;
 
   const docTable = (title, list) => !list.length ? '' : `
     <div class="card" style="margin-bottom:18px;">
@@ -8652,10 +8688,9 @@ function renderClientDetail() {
       <div>
         <button class="btn btn-sm btn-ghost" id="cl-back" style="margin-bottom:8px;">← All clients</button>
         <div class="title">${escapeHtml(c.name)}</div>
-        <div class="sub">${[c.contact, c.email, c.vat ? 'VAT ' + c.vat : ''].filter(Boolean).map((x) => escapeHtml(x)).join(' · ') || 'No contact details yet'}</div>
+        <div class="sub">${led.invoices.length + led.quotes.length + led.credits.length} document${led.invoices.length + led.quotes.length + led.credits.length === 1 ? '' : 's'}</div>
       </div>
       <div class="page-actions">
-        <button class="btn" id="cl-edit">Edit details</button>
         <button class="btn" id="cl-new-quote">+ New quote</button>
         <button class="btn btn-primary" id="cl-new-invoice">+ New invoice</button>
       </div>
