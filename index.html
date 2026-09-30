@@ -1414,6 +1414,61 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .modal-close { font-size: 22px; color: var(--text-mid); cursor: pointer; line-height: 1; padding: 4px 10px; }
   .modal-close:hover { color: var(--text); }
 
+  /* Detail panel — what a summary figure is made of. A sheet from the right on
+     desktop, from the bottom on a phone. It is a modal underneath, so Escape,
+     the overlay click and the close button all behave the same. */
+  .modal-overlay.is-sheet { padding: 0; justify-content: flex-end; align-items: stretch; overflow: hidden; }
+  .modal.detail-sheet {
+    max-width: 560px; height: 100vh; height: 100dvh;
+    display: flex; flex-direction: column;
+    border-radius: var(--r-card) 0 0 var(--r-card);
+    animation: sheet-in-right .22s cubic-bezier(.2,.8,.2,1);
+  }
+  .detail-sheet .modal-body { flex: 1; overflow-y: auto; padding: 8px 22px 16px; }
+  .detail-section + .detail-section { margin-top: 18px; }
+  .detail-section.is-muted { opacity: .72; }
+  .detail-sec-head {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 14px 0 8px; border-bottom: 1px solid var(--border);
+    font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-mid);
+  }
+  .detail-sec-head .fig { font-family: 'DM Mono', monospace; letter-spacing: 0; text-transform: none; }
+  .detail-row {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+    padding: 12px 10px; margin: 0 -10px; border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .detail-row:hover, .detail-row:focus-visible { background: rgba(245,242,236,0.05); outline: none; }
+  .dr-title { font-weight: 600; }
+  .dr-sub { font-size: 12.5px; color: var(--text-mid); margin-top: 3px; }
+  .dr-sub .is-late { color: var(--danger); }
+  .dr-amt { text-align: right; white-space: nowrap; }
+  .dr-amt .fig { font-family: 'DM Mono', monospace; }
+  .detail-total { justify-content: space-between; font-weight: 650; font-size: 16px; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  .detail-total .fig { font-family: 'DM Mono', monospace; }
+  @keyframes sheet-in-right { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes sheet-in-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+  @media (max-width: 720px) {
+    .modal-overlay.is-sheet { align-items: flex-end; }
+    .modal.detail-sheet {
+      max-width: none; height: auto; max-height: 88vh; max-height: 88dvh;
+      border-radius: var(--r-card) var(--r-card) 0 0; animation-name: sheet-in-up;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) { .modal.detail-sheet { animation: none; } }
+
+  /* A figure you can open. The arrow is the cue on touch screens, where there
+     is no hover to reveal it. */
+  .card-v2[data-drill], .card-v2[data-route-link] { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+  .card-v2[data-drill]:hover, .card-v2[data-route-link]:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+  .card-v2[data-drill]:focus-visible, .card-v2[data-route-link]:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 3px; }
+  .card-v2[data-drill] .label::after, .card-v2[data-route-link] .label::after { content: ' \2192'; opacity: .55; }
+  @media (prefers-reduced-motion: reduce) { .card-v2[data-drill]:hover, .card-v2[data-route-link]:hover { transform: none; } }
+
+  /* Chart columns: the whole month is the tap target, drawn over the bar. */
+  .bar-hit { fill: transparent; cursor: pointer; }
+  .bar-hit:hover, .bar-hit:focus-visible { fill: rgba(245,242,236,0.06); outline: none; }
+
   /* Document preview (the "paper" invoice — keep white with explicit dark colors) */
   .preview {
     background: white;
@@ -2958,7 +3013,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.38.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3709,6 +3764,7 @@ function canInvoiceBalance(d) {
 // lone draft) — i.e. income that's genuinely committed and still to come.
 function committedIncomeZAR() {
   const seen = new Set();
+  const items = [];
   let total = 0, missingFx = false;
   for (const d of (state.documents || [])) {
     if (d.type !== 'invoice') continue;
@@ -3722,9 +3778,12 @@ function committedIncomeZAR() {
     const full = calcTotals(members[0]).total; // members share line items
     const z = toBase(full * (remaining / 100), members[0].currency);
     if (z == null) { missingFx = true; continue; }
-    total += z;
+    const amount = round2(z);
+    const latest = members.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+    items.push({ doc: latest, remainingPct: remaining, amount });
+    total += amount;
   }
-  return { total, missingFx };
+  return { total: round2(total), items, missingFx };
 }
 function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
@@ -4032,11 +4091,51 @@ function ymOf(iso) { return iso ? iso.slice(0, 7) : null; }
 
 // Returns ZAR-equivalent revenue for a doc using cached FX. Null if rate missing.
 // Uses the billed amount (deposit-aware); credit notes count NEGATIVE.
-function docRevenueZAR(doc) {
-  const t = calcTotals(doc);
-  const z = toBase(t.due, doc.currency);
-  if (z == null) return null;
-  return doc.type === 'credit' ? -z : z;
+// THE source for every revenue figure — dashboard, chart, YTD, top clients and
+// the P&L all sum these items, so a figure and the list behind it cannot
+// disagree. Each item is a document as it counts toward revenue: ex-VAT
+// (VAT is collected for SARS, not earned), deposit-aware, in base currency
+// rounded to the cent, credit notes negative, dated by the basis. A document
+// with no exchange rate is listed in `uncounted` rather than silently dropped.
+function revenueItems(basis, pStart, pEnd) {
+  const items = [], uncounted = [];
+  let total = 0;
+  for (const d of state.documents) {
+    const rd = recognitionDate(d, basis);
+    if (!rd || rd < pStart || rd > pEnd) continue;
+    const t = calcTotals(d);
+    const sign = d.type === 'credit' ? -1 : 1;
+    const base = toBase(t.dueSubtotal, d.currency);
+    if (base == null) { uncounted.push({ doc: d, date: rd, gross: sign * t.due }); continue; }
+    const amount = round2(sign * base);
+    items.push({ doc: d, date: rd, amount, gross: sign * t.due });
+    total += amount;
+  }
+  items.sort((a, b) => a.date.localeCompare(b.date));
+  return { total: round2(total), items, uncounted, missingFx: uncounted.length };
+}
+
+// THE source for money owed: invoices still owing something after credit notes.
+// VAT-inclusive, because that is what the client owes. Dashboard, Finances,
+// ageing, the pipeline and the accountant export all read these items.
+function outstandingItems(asAt) {
+  asAt = asAt || todayISO();
+  const items = [], uncounted = [];
+  let total = 0;
+  for (const d of state.documents) {
+    if (d.type !== 'invoice' || (d.status !== 'sent' && d.status !== 'overdue')) continue;
+    const owed = invoiceDueNet(d);
+    if (owed <= 0) continue;                                  // fully credited — nothing owed
+    const due = d.dueDate || d.date;
+    const daysLate = Math.floor((new Date(asAt) - new Date(due)) / 86400000);
+    const base = toBase(owed, d.currency);
+    if (base == null) { uncounted.push({ doc: d, date: due, owed, daysLate }); continue; }
+    const amount = round2(base);
+    items.push({ doc: d, date: due, owed, daysLate, amount });
+    total += amount;
+  }
+  items.sort((a, b) => b.daysLate - a.daysLate);
+  return { total: round2(total), items, uncounted, missingFx: uncounted.length };
 }
 
 // Returns the "recognition date" for a doc under given basis. null if doc shouldn't count.
@@ -4075,16 +4174,10 @@ const DRAWINGS_CATEGORY = 'Drawings / Salary';
 // input VAT. Owner drawings are split out (distribution of profit, not a cost).
 // Direct costs (COGS) are expenses flagged directCost; everything else is overhead.
 function profitForPeriod(pStart, pEnd, basis) {
-  let revenue = 0, directCost = 0, overhead = 0, drawings = 0;
-  let missingFx = false;
-  for (const d of state.documents) {
-    if (d.type !== 'invoice' && d.type !== 'credit') continue;
-    const rd = recognitionDate(d, basis);
-    if (!rd || rd < pStart || rd > pEnd) continue;
-    const sub = toBase(calcTotals(d).dueSubtotal, d.currency); // ex-VAT, deposit-aware
-    if (sub == null) { missingFx = true; continue; }
-    revenue += d.type === 'credit' ? -sub : sub;   // credit notes reduce revenue
-  }
+  const rev = revenueItems(basis, pStart, pEnd);   // ex-VAT, deposit-aware, credits negative
+  const revenue = rev.total;
+  let directCost = 0, overhead = 0, drawings = 0;
+  let missingFx = rev.missingFx > 0;
   for (const e of state.expenses) {
     if (!e.date || e.date < pStart || e.date > pEnd) continue;
     const gross = toBase(e.amount, e.currency);
@@ -4105,20 +4198,10 @@ function profitForPeriod(pStart, pEnd, basis) {
 
 // Sums revenue by month, ZAR-equivalent, given basis. Returns { 'YYYY-MM': amount, total, missingFx: bool }
 function revenueByMonth(basis, periodStart, periodEnd) {
+  const rev = revenueItems(basis, periodStart, periodEnd);
   const out = {};
-  let total = 0;
-  let missingFx = false;
-  for (const d of state.documents) {
-    const rd = recognitionDate(d, basis);
-    if (!rd) continue;
-    if (rd < periodStart || rd > periodEnd) continue;
-    const z = docRevenueZAR(d);
-    if (z == null) { missingFx = true; continue; }
-    const ym = ymOf(rd);
-    out[ym] = (out[ym] || 0) + z;
-    total += z;
-  }
-  return { byMonth: out, total, missingFx };
+  for (const it of rev.items) { const ym = ymOf(it.date); out[ym] = round2((out[ym] || 0) + it.amount); }
+  return { byMonth: out, total: rev.total, missingFx: rev.missingFx };
 }
 
 function expensesByMonth(periodStart, periodEnd) {
@@ -4138,28 +4221,19 @@ function expensesByMonth(periodStart, periodEnd) {
 
 // Aging buckets for unpaid invoices. Reference date = today.
 function agingBuckets() {
-  const today = todayISO();
   const buckets = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
   const byClient = {};
-  let missingFx = false;
-  for (const d of state.documents) {
-    if (d.type !== 'invoice') continue;
-    if (d.status !== 'sent' && d.status !== 'overdue') continue;
-    const ref = d.dueDate || d.date;
-    const days = Math.floor((new Date(today) - new Date(ref)) / (24 * 60 * 60 * 1000));
-    let key = '0-30';
-    if (days > 90) key = '90+';
-    else if (days > 60) key = '61-90';
-    else if (days > 30) key = '31-60';
-    const z = toBase(invoiceDueNet(d), d.currency);
-    if (z == null) { missingFx = true; continue; }
-    if (z <= 0) continue;   // fully credited — no longer owed
-    buckets[key] += z;
-    byClient[d.clientId] = byClient[d.clientId] || { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0, total: 0 };
-    byClient[d.clientId][key] += z;
-    byClient[d.clientId].total += z;
+  const out = outstandingItems();
+  for (const it of out.items) {
+    const days = it.daysLate;
+    const key = days > 90 ? '90+' : days > 60 ? '61-90' : days > 30 ? '31-60' : '0-30';
+    const cid = it.doc.clientId;
+    buckets[key] = round2(buckets[key] + it.amount);
+    byClient[cid] = byClient[cid] || { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0, total: 0 };
+    byClient[cid][key] = round2(byClient[cid][key] + it.amount);
+    byClient[cid].total = round2(byClient[cid].total + it.amount);
   }
-  return { buckets, byClient, missingFx };
+  return { buckets, byClient, missingFx: out.missingFx };
 }
 
 // Quote conversion rate over a window (months back). Returns { sent, converted, rate (0..1), windowLabel }
@@ -4199,15 +4273,9 @@ function conversionRate(monthsBack) {
 
 // Pipeline: confirmed (unpaid invoices, ZAR) + likely (open quotes × conversion rate)
 function pipeline(convWindow) {
-  let confirmed = 0;
-  let missingFx = false;
-  for (const d of state.documents) {
-    if (d.type !== 'invoice') continue;
-    if (d.status !== 'sent' && d.status !== 'overdue') continue;
-    const z = toBase(invoiceDueNet(d), d.currency);
-    if (z == null) { missingFx = true; continue; }
-    confirmed += z;
-  }
+  const owed = outstandingItems();
+  const confirmed = owed.total;
+  let missingFx = owed.missingFx > 0;
   let openQuotesValue = 0;
   for (const d of state.documents) {
     if (d.type !== 'quote') continue;
@@ -4312,18 +4380,10 @@ function vatForPeriod(pStart, pEnd, basis) {
 
 // Top N clients by revenue in tax year (cash basis by default)
 function topClients(n, basis, periodStart, periodEnd) {
+  const rev = revenueItems(basis, periodStart, periodEnd);
   const byClient = {};
-  let total = 0;
-  let missingFx = false;
-  for (const d of state.documents) {
-    const rd = recognitionDate(d, basis);
-    if (!rd) continue;
-    if (rd < periodStart || rd > periodEnd) continue;
-    const z = docRevenueZAR(d);
-    if (z == null) { missingFx = true; continue; }
-    byClient[d.clientId] = (byClient[d.clientId] || 0) + z;
-    total += z;
-  }
+  for (const it of rev.items) byClient[it.doc.clientId] = round2((byClient[it.doc.clientId] || 0) + it.amount);
+  const total = rev.total, missingFx = rev.missingFx;
   const arr = Object.entries(byClient).map(([id, v]) => ({ id, name: clientName(id), value: v, share: total > 0 ? v / total : 0 }));
   arr.sort((a, b) => b.value - a.value);
   return { list: arr.slice(0, n), total, missingFx };
@@ -4365,11 +4425,17 @@ function svgBarChart(labels, values, opts = {}) {
     const reachedGoal = goalForMonth && v >= goalForMonth;
     const fill = reachedGoal ? '#C7F659' : 'rgba(245,242,236,0.62)';
     return `<g>
-      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3"><title>${labels[i]}: R${Math.round(v).toLocaleString('en-US')}</title></rect>
+      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3">${opts.barKeys ? '' : `<title>${labels[i]}: R${Math.round(v).toLocaleString('en-US')}</title>`}</rect>
       <text x="${x + barW / 2}" y="${H - PAD_B + 14}" font-size="10" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Sans, sans-serif">${labels[i]}</text>
       ${v > 0 ? `<text x="${x + barW / 2}" y="${y - 4}" font-size="9" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Mono, monospace">${formatChartTick(v)}</text>` : ''}
     </g>`;
   }).join('');
+
+  // A bar can be ~20px wide on a phone — too small to tap. The whole month
+  // column, label included, is the target, laid over the bars.
+  const hits = !opts.barKeys ? '' : values.map((v, i) => `<rect class="bar-hit" data-bar="${opts.barKeys[i]}" tabindex="0" role="button"
+      aria-label="${escapeHtml((opts.barNames || labels)[i])}: ${fmtMoney(v, baseCcy())}. Show what makes this up."
+      x="${PAD_L + slotW * i}" y="${PAD_T}" width="${slotW}" height="${H - PAD_T}"><title>${escapeHtml((opts.barNames || labels)[i])}: ${fmtMoney(v, baseCcy())}</title></rect>`).join('');
 
   let goal = '';
   if (goalSeries) {
@@ -4391,6 +4457,7 @@ function svgBarChart(labels, values, opts = {}) {
     ${gridLines.join('')}
     ${goal}
     ${bars}
+    ${hits}
   </svg>`;
 }
 function formatChartTick(v) {
@@ -4528,7 +4595,7 @@ function enhanceDatePickers(scope) {
 
 // Make custom clickable elements keyboard-accessible + labelled, without
 // editing every template: add tabindex/role and aria-labels after each render.
-const A11Y_CLICKABLE = '.tab, .opt, .row-clickable, [data-route-link], [data-deposit], [data-basis], [data-vat-basis], [data-conv], [data-saved-line], [data-exp-cat], [data-line-del]';
+const A11Y_CLICKABLE = '.tab, .opt, .row-clickable, [data-route-link], [data-deposit], [data-basis], [data-vat-basis], [data-conv], [data-saved-line], [data-exp-cat], [data-line-del], [data-drill], [data-bar]';
 function enhanceA11y(scope) {
   scope = scope || document;
   scope.querySelectorAll(A11Y_CLICKABLE).forEach((el) => {
@@ -4546,7 +4613,9 @@ function enhanceA11y(scope) {
 document.addEventListener('keydown', (e) => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches(A11Y_CLICKABLE)) {
     e.preventDefault();
-    e.target.click();
+    // SVG elements (chart columns) have no .click(); dispatch one instead.
+    if (typeof e.target.click === 'function') e.target.click();
+    else e.target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   }
 });
 
@@ -4592,42 +4661,20 @@ function renderSetupChecklist() {
 function renderDashboard() {
   const docs = state.documents.slice();
   const invoices = docs.filter((d) => d.type === 'invoice');
-  const unpaid = invoices.filter((d) => d.status === 'sent' || d.status === 'overdue');
-  const overdue = invoices.filter((d) => d.status === 'overdue').length;
-  const outstandingByCcy = {};
-  for (const inv of unpaid) {
-    outstandingByCcy[inv.currency] = (outstandingByCcy[inv.currency] || 0) + invoiceDueNet(inv);
-  }
-  let outstandingZAR = 0;
-  let canConvert = true;
-  for (const [c, v] of Object.entries(outstandingByCcy)) {
-    const z = toBase(v, c);
-    if (z == null) { canConvert = false; break; }
-    outstandingZAR += z;
-  }
+  const quotes = docs.filter((d) => d.type === 'quote');
+  // Every figure here comes from the same function as its detail panel, so the
+  // tile and the list behind it always agree (see test-drilldown.js).
+  const owedNow = outstandingItems();
+  const owing = owedNow.items.concat(owedNow.uncounted);
+  const unpaid = owing.map((it) => it.doc);
+  const overdue = unpaid.filter((d) => d.status === 'overdue').length;
   // Work billed as a deposit/part but not yet invoiced — committed income still to come.
   const committed = committedIncomeZAR();
 
-  // This-month-so-far (cash basis revenue this month, ZAR equiv)
+  // This month so far — ex-VAT revenue on the same basis as Finances.
   const today = todayISO();
   const monthStart = today.slice(0, 7) + '-01';
-  let thisMonthZAR = 0;
-  let thisMonthMissingFx = false;
-  for (const d of invoices) {
-    if (d.status !== 'paid') continue;
-    if (!d.paidDate || d.paidDate < monthStart || d.paidDate > today) continue;
-    const z = toBase(calcTotals(d).due, d.currency);   // deposit-aware: only what was billed
-    if (z == null) { thisMonthMissingFx = true; continue; }
-    thisMonthZAR += z;
-  }
-  // Issued credit notes dated this month reduce the net figure.
-  for (const d of docs) {
-    if (d.type !== 'credit' || d.status === 'draft') continue;
-    if (!d.date || d.date < monthStart || d.date > today) continue;
-    const z = toBase(calcTotals(d).due, d.currency);
-    if (z == null) { thisMonthMissingFx = true; continue; }
-    thisMonthZAR -= z;
-  }
+  const thisMonth = revenueItems(financesBasis, monthStart, today);
   const monthName = new Date(today + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
   // Quoted this month — value of quotes dated in the current month (base-currency equiv)
@@ -4643,10 +4690,6 @@ function renderDashboard() {
 
   const recent = docs.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 6);
 
-  const breakdownLines = Object.entries(outstandingByCcy)
-    .map(([c, v]) => `<div class="row"><span class="l">${c}</span><span class="v">${fmtMoney(v, c)}</span></div>`)
-    .join('');
-
   const fxLabel = state.settings.fxFetchedAt
     ? 'FX rates as of ' + new Date(state.settings.fxFetchedAt).toLocaleDateString('en-GB')
     : 'No FX rates yet — refresh';
@@ -4660,7 +4703,7 @@ function renderDashboard() {
   const profitSub = pf.missingFx
     ? 'Partial — FX rates missing for some currencies'
     : (pf.revenue > 0
-        ? `Net margin ${Math.round(pf.netMargin * 100)}% · ex-VAT`
+        ? `Net margin ${Math.round(pf.netMargin * 100)}% · ${basisLabel()} · ex VAT`
         : 'No income recorded yet this year');
 
   return `
@@ -4669,6 +4712,10 @@ function renderDashboard() {
         <h1 class="title-hero">Dashboard</h1>
       </div>
       <div class="page-actions">
+        <div class="doc-toggle" title="How income is counted — the same setting as Finances">
+          <div class="opt ${financesBasis === 'cash' ? 'active' : ''}" data-basis="cash">Cash</div>
+          <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-basis="accrual">Accrual</div>
+        </div>
         <button class="btn" id="refresh-fx">Refresh FX</button>
       </div>
     </div>
@@ -4678,15 +4725,15 @@ function renderDashboard() {
 
     <div class="bento dash">
       <!-- Hero: This month so far — LIME -->
-      <div class="card-v2 is-lime b-cell b-hero">
+      <div class="card-v2 is-lime b-cell b-hero" data-drill="this-month">
         <div class="stat-v2 is-lime">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;">
             <div class="label">This month so far</div>
             <span class="chip chip-on-bright">${monthName}</span>
           </div>
           <div class="value-wrap">
-            <div class="value">${fmtMoney(thisMonthZAR, baseCcy())}</div>
-            <div class="sub">${thisMonthMissingFx ? 'Partial — FX rates missing for some currencies' : (thisMonthZAR > 0 ? 'Cash basis · ' + baseCcy() + ' equivalent' : 'No income recorded yet this month')}</div>
+            <div class="value">${fmtMoney(thisMonth.total, baseCcy())}</div>
+            <div class="sub">${thisMonth.missingFx ? 'Partial — FX rates missing for some currencies' : (thisMonth.items.length ? `${basisLabel()} · ex VAT` : 'No income recorded yet this month')}</div>
           </div>
         </div>
       </div>
@@ -4706,21 +4753,21 @@ function renderDashboard() {
       </div>
 
       <!-- Outstanding — DARK with lime number -->
-      <div class="card-v2 is-dark b-cell">
+      <div class="card-v2 is-dark b-cell" data-drill="outstanding">
         <div class="stat-v2 is-dark">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;">
             <div class="label">Outstanding</div>
             ${overdue > 0 ? `<span class="chip chip-on-dark has-warn">${overdue} overdue</span>` : `<span class="chip chip-on-dark">${unpaid.length} unpaid</span>`}
           </div>
           <div class="value-wrap">
-            <div class="value" style="color:var(--accent-bright);">${canConvert ? fmtMoney(outstandingZAR, baseCcy()) : '—'}</div>
-            <div class="sub">${committed.total > 0 ? `+ ${fmtMoney(committed.total, baseCcy())} still to invoice on active jobs` : fxLabel}</div>
+            <div class="value" style="color:var(--accent-bright);">${fmtMoney(owedNow.total, baseCcy())}</div>
+            <div class="sub">${owedNow.missingFx ? 'Partial — FX rates missing for some currencies' : committed.total > 0 ? `+ ${fmtMoney(committed.total, baseCcy())} still to invoice on active jobs` : fxLabel}</div>
           </div>
         </div>
       </div>
 
       <!-- Unpaid count — CREAM-WARM (tan) -->
-      <div class="card-v2 is-cream-warm b-cell">
+      <div class="card-v2 is-cream-warm b-cell" data-drill="outstanding">
         <div class="stat-v2 is-cream-warm">
           <div class="label">Unpaid invoices</div>
           <div class="value-wrap">
@@ -4731,18 +4778,18 @@ function renderDashboard() {
       </div>
 
       <!-- Clients — CHOCOLATE -->
-      <div class="card-v2 is-chocolate b-cell">
+      <div class="card-v2 is-chocolate b-cell" data-route-link="clients">
         <div class="stat-v2 is-chocolate">
           <div class="label">Clients</div>
           <div class="value-wrap">
             <div class="value">${state.clients.length}</div>
-            <div class="sub">${invoices.length} invoices · ${docs.length - invoices.length} quotes</div>
+            <div class="sub">${invoices.length} invoices · ${quotes.length} quotes</div>
           </div>
         </div>
       </div>
 
       <!-- Documents — CREAM (light) -->
-      <div class="card-v2 is-cream b-cell">
+      <div class="card-v2 is-cream b-cell" data-route-link="documents">
         <div class="stat-v2 is-cream">
           <div class="label">Documents</div>
           <div class="value-wrap">
@@ -4785,6 +4832,140 @@ function renderDashboard() {
       ${recent.length ? renderDocTableInline(recent) : '<div class="empty" style="padding:24px;">No documents yet.</div>'}
     </div>
   `;
+}
+
+/* ============================================================
+   DETAIL PANEL — what a summary figure is made of
+   ============================================================ */
+
+// Every drill-down renders through here: a title, how things were counted, the
+// rows, and a total that matches the figure that was clicked. Rows come from the
+// same function as the figure (revenueItems, outstandingItems,
+// committedIncomeZAR), so they add up by construction — test-drilldown.js checks.
+// Row text is plain; it is escaped here, so callers never build HTML.
+const signedMoney = (n, ccy) => (n < 0 ? '−' + fmtMoney(-n, ccy) : fmtMoney(n, ccy));
+function openDetailPanel({ title, note, sections, total, totalLabel, empty }) {
+  const row = (r) => `
+    <div class="detail-row row-clickable" data-detail-doc="${r.doc.id}">
+      <div class="dr-main">
+        <div class="dr-title">${docNumber(r.doc)} <span class="text-mid">· ${escapeHtml(clientName(r.doc.clientId))}</span></div>
+        <div class="dr-sub"><span${r.late ? ' class="is-late"' : ''}>${escapeHtml(r.when)}</span>${r.detail ? ' · ' + escapeHtml(r.detail) : ''}</div>
+      </div>
+      <div class="dr-amt">
+        <div class="fig">${r.amount == null ? '—' : signedMoney(r.amount, baseCcy())}</div>
+        ${r.aside ? `<div class="dr-sub">${escapeHtml(r.aside)}</div>` : ''}
+      </div>
+    </div>`;
+  const section = (sec) => `
+    <div class="detail-section${sec.muted ? ' is-muted' : ''}">
+      ${sec.heading ? `<div class="detail-sec-head"><span>${escapeHtml(sec.heading)}</span>${sec.subtotal != null ? `<span class="fig">${signedMoney(sec.subtotal, baseCcy())}</span>` : ''}</div>` : ''}
+      ${sec.rows.map(row).join('')}
+    </div>`;
+  const body = sections.some((sec) => sec.rows.length)
+    ? sections.filter((sec) => sec.rows.length).map(section).join('')
+    : `<div class="empty" style="padding:28px 4px;">${escapeHtml(empty || 'Nothing here.')}</div>`;
+  showModal(`
+    <div class="modal-overlay is-sheet" id="modal-overlay">
+      <div class="modal detail-sheet" role="dialog" aria-label="${escapeHtml(title)}">
+        <div class="modal-head">
+          <div><div class="ttl">${escapeHtml(title)}</div>${note ? `<div class="text-sm text-mid" style="margin-top:4px;">${escapeHtml(note)}</div>` : ''}</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">${body}</div>
+        <div class="modal-foot detail-total"><span>${escapeHtml(totalLabel)}</span><span class="fig">${signedMoney(total, baseCcy())}</span></div>
+      </div>
+    </div>`);
+  document.querySelectorAll('[data-detail-doc]').forEach((el) =>
+    el.addEventListener('click', () => openDocPreview(el.dataset.detailDoc)));
+}
+
+const BASIS_NOTE = { cash: 'Cash basis — counted when paid', accrual: 'Accrual basis — counted on the invoice date' };
+const basisLabel = () => (financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis');
+const monthTitle = (ym) => new Date(ym + '-01T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
+// What was invoiced beside what counted: the VAT-inclusive total when VAT was
+// charged, or the original amount when it was billed in another currency.
+function revenueAside(it) {
+  const d = it.doc;
+  if (docHasVat(d)) return signedMoney(it.gross, d.currency) + ' incl. VAT';
+  return d.currency !== baseCcy() ? signedMoney(it.gross, d.currency) : '';
+}
+function revenueRows(items, basis) {
+  return items.map((it) => ({
+    doc: it.doc, amount: it.amount, aside: revenueAside(it), detail: it.doc.projectTitle || '',
+    when: (it.doc.type === 'credit' ? 'Credit note ' : basis === 'cash' ? 'Paid ' : 'Invoiced ') + fmtDate(it.date),
+  }));
+}
+// A document with no exchange rate is shown, not dropped — so the list explains
+// why it and the figure leave something out.
+function uncountedSection(list) {
+  return {
+    heading: 'Not counted — no exchange rate (Refresh FX on the Dashboard)', muted: true,
+    rows: list.map((u) => ({ doc: u.doc, amount: null, when: fmtDate(u.date), aside: signedMoney(u.gross != null ? u.gross : u.owed, u.doc.currency) })),
+  };
+}
+
+function openRevenueDetail(from, to, title) {
+  const basis = financesBasis;
+  const rev = revenueItems(basis, from, to);
+  // An empty cash month usually has invoices in it that are simply not paid yet.
+  const unpaidInRange = state.documents.filter((d) => d.type === 'invoice' && (d.status === 'sent' || d.status === 'overdue') && d.date >= from && d.date <= to).length;
+  const empty = basis === 'cash' && unpaidInRange
+    ? `${unpaidInRange} invoice${unpaidInRange === 1 ? '' : 's'} dated in this period ${unpaidInRange === 1 ? 'isn’t' : 'aren’t'} paid yet. On cash basis ${unpaidInRange === 1 ? 'it counts' : 'they count'} in the month ${unpaidInRange === 1 ? 'it’s' : 'they’re'} paid.`
+    : basis === 'cash' ? 'Nothing was paid in this period.' : 'No invoices dated in this period.';
+  openDetailPanel({
+    title, note: BASIS_NOTE[basis] + ' · ex VAT', totalLabel: 'Revenue', total: rev.total, empty,
+    sections: [{ rows: revenueRows(rev.items.slice().reverse(), basis) }, uncountedSection(rev.uncounted)],
+  });
+}
+
+function openYtdDetail(from, to, title) {
+  const basis = financesBasis;
+  const rev = revenueItems(basis, from, to);
+  const byMonth = {};
+  for (const it of rev.items) (byMonth[ymOf(it.date)] = byMonth[ymOf(it.date)] || []).push(it);
+  const sections = Object.keys(byMonth).sort().reverse().map((ym) => ({
+    heading: monthTitle(ym),
+    subtotal: round2(byMonth[ym].reduce((a, it) => a + it.amount, 0)),
+    rows: revenueRows(byMonth[ym].slice().reverse(), basis),
+  }));
+  sections.push(uncountedSection(rev.uncounted));
+  openDetailPanel({ title, note: BASIS_NOTE[basis] + ' · ex VAT', sections, total: rev.total, totalLabel: 'Revenue', empty: 'No income recorded yet this tax year.' });
+}
+
+function openOutstandingDetail() {
+  const out = outstandingItems();
+  const committed = committedIncomeZAR();
+  const rows = out.items.map((it) => {
+    const credited = round2(calcTotals(it.doc).due - it.owed);
+    const asides = [];
+    if (it.doc.currency !== baseCcy()) asides.push(fmtMoney(it.owed, it.doc.currency));
+    if (credited > 0) asides.push(`after ${fmtMoney(credited, it.doc.currency)} credited`);
+    const d = it.daysLate;
+    return {
+      doc: it.doc, amount: it.amount, aside: asides.join(' · '), detail: it.doc.projectTitle || '', late: d > 0,
+      when: d > 0 ? `${d} day${d === 1 ? '' : 's'} overdue` : d === 0 ? 'Due today' : `Due in ${-d} day${d === -1 ? '' : 's'}`,
+    };
+  });
+  const sections = [{ heading: committed.items.length ? 'Unpaid invoices' : '', subtotal: committed.items.length ? out.total : null, rows }];
+  sections.push(uncountedSection(out.uncounted.map((u) => ({ ...u, gross: u.owed }))));
+  sections.push({
+    heading: 'Still to invoice on active jobs — not in the total', muted: true, subtotal: committed.total,
+    rows: committed.items.map((it) => ({ doc: it.doc, amount: it.amount, when: `${round2(100 - it.remainingPct)}% invoiced · ${it.remainingPct}% to go`, detail: it.doc.projectTitle || '' })),
+  });
+  openDetailPanel({
+    title: 'Outstanding', note: 'Most overdue first · incl. VAT, after credit notes', sections,
+    total: out.total, totalLabel: 'Outstanding', empty: 'Nothing outstanding — every invoice is paid.',
+  });
+}
+
+// One entry point for every clickable figure, so tiles only carry a key.
+function openDrill(key) {
+  const today = todayISO();
+  if (key === 'this-month') return openRevenueDetail(today.slice(0, 7) + '-01', today, `Revenue · ${monthTitle(ymOf(today))} so far`);
+  if (key === 'ytd') { const ty = taxYearFor(today); return openYtdDetail(ty.start, today, `Revenue · ${ty.label} to date`); }
+  if (key === 'outstanding') return openOutstandingDetail();
+  if (key.startsWith('month:')) { const ym = key.slice(6); return openRevenueDetail(ym + '-01', ym + '-31', `Revenue · ${monthTitle(ym)}`); }
 }
 
 // Lightweight table for the dashboard — no outer card frame, just rows
@@ -4951,9 +5132,12 @@ function renderFinancesOverviewParts() {
     const prev = taxYearFor(`${ty.startYear - 1}-04-01`);
     return revenueByMonth(financesBasis, prev.start, prev.end);
   })();
-  const thisMonth = revYear.byMonth[thisMonthYM] || 0;
-  const ytd = revYear.total;
+  // The same functions as the dashboard and the detail panels. YTD runs to today,
+  // which makes it exactly the P&L's revenue line below.
+  const thisMonth = revenueItems(financesBasis, thisMonthYM + '-01', today).total;
+  const ytd = revenueItems(financesBasis, ty.start, today).total;
   const ytdPrev = revPrevYear.total;
+  const owed = outstandingItems();
 
   // Expenses
   const expYear = expensesByMonth(ty.start, ty.end);
@@ -5018,21 +5202,21 @@ function renderFinancesOverviewParts() {
 
     <!-- Headline bento -->
     <div class="bento" style="grid-template-columns:repeat(3,1fr);">
-      <div class="card-v2 is-lime b-cell" style="grid-column:span 1;">
+      <div class="card-v2 is-lime b-cell" style="grid-column:span 1;" data-drill="this-month">
         <div class="stat-v2 is-lime">
           <div class="label">This month so far</div>
           <div class="value-wrap">
             <div class="value" style="font-size:48px;">${fmtMoney(thisMonth, baseCcy())}</div>
-            <div class="sub">${monthShort(new Date().getMonth())} ${new Date().getFullYear()}</div>
+            <div class="sub">${monthShort(new Date().getMonth())} ${new Date().getFullYear()} · ex VAT</div>
           </div>
         </div>
       </div>
-      <div class="card-v2 is-dark b-cell" style="grid-column:span 1;">
+      <div class="card-v2 is-dark b-cell" style="grid-column:span 1;" data-drill="ytd">
         <div class="stat-v2 is-dark">
           <div class="label">YTD earned</div>
           <div class="value-wrap">
             <div class="value" style="font-size:42px;color:var(--accent-bright);">${fmtMoney(ytd, baseCcy())}</div>
-            <div class="sub">${ytdPrev > 0 ? `vs ${fmtMoney(ytdPrev, baseCcy())} last year` : 'No prior year data yet'}</div>
+            <div class="sub">${ytdPrev > 0 ? `vs ${fmtMoney(ytdPrev, baseCcy())} last year` : 'No prior year data yet'} · ex VAT</div>
             ${ytdProgressPct != null ? `
               <div style="margin-top:14px;background:rgba(245,242,236,0.10);border-radius:99px;height:6px;overflow:hidden;">
                 <div style="height:100%;background:var(--accent-bright);width:${ytdProgressPct}%;border-radius:99px;"></div>
@@ -5042,12 +5226,12 @@ function renderFinancesOverviewParts() {
           </div>
         </div>
       </div>
-      <div class="card-v2 is-cream-warm b-cell" style="grid-column:span 1;">
+      <div class="card-v2 is-cream-warm b-cell" style="grid-column:span 1;" data-drill="outstanding">
         <div class="stat-v2 is-cream-warm">
           <div class="label">Outstanding</div>
           <div class="value-wrap">
-            <div class="value" style="font-size:42px;">${fmtMoney(aging.buckets['0-30'] + aging.buckets['31-60'] + aging.buckets['61-90'] + aging.buckets['90+'], baseCcy())}</div>
-            <div class="sub">${state.documents.filter((d) => d.type === 'invoice' && (d.status === 'sent' || d.status === 'overdue')).length} unpaid invoices</div>
+            <div class="value" style="font-size:42px;">${fmtMoney(owed.total, baseCcy())}</div>
+            <div class="sub">${owed.items.length + owed.uncounted.length} unpaid invoice${owed.items.length + owed.uncounted.length === 1 ? '' : 's'} · incl. VAT</div>
           </div>
         </div>
       </div>
@@ -5058,10 +5242,10 @@ function renderFinancesOverviewParts() {
     <div class="card-v2 is-chocolate" style="margin-bottom:18px;padding:24px 28px;">
       <div class="section-head" style="margin-top:0;">
         <h2 style="color:var(--text);">Monthly revenue · ${ty.label}</h2>
-        <span class="text-sm" style="color:var(--text-mid);">Bars: ${financesBasis} · Dashed: monthly goal · Lime: hit goal</span>
+        <span class="text-sm" style="color:var(--text-mid);">Bars: ${financesBasis}, ex VAT · Dashed: monthly goal · Lime: hit goal · Tap a month for its invoices</span>
       </div>
       <div style="overflow-x:auto;">
-        ${svgBarChart(monthLabels, monthValues, { width: 760, height: 260, goalSeries: annualGoal > 0 ? monthlyGoals : null })}
+        ${svgBarChart(monthLabels, monthValues, { width: 760, height: 260, goalSeries: annualGoal > 0 ? monthlyGoals : null, barKeys: ty.months, barNames: ty.months.map(monthTitle) })}
       </div>
     </div>
 
@@ -7882,14 +8066,14 @@ function exportAccountantReport() {
   row();
 
   // OUTSTANDING
-  row(`OUTSTANDING (unpaid invoices)`);
-  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount', baseCcy() + ' equiv', 'Days outstanding');
-  const today = todayISO();
-  for (const d of state.documents.filter((x) => x.type === 'invoice' && (x.status === 'sent' || x.status === 'overdue')).sort((a, b) => a.date.localeCompare(b.date))) {
-    const t = calcTotals(d);
-    const zar = toBase(t.due, d.currency);
-    const days = Math.floor((new Date(today) - new Date(d.dueDate || d.date)) / (24 * 3600 * 1000));
-    row(docNumber(d), d.date, d.dueDate || '', clientName(d.clientId), d.currency, t.due.toFixed(2), zar == null ? '' : zar.toFixed(2), Math.max(days, 0));
+  // The same items as the Outstanding tile: owed after credit notes, so an
+  // accountant never sees a figure the app itself does not show.
+  row(`OUTSTANDING (unpaid invoices, after credit notes)`);
+  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount owed', baseCcy() + ' equiv', 'Days outstanding');
+  const owedNow = outstandingItems();
+  for (const it of owedNow.items.concat(owedNow.uncounted).sort((a, b) => a.doc.date.localeCompare(b.doc.date))) {
+    const d = it.doc;
+    row(docNumber(d), d.date, d.dueDate || '', clientName(d.clientId), d.currency, it.owed.toFixed(2), it.amount == null ? '' : it.amount.toFixed(2), Math.max(it.daysLate, 0));
   }
   row();
 
@@ -11514,6 +11698,9 @@ function bindViewEvents() {
       else if (action === 'credit') createCreditNoteFromInvoice(id);
     });
   });
+  document.querySelectorAll('[data-drill]').forEach((el) => el.addEventListener('click', () => openDrill(el.dataset.drill)));
+  document.querySelectorAll('[data-bar]').forEach((el) => el.addEventListener('click', () => openDrill('month:' + el.dataset.bar)));
+
   document.querySelectorAll('[data-route-link]').forEach((el) => {
     el.addEventListener('click', () => {
       const r = el.dataset.routeLink;
@@ -11600,6 +11787,7 @@ function bindViewEvents() {
   }
 
   if (currentRoute === 'dashboard') {
+    document.querySelectorAll('[data-basis]').forEach((el) => el.addEventListener('click', () => { financesBasis = el.dataset.basis; render(); }));
     const fx = document.getElementById('refresh-fx');
     if (fx) fx.addEventListener('click', async () => {
       fx.textContent = 'Refreshing…';
