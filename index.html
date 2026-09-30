@@ -3013,7 +3013,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -5504,10 +5504,16 @@ function renderVatViewParts() {
 
 function openVatPeriodModal(p) {
   const det = vatPeriodDetail(p.start, p.end, financesBasis);
+  // On cash basis an invoice counts on its paid date. One "paid" before it was
+  // even issued is almost always a wrong bank match, and it puts VAT in the
+  // wrong return — so it is called out, not left for the user to spot.
+  const paidEarly = (r) => r.doc.type === 'invoice' && r.doc.date && r.recognised < r.doc.date;
+  const earlyDate = (r) => paidEarly(r) ? `<div class="text-sm" style="color:var(--danger);">Paid before it was issued (${fmtDate(r.doc.date)})</div>` : '';
+  const early = det.invoices.concat(det.noVatInvoices).filter(paidEarly);
   const invRows = det.invoices.map((r) => `
     <tr>
       <td class="num">${docNumber(r.doc)}</td>
-      <td>${fmtDate(r.recognised)}</td>
+      <td>${fmtDate(r.recognised)}${earlyDate(r)}</td>
       <td>${escapeHtml(clientName(r.doc.clientId))}</td>
       <td class="amount">${fmtMoney(r.total, r.doc.currency)}</td>
       <td class="amount"><strong>${fmtMoney(r.vat, r.doc.currency)}</strong></td>
@@ -5525,7 +5531,7 @@ function openVatPeriodModal(p) {
   const noVatRows = det.noVatInvoices.map((r) => `
     <tr>
       <td class="num">${docNumber(r.doc)}</td>
-      <td>${fmtDate(r.recognised)}</td>
+      <td>${fmtDate(r.recognised)}${earlyDate(r)}</td>
       <td>${escapeHtml(clientName(r.doc.clientId))}</td>
       <td class="amount"><strong>${fmtMoney(r.total, r.doc.currency)}</strong></td>
     </tr>
@@ -5543,6 +5549,11 @@ function openVatPeriodModal(p) {
       <strong>${det.missingFx} document${det.missingFx === 1 ? '' : 's'} could not be converted to ${escapeHtml(baseCcy())}</strong>
       <div class="text-sm text-mid" style="margin-top:4px;">No exchange rate is stored for that currency, so ${det.missingFx === 1 ? 'it is' : 'they are'} excluded from the totals below. Add the rate in Settings before you file.</div>
     </div>` : '';
+  const earlyWarning = early.length ? `
+    <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;background:rgba(255,107,92,.10);border-left:3px solid var(--danger);">
+      <strong>${early.map((r) => escapeHtml(docNumber(r.doc))).join(', ')} ${early.length === 1 ? 'is' : 'are'} marked paid before ${early.length === 1 ? 'it was' : 'they were'} issued</strong>
+      <div class="text-sm text-mid" style="margin-top:4px;">That usually means a bank payment was matched to the wrong invoice of the same amount. On cash basis the paid date decides the VAT period, so check ${early.length === 1 ? 'it' : 'each one'} before you file: open the invoice and set the real paid date, or set it back to Sent if it has not been paid.</div>
+    </div>` : '';
 
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
@@ -5555,7 +5566,7 @@ function openVatPeriodModal(p) {
           </div>
         </div>
         <div class="modal-body">
-          ${fxWarning}
+          ${fxWarning}${earlyWarning}
           <div class="section-head" style="margin:0 0 10px;"><h2 style="font-size:16px;">For your VAT return</h2></div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px;">
             ${figure('1 · Invoiced WITH VAT', fmtMoney(det.standardExcl, baseCcy()), 'Excluding VAT. VAT on this: <strong>' + fmtMoney(det.output, baseCcy()) + '</strong>')}
@@ -7780,7 +7791,11 @@ function buildMatches(parsedStatement) {
 
     if (isCredit) {
       // Match against ALL invoices (paid + unpaid). Paid matches → skip with reason.
-      const allInvoices = state.documents.filter((d) => d.type === 'invoice');
+      // A payment cannot settle an invoice issued after it. Without this, an
+      // August receipt for an invoice already marked paid matched a September
+      // invoice of the same amount ("prefer unpaid", below), marked it paid in
+      // August and pulled its VAT into the wrong return.
+      const allInvoices = state.documents.filter((d) => d.type === 'invoice' && !(d.date && tx.date && d.date > tx.date));
       const refInvNum = extractInvNum(ref) || extractInvNum(desc);
       let matched = null;
       let reasonMatch = '';
