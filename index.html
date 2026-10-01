@@ -3058,7 +3058,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4265,13 +4265,22 @@ function expensesByMonth(periodStart, periodEnd) {
 }
 
 // Aging buckets for unpaid invoices. Reference date = today.
+// Ageing means one thing everywhere: days since the invoice was issued — how a
+// client and their accountant read "30 days" on a statement (Sage Pastel's
+// convention; decided with Lee, 1 Oct 2026). Days past due is a different
+// number, shown as "N days overdue" where chasing is the point.
+function ageBucket(invoiceDate, asAt) {
+  const days = Math.floor((new Date(asAt + 'T00:00:00') - new Date(invoiceDate + 'T00:00:00')) / 86400000);
+  return days > 90 ? '90+' : days > 60 ? '61-90' : days > 30 ? '31-60' : '0-30';
+}
+
 function agingBuckets() {
   const buckets = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
   const byClient = {};
   const out = outstandingItems();
+  const today = todayISO();
   for (const it of out.items) {
-    const days = it.daysLate;
-    const key = days > 90 ? '90+' : days > 60 ? '61-90' : days > 30 ? '31-60' : '0-30';
+    const key = ageBucket(it.doc.date, today);
     const cid = it.doc.clientId;
     buckets[key] = round2(buckets[key] + it.amount);
     byClient[cid] = byClient[cid] || { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0, total: 0 };
@@ -8264,7 +8273,7 @@ function exportAccountantReport() {
   // The same items as the Outstanding tile: owed after credit notes, so an
   // accountant never sees a figure the app itself does not show.
   row(`OUTSTANDING (unpaid invoices, after credit notes)`);
-  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount owed', baseCcy() + ' equiv', 'Days outstanding');
+  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount owed', baseCcy() + ' equiv', 'Days overdue');
   const owedNow = outstandingItems();
   for (const it of owedNow.items.concat(owedNow.uncounted).sort((a, b) => a.doc.date.localeCompare(b.doc.date))) {
     const d = it.doc;
@@ -9064,15 +9073,24 @@ function clientStatement(clientId, opts = {}) {
   lines.sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.label.localeCompare(b.label));
   const closing = round2(lines.reduce((n, l) => n + l.amount, opening));
 
-  // Ageing of what is still open, measured from each invoice's due date.
-  const ageing = { current: 0, d30: 0, d60: 0, d90: 0, d90plus: 0 };
+  // Ageing of what is still open, by days since each invoice was issued.
+  const ageing = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
   for (const d of invoices) {
     if (d.status !== 'sent' && d.status !== 'overdue') continue;
     const owed = invoiceDueNet(d);
     if (!owed) continue;
-    const days = Math.floor((new Date(asAt + 'T00:00:00') - new Date((d.dueDate || d.date) + 'T00:00:00')) / 86400000);
-    const bucket = days <= 0 ? 'current' : days <= 30 ? 'd30' : days <= 60 ? 'd60' : days <= 90 ? 'd90' : 'd90plus';
+    const bucket = ageBucket(d.date, asAt);
     ageing[bucket] = round2(ageing[bucket] + owed);
+  }
+  // A credit note not raised against an invoice is the client's to set against
+  // anything, so it ages by its own date as a negative — without it the buckets
+  // would not add up to the balance printed above them.
+  for (const d of credits) {
+    if (d.appliesToInvoiceId) continue;
+    const amt = calcTotals(d).due;
+    if (!amt) continue;
+    const bucket = ageBucket(d.date, asAt);
+    ageing[bucket] = round2(ageing[bucket] - amt);
   }
 
   return { mode, currency, currencies, from, to, asAt, opening, lines, closing, ageing };
@@ -9206,8 +9224,7 @@ async function buildStatementPdf(clientId, st) {
   // Ageing — only where something is actually outstanding
   const ageTotal = Object.values(st.ageing).reduce((a, b) => a + b, 0);
   if (ageTotal) {
-    const cols = [['Current', st.ageing.current], ['1–30 days', st.ageing.d30], ['31–60 days', st.ageing.d60],
-      ['61–90 days', st.ageing.d90], ['90+ days', st.ageing.d90plus]];
+    const cols = Object.entries(st.ageing).map(([k, v]) => [k.replace('-', '–') + ' days', v]);
     doc.autoTable({
       head: [cols.map((x) => x[0])], body: [cols.map((x) => money(x[1]))],
       startY: y, margin: { left: M, right: M }, theme: 'plain',
