@@ -2794,6 +2794,9 @@ const CLOUD_TOKEN_STORE = 'seed-cloud-token-v1';
 const CLOUD_EMAIL_STORE = 'seed-cloud-email-v1';
 const CLOUD_VERSION_STORE = 'seed-cloud-version-v1';   // last version this device wrote or read
 const CLOUD_LAST_STORE = 'seed-cloud-last-v1';         // ISO time of the last successful upload
+const CLOUD_DIRTY_STORE = 'seed-cloud-dirty-v1';       // '1' while this device has changes the server hasn't got
+const CLOUD_COUNTS_STORE = 'seed-cloud-counts-v1';     // record counts of the last copy this device uploaded
+const CLOUD_FP_STORE = 'seed-cloud-fp-v1';             // fingerprint of the contents of that copy
 
 function cloudGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function cloudSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, String(v)); } catch (e) {} }
@@ -2803,11 +2806,15 @@ function cloudEmail() { return cloudGet(CLOUD_EMAIL_STORE); }
 function cloudEnrolled() { return !!cloudToken(); }
 function cloudKnownVersion() { return Number(cloudGet(CLOUD_VERSION_STORE) || 0); }
 function cloudLastBackupAt() { return cloudGet(CLOUD_LAST_STORE); }
+function cloudLastCounts() { try { return JSON.parse(cloudGet(CLOUD_COUNTS_STORE) || 'null'); } catch (e) { return null; } }
 
 function cloudForget() {
   cloudSet(CLOUD_TOKEN_STORE, null);
   cloudSet(CLOUD_VERSION_STORE, null);
   cloudSet(CLOUD_LAST_STORE, null);
+  cloudSet(CLOUD_DIRTY_STORE, null);
+  cloudSet(CLOUD_COUNTS_STORE, null);
+  cloudSet(CLOUD_FP_STORE, null);
 }
 
 async function cloudFetch(path, opts) {
@@ -2819,6 +2826,7 @@ async function cloudFetch(path, opts) {
     method: o.method || 'GET',
     headers,
     body: o.body,
+    keepalive: !!o.keepalive,   // lets a small upload finish after the page closes
   });
   return res;
 }
@@ -2859,11 +2867,13 @@ async function cloudVerifyCode(email, code) {
    server refuses a mismatch rather than applying it, so an old device coming
    back to life cannot quietly replace newer work. A conflict is returned, not
    thrown, because the caller has to ask the user what to do about it. */
-async function cloudUpload(blobText, counts) {
+async function cloudUpload(blobText, counts, opts) {
   if (!cloudEnrolled()) throw new Error('not_enrolled');
   const bytes = new TextEncoder().encode(blobText);
   const res = await cloudFetch('/backup', {
     method: 'PUT',
+    // Browsers cap keepalive bodies at 64 KB and refuse larger ones outright.
+    keepalive: !!(opts && opts.keepalive) && bytes.length < 60000,
     headers: {
       'Content-Type': 'application/octet-stream',
       'X-Simpl-Expect-Version': String(cloudKnownVersion()),
@@ -2884,6 +2894,7 @@ async function cloudUpload(blobText, counts) {
   const body = await res.json();
   cloudSet(CLOUD_VERSION_STORE, body.version);
   cloudSet(CLOUD_LAST_STORE, new Date().toISOString());
+  cloudSet(CLOUD_COUNTS_STORE, JSON.stringify(counts || {}));
   return { conflict: false, version: body.version, size: body.size };
 }
 
@@ -3059,7 +3070,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.4.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3672,7 +3683,7 @@ async function saveState() {
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
-  try { scheduleCloudBackup(); } catch (e) {}
+  try { scheduleCloudBackup(blob); } catch (e) {}
   // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
   // is effectively unlimited.
   if (where === 'localStorage' && !quotaWarned && blob.length > 3.5 * 1024 * 1024) {
@@ -3698,14 +3709,12 @@ function applyAutoOverdue(s) {
 }
 
 function lockApp() {
-  // A change from the last few minutes may still be waiting for the batched
-  // server backup. Seal it now, with the key about to be dropped, and send it.
-  if (cloudTimer && cloudEnrolled() && currentDek) {
-    clearTimeout(cloudTimer); cloudTimer = null;
-    const counts = cloudCounts(state);
-    backupFileText({ s: state, dek: currentDek, wr: currentWrappers })
-      .then((blob) => cloudUpload(blob, counts)).catch(() => {});
-  }
+  // Changes still waiting for the batched server backup go now, through the
+  // same checks as any backup (only if changed, never a silent shrink). The
+  // upload starts before the key and data are dropped below.
+  clearTimeout(cloudTimer); cloudTimer = null;
+  runCloudBackup({ silent: true, closing: true });
+  lastVaultBlob = null;
   state = null;
   currentPassword = null;
   // Locked means the key goes too. Holding it would let anyone with the
@@ -13816,35 +13825,85 @@ function openIosInstallModal() {
    in src/merge.js can combine both sides and a replace cannot be undone.
    ============================================================ */
 
-const CLOUD_DEBOUNCE_MS = 5 * 60 * 1000;   // at most one upload per 5 minutes
+/* Backup runs within a minute of every change, and only when something
+   changed: every upload is a new server copy, so empty repeats would crowd out
+   the history. A close can cut an upload off — no browser guarantees code runs
+   at close — so "changes not yet backed up" is remembered on the device and
+   sent on the next open. */
+const CLOUD_DEBOUNCE_MS = 60 * 1000;
 let cloudTimer = null;
 let cloudBusy = false;
 let cloudLastError = null;
+let lastVaultBlob = null;   // the encrypted copy written by the last save
+let cloudSaveSeq = 0;       // bumps on every save; an upload clears "dirty" only if none happened meanwhile
+let cloudShrinkOk = false;  // confirmed this session: a much smaller backup is intended
+let cloudShrinkAsked = false;
 
 /* Called from saveState. Must never throw and never block a save: the user's
    data reaching local storage always matters more than it reaching us. */
-function scheduleCloudBackup() {
+// "Changed" means the contents differ from the last copy sent — not merely
+// that a save ran. Unlocking and housekeeping save without changing anything,
+// and each of those would otherwise become another server copy.
+function cloudFingerprint(s) {
+  const str = JSON.stringify(s);
+  return str.length + ':' + fnv1a(str);
+}
+
+function scheduleCloudBackup(blob) {
   try {
     if (!cloudEnrolled()) return;
+    if (blob) lastVaultBlob = blob;
+    cloudSaveSeq++;
+    if (cloudFingerprint(state) === cloudGet(CLOUD_FP_STORE)) { cloudSet(CLOUD_DIRTY_STORE, null); return; }
+    cloudSet(CLOUD_DIRTY_STORE, '1');
     clearTimeout(cloudTimer);
     cloudTimer = setTimeout(() => { cloudTimer = null; runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
   } catch (e) {}
 }
 
+function cloudCountTotal(c) {
+  return ['invoices', 'quotes', 'credits', 'clients', 'projects', 'expenses']
+    .reduce((n, k) => n + (Number(c && c[k]) || 0), 0);
+}
+// A backup that would replace real records with an empty or far smaller copy
+// is never sent silently. A disaster on the device — a vault emptied, reset or
+// replaced — would otherwise upload itself over every good copy on the server.
+function cloudShrinks(counts) {
+  const last = cloudLastCounts();
+  if (!last || cloudShrinkOk) return false;
+  const before = cloudCountTotal(last);
+  return before >= 5 && cloudCountTotal(counts) < before * 0.5;
+}
+
 async function runCloudBackup(opts) {
   const o = opts || {};
   if (cloudBusy || !cloudEnrolled() || !currentDek) return null;
+  if (o.silent && cloudGet(CLOUD_DIRTY_STORE) !== '1') return null;   // nothing new to send
+  const counts = cloudCounts(state);
+  if (cloudShrinks(counts)) {
+    const mh = document.getElementById('modal-host');
+    if (!o.closing && !cloudShrinkAsked && mh && !mh.innerHTML.trim()) openCloudShrinkModal(counts);
+    return null;
+  }
   cloudBusy = true;
   cloudLastError = null;
+  const seq = cloudSaveSeq;
+  const fp = cloudFingerprint(state);
   try {
-    const blob = await backupFileText();
-    const res = await cloudUpload(blob, cloudCounts(state));
+    // The copy already encrypted by the last save: nothing to re-encrypt, so a
+    // close-time upload starts at once, within the event that announced it.
+    const blob = lastVaultBlob ? backupTextFromVaultBlob(lastVaultBlob) : await backupFileText();
+    const res = await cloudUpload(blob, counts, { keepalive: !!o.closing });
     if (res.conflict) {
       // Never resolve this quietly. The stale-device case looks exactly like
-      // the normal case from here, and guessing wrong costs real work.
-      openCloudConflictModal(res.server, blob);
+      // the normal case from here, and guessing wrong costs real work. On the
+      // way out (close, lock) there is no one to ask — "dirty" stays set and
+      // the next save raises it.
+      if (!o.closing) openCloudConflictModal(res.server, blob);
       return res;
     }
+    cloudSet(CLOUD_FP_STORE, fp);
+    if (seq === cloudSaveSeq) cloudSet(CLOUD_DIRTY_STORE, null);
     if (!o.silent) toast('Backed up');
     refreshCloudStatus();
     return res;
@@ -13871,8 +13930,36 @@ async function runCloudBackup(opts) {
    out. runCloudBackup no-ops unless the vault is unlocked and enrolled. */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'hidden') return;
-  try { clearTimeout(cloudTimer); runCloudBackup({ silent: true }); } catch (e) {}
+  try { clearTimeout(cloudTimer); cloudTimer = null; runCloudBackup({ silent: true, closing: true }); } catch (e) {}
 });
+
+function openCloudShrinkModal(counts) {
+  cloudShrinkAsked = true;
+  const last = cloudLastCounts() || {};
+  const row = (label, k) => `<tr><td>${label}</td><td class="mono" style="text-align:right;">${Number(last[k]) || 0}</td><td class="mono" style="text-align:right;">${Number(counts[k]) || 0}</td></tr>`;
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:500px;">
+        <div class="modal-head"><div class="ttl">Back up a much smaller copy?</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="phrase-warn" style="margin:0 0 14px;">This device now holds far less than your last backup. If you deleted things on purpose, back up as normal. If this isn't the data you expect, don't — your fuller copy stays safe on the server, and you can restore it from Settings → Backup.</div>
+          <table style="width:100%;font-size:13px;">
+            <thead><tr><th></th><th style="text-align:right;">Last backup</th><th style="text-align:right;">This device</th></tr></thead>
+            <tbody>${row('Invoices', 'invoices')}${row('Quotes', 'quotes')}${row('Credit notes', 'credits')}${row('Clients', 'clients')}${row('Projects', 'projects')}${row('Expenses', 'expenses')}</tbody>
+          </table>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Keep the server copy</button>
+          <button class="btn btn-primary" id="shrink-go">Back up this smaller copy</button>
+        </div>
+      </div>
+    </div>`);
+  document.getElementById('shrink-go').addEventListener('click', () => {
+    cloudShrinkOk = true;
+    closeModal();
+    runCloudBackup({ silent: false });
+  });
+}
 
 function cloudRelative(iso) {
   if (!iso) return null;
@@ -14729,6 +14816,8 @@ async function enterApp() {
   }
   setTimeout(showBackupReminder, 1200); // gentle, after the app settles
   maybePromptCloudBackup();
+  // Changes a previous session couldn't send before it closed go now.
+  if (cloudEnrolled() && cloudGet(CLOUD_DIRTY_STORE) === '1') setTimeout(() => runCloudBackup({ silent: true }), 5000);
   // Nudge pre-recovery-phrase users — but never stack on top of another modal.
   setTimeout(() => {
     const mh = document.getElementById('modal-host');
@@ -15246,12 +15335,17 @@ function showMergeReport(report) {
 /* Backups are encrypted with the current master password (same AES-GCM vault
    format, plus a `format` tag so restore can tell them apart from old
    plain-JSON backups — which still restore fine). */
-async function backupFileText(snap) {
-  if (!snap) { await ensureDek(); snap = { s: state, dek: currentDek, wr: currentWrappers }; }
+async function backupFileText() {
+  await ensureDek();
   // Same envelope as the vault, reusing the very same wrappers — so a backup
   // opens with the master password AND (if set up) the recovery phrase. Without
   // this, losing the password would also lose every backup.
-  const encBlob = JSON.parse(await createVaultBlob(snap.s, snap.dek, snap.wr));
+  return backupTextFromVaultBlob(await createVaultBlob(state, currentDek, currentWrappers));
+}
+// A saved vault blob IS a backup, labelled. Synchronous, so a close-time
+// backup can start its upload inside the event that announced the close.
+function backupTextFromVaultBlob(vaultBlob) {
+  const encBlob = JSON.parse(vaultBlob);
   encBlob.format = 'seed-backup-encrypted';
   return JSON.stringify(encBlob, null, 2);
 }
