@@ -3070,7 +3070,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.5.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -14295,15 +14295,17 @@ function openRecoverySetupModal(opts = {}) {
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:560px;">
         <div class="modal-head">
-          <div class="ttl">${replacing ? 'Replace your recovery phrase' : 'Save your recovery phrase'}</div>
+          <div class="ttl">${replacing ? 'Replace your recovery phrase' : 'Your new recovery phrase'}</div>
           ${opts.dismissible === false ? '' : '<span class="modal-close" data-close>×</span>'}
         </div>
         <div class="modal-body">
+          <div class="text-sm" style="line-height:1.6;margin-bottom:12px;"><strong>Two steps:</strong> write these 12 words down, then type three of them back. <strong>The phrase is saved only when you finish step 2</strong> — until then nothing on your vault has changed.</div>
           <div class="phrase-warn">
             <strong>This is the only way to get back into your data if you forget your master password.</strong>
-            Not even we can recover it for you — that's the point of the encryption. Write these 12 words down, in order, and keep them somewhere safe.
+            Not even we can recover it for you — that's the point of the encryption.
           </div>
 
+          <div class="text-sm" style="font-weight:600;margin:14px 0 8px;">Step 1 of 2 · Write these 12 words down, in order</div>
           <div class="phrase-grid" id="rp-grid">
             ${words.map((w, i) => `<span class="phrase-word"><i>${i + 1}</i>${w}</span>`).join('')}
           </div>
@@ -14319,10 +14321,8 @@ function openRecoverySetupModal(opts = {}) {
           </div>
 
           <div style="border-top:1px solid var(--border);padding-top:14px;">
-            <div class="phrase-warn" style="margin:0 0 12px;">
-              <strong>This last step is what saves the phrase.</strong> Copying, downloading or printing only puts the words somewhere — nothing is stored on your vault until you confirm below. If you close now, these 12 words stop working and you'll be given a <strong>different</strong> set next time, so throw away any copy you just made.
-            </div>
-            <div class="text-sm text-mid" style="margin-bottom:10px;">Confirm you've saved it — type the words below:</div>
+            <div class="text-sm" style="font-weight:600;margin-bottom:6px;">Step 2 of 2 · Type these three words from your copy to save the phrase</div>
+            <div class="text-sm text-mid" style="line-height:1.6;margin-bottom:10px;">Copying, downloading or printing only puts the words somewhere. If you close before finishing, these 12 words won't work — you'd get a different set next time, so throw away any copy of this one.</div>
             <div class="form-grid">
               ${quizIdx.map((i) => `<div class="field"><label>Word ${i + 1}</label><input data-rp-quiz="${i}" autocomplete="off" spellcheck="false" /></div>`).join('')}
             </div>
@@ -14334,7 +14334,7 @@ function openRecoverySetupModal(opts = {}) {
           </details>
         </div>
         <div class="modal-foot">
-          ${opts.dismissible === false ? '' : '<button class="btn" data-close>Later</button>'}
+          ${opts.dismissible === false ? '' : '<button class="btn" data-close>Close without saving</button>'}
           <button class="btn btn-primary" id="rp-confirm">${replacing ? 'Replace phrase' : 'I\'ve saved it — finish'}</button>
         </div>
       </div>
@@ -14463,18 +14463,19 @@ function maybePromptRecoverySetup() {
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:520px;">
         <div class="modal-head">
-          <div class="ttl">Protect yourself against a lost password</div>
+          <div class="ttl">Create a recovery phrase for this vault</div>
           <span class="modal-close" data-close>×</span>
         </div>
         <div class="modal-body">
+          <div class="text-sm" style="line-height:1.6;margin-bottom:12px;"><strong>This makes a new phrase — you don't need to type in anything you had before.</strong> Simpl shows you 12 new words to write down, and they become a second key to this vault.</div>
           <div class="phrase-warn">Right now, if you forget your master password, <strong>your data cannot be recovered by anyone</strong> — including from your backups, which are encrypted with that same password.</div>
-          <div class="text-sm text-mid" style="line-height:1.6;">Take a minute to generate a <strong>recovery phrase</strong>: 12 words that act as a second key to your own vault. Write them down once, keep them safe, and you can always get back in.</div>
+          <div class="text-sm text-mid" style="line-height:1.6;">Write the words down once, keep them safe, and you can always get back in.</div>
           <div class="text-sm text-mid" style="line-height:1.6;margin-top:10px;">${RECOVERY_WHY}</div>
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" id="rp-never" style="margin-right:auto;">Don't ask again</button>
           <button class="btn" data-close>Remind me later</button>
-          <button class="btn btn-primary" id="rp-start">Generate my phrase</button>
+          <button class="btn btn-primary" id="rp-start">Create my phrase</button>
         </div>
       </div>
     </div>
