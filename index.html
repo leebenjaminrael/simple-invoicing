@@ -3059,7 +3059,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.4.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3698,9 +3698,28 @@ function applyAutoOverdue(s) {
 }
 
 function lockApp() {
+  // A change from the last few minutes may still be waiting for the batched
+  // server backup. Seal it now, with the key about to be dropped, and send it.
+  if (cloudTimer && cloudEnrolled() && currentDek) {
+    clearTimeout(cloudTimer); cloudTimer = null;
+    const counts = cloudCounts(state);
+    backupFileText({ s: state, dek: currentDek, wr: currentWrappers })
+      .then((blob) => cloudUpload(blob, counts)).catch(() => {});
+  }
   state = null;
   currentPassword = null;
+  // Locked means the key goes too. Holding it would let anyone with the
+  // browser's developer tools open the vault without the password.
+  currentDek = null;
+  currentWrappers = [];
+  editingDoc = null;
+  reconcileSession = null;
+  pdfReviewState = null;
   if (lockTimer) clearTimeout(lockTimer);
+  closeModal();
+  closeCalendar();
+  // What was on screen is client data as well; unlocking draws the page again.
+  document.getElementById('view-host').innerHTML = '';
   closeDrawer();
   document.getElementById('app').classList.remove('unlocked');
   document.getElementById('lock-screen').style.display = 'flex';
@@ -4937,6 +4956,12 @@ function renderDashboard() {
     <div class="title-hero-sub">${compName} · ${fmtDate(today)}</div>
 
     ${renderSetupChecklist()}
+
+    ${cloudEnrolled() ? '' : `
+    <div class="phrase-warn" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:14px 0 18px;">
+      <div><strong>Backup is off.</strong> Your data exists only on this device, so a cleared browser or a lost device would take it with it.</div>
+      <button class="btn btn-sm btn-primary" id="dash-backup-on">Turn on backup</button>
+    </div>`}
 
     <div class="bento dash">
       <!-- Hero: This month so far — LIME -->
@@ -12033,6 +12058,7 @@ function bindViewEvents() {
   }
 
   if (currentRoute === 'dashboard') {
+    document.getElementById('dash-backup-on')?.addEventListener('click', () => openCloudEnrolModal(null, { auto: true }));
     document.querySelectorAll('[data-basis]').forEach((el) => el.addEventListener('click', () => { financesBasis = el.dataset.basis; render(); }));
     const fx = document.getElementById('refresh-fx');
     if (fx) fx.addEventListener('click', async () => {
@@ -13801,7 +13827,7 @@ function scheduleCloudBackup() {
   try {
     if (!cloudEnrolled()) return;
     clearTimeout(cloudTimer);
-    cloudTimer = setTimeout(() => { runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
+    cloudTimer = setTimeout(() => { cloudTimer = null; runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
   } catch (e) {}
 }
 
@@ -13881,7 +13907,11 @@ function refreshCloudStatus() {
 
 /* ---- enrolment: email, then a code. No password, no account to manage. ---- */
 
-function openCloudEnrolModal(prefill) {
+// opts.auto: backup is on by default (2 Oct 2026), so the code goes to the
+// email they signed up with as the modal opens — they only type six digits.
+// The code itself stays: it is what proves the address is theirs, and a backup
+// tied to a mistyped email could never be restored on a new device.
+function openCloudEnrolModal(prefill, opts) {
   let email = prefill || cloudEmail() || '';
   try {
     const onb = JSON.parse(localStorage.getItem('seed-onboarding-v2') || 'null');
@@ -13893,6 +13923,7 @@ function openCloudEnrolModal(prefill) {
       <div class="modal" style="max-width:440px;">
         <div class="modal-head"><div class="ttl">Turn on backup</div><span class="modal-close" data-close>&times;</span></div>
         <div class="modal-body">
+          ${opts && opts.auto ? `<div class="phrase-warn" style="margin:0 0 14px;">Right now your data exists only on this device. Backup is on by default — we've emailed you a six-digit code to finish turning it on.</div>` : ''}
           <div class="text-sm text-mid" style="line-height:1.65;margin-bottom:14px;">
             Your data is encrypted on this device before anything leaves it, with a key we never receive. We keep the encrypted file and cannot open it, so a cleared browser or a lost laptop is no longer the end of your records.
           </div>
@@ -13910,7 +13941,7 @@ function openCloudEnrolModal(prefill) {
           <div id="cloud-enrol-err" class="text-sm" style="color:var(--danger);margin-top:10px;min-height:16px;"></div>
         </div>
         <div class="modal-foot">
-          <button class="btn" data-close>Cancel</button>
+          <button class="btn" data-close>${opts && opts.auto ? 'Not now' : 'Cancel'}</button>
           <button class="btn btn-primary" id="cloud-send">Send me a code</button>
           <button class="btn btn-primary" id="cloud-verify" style="display:none;">Turn on backup</button>
         </div>
@@ -13957,6 +13988,36 @@ function openCloudEnrolModal(prefill) {
         : 'Could not turn on backup. Try again.';
     }
   }));
+
+  // A changed address needs a fresh code.
+  document.getElementById('cloud-email').addEventListener('input', () => {
+    document.getElementById('cloud-send').style.display = '';
+    document.getElementById('cloud-verify').style.display = 'none';
+    document.getElementById('cloud-code-wrap').style.display = 'none';
+  });
+  if (opts && opts.auto && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) document.getElementById('cloud-send').click();
+}
+
+/* Backup is on by default: after unlock, a device without it is asked once a
+   week — only on the dashboard and never over another dialog, so it can't
+   interrupt work — and the dashboard says "Backup is off" until it is on. */
+const CLOUD_PROMPT_STORE = 'seed-cloud-prompted-v1';
+function maybePromptCloudBackup() {
+  let tries = 0;
+  const attempt = () => {
+    if (!state || cloudEnrolled()) return;
+    let last = 0;
+    try { last = Number(localStorage.getItem(CLOUD_PROMPT_STORE) || 0); } catch (e) {}
+    if (Date.now() - last < 7 * 86400000) return;
+    const mh = document.getElementById('modal-host');
+    if (currentRoute === 'dashboard' && mh && !mh.innerHTML.trim()) {
+      try { localStorage.setItem(CLOUD_PROMPT_STORE, String(Date.now())); } catch (e) {}
+      openCloudEnrolModal(null, { auto: true });
+    } else if (++tries < 30) {
+      setTimeout(attempt, 2000);   // wait for the recovery-phrase prompt and the like to finish
+    }
+  };
+  setTimeout(attempt, 1500);
 }
 
 /* ---- conflict: the server moved on since this device last looked ---- */
@@ -14377,10 +14438,10 @@ async function showLockForm(returningUser) {
     [resetBtn, recBtn, hintEl].forEach((el) => { if (el) el.style.display = 'none'; });
     return;
   }
-  // Offer recovery whenever this device holds a vault other than the one in use.
-  vaultCopiesOnDevice().then((copies) => {
-    if (earlierBtn) earlierBtn.style.display = copies.length > (lockMode === 'unlock' ? 1 : 0) ? 'inline' : 'none';
-  }).catch(() => {});
+  // Always offered, never conditional on what storage reports: when storage is
+  // failing is exactly when the link is needed, and the screen behind it says
+  // what this device can and cannot see.
+  if (earlierBtn) earlierBtn.style.display = 'inline';
   if (returningUser) {
     sub.textContent = 'Enter your master password to unlock.';
     confirmWrap.style.display = 'none';
@@ -14417,10 +14478,10 @@ document.getElementById('lock-earlier').addEventListener('click', () => openEarl
    fallback-storage copy. Distinct copies only. */
 async function vaultCopiesOnDevice() {
   const out = [], seen = new Set();
-  const add = (blob, label, when) => { if (blob && !seen.has(blob)) { seen.add(blob); out.push({ blob, label, when }); } };
+  const add = (blob, label, when, inUse) => { if (blob && !seen.has(blob)) { seen.add(blob); out.push({ blob, label, when, inUse: !!inUse }); } };
   if (window.indexedDB) {
     const keys = (await idbKeys()).map(String);
-    if (keys.includes('vault')) add(await idbGet('vault'), 'The vault in use now', '');
+    if (keys.includes('vault')) add(await idbGet('vault'), 'The vault in use now', '', true);
     for (const k of keys.filter((x) => x.startsWith('vault-stash-')).sort().reverse()) {
       add(await idbGet(k), 'Set aside by Simpl', k.slice('vault-stash-'.length, 'vault-stash-'.length + 24));
     }
@@ -14449,6 +14510,24 @@ async function restoreVaultCopy(blob) {
   try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
 }
 
+// What this device's storage holds, in words a user can paste to support.
+// Names and counts of copies only — never content, which stays encrypted.
+async function vaultStorageReport() {
+  const lines = ['Simpl v' + APP_VERSION, 'Storage in use: ' + vaultBackend];
+  if (!window.indexedDB) lines.push('IndexedDB: not available in this browser');
+  else {
+    try {
+      const keys = (await idbKeys()).map(String);
+      lines.push(`IndexedDB: readable · vault in use: ${keys.includes('vault') ? 'yes' : 'no'} · set-aside copies: ${keys.filter((k) => k.startsWith('vault-stash-')).length}`);
+    } catch (e) { lines.push('IndexedDB: ERROR — ' + ((e && (e.name + ': ' + e.message)) || e)); }
+  }
+  let fallback = false; try { fallback = !!localStorage.getItem(STORAGE_KEY); } catch (e) {}
+  lines.push('Fallback copy: ' + (fallback ? 'yes' : 'no') + ' · marked as kept in IndexedDB: ' + (vaultKnownInIdb() ? 'yes' : 'no'));
+  lines.push((navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)) ? 'Opened as: home-screen app' : 'Opened as: browser tab');
+  lines.push(navigator.userAgent);
+  return lines.join('\n');
+}
+
 function openEarlierVaultModal() {
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
@@ -14460,6 +14539,11 @@ function openEarlierVaultModal() {
           <div class="field"><label>Or your recovery phrase</label><textarea id="ev-phrase" rows="2" placeholder="twelve words separated by spaces"></textarea></div>
           <div class="err" id="ev-err"></div>
           <div id="ev-results" style="margin-top:12px;"></div>
+          <details style="margin-top:14px;">
+            <summary class="text-sm text-mid" style="cursor:pointer;">Details for support</summary>
+            <pre id="ev-report" class="text-sm" style="white-space:pre-wrap;word-break:break-word;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;">Checking…</pre>
+            <button class="btn btn-sm" id="ev-copy" type="button">Copy details</button>
+          </details>
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Close</button>
@@ -14467,6 +14551,12 @@ function openEarlierVaultModal() {
         </div>
       </div>
     </div>`);
+  vaultStorageReport().then((r) => { const el = document.getElementById('ev-report'); if (el) el.textContent = r; });
+  document.getElementById('ev-copy').addEventListener('click', async () => {
+    const text = document.getElementById('ev-report').textContent;
+    try { await navigator.clipboard.writeText(text); toast('Details copied — paste them in your message'); }
+    catch (e) { toast('Select the details and copy them'); }
+  });
   document.getElementById('ev-go').addEventListener('click', (e) => withBusy(e.currentTarget, 'Checking…', async () => {
     const err = document.getElementById('ev-err');
     const results = document.getElementById('ev-results');
@@ -14475,7 +14565,16 @@ function openEarlierVaultModal() {
     const raw = document.getElementById('ev-phrase').value.trim();
     if (!pwd && !raw) { err.textContent = 'Enter the password you used before, or your recovery phrase.'; return; }
     let copies;
-    try { copies = await vaultCopiesOnDevice(); } catch (e2) { err.textContent = VAULT_UNREADABLE_MSG; return; }
+    try { copies = await vaultCopiesOnDevice(); }
+    catch (e2) {
+      err.textContent = 'This device\'s storage can\'t be read right now, so earlier copies can\'t be checked. Close Simpl completely — on an iPhone or iPad, restart the device — then try again. If it still fails, send the details below to support.';
+      return;
+    }
+    if (!copies.some((c) => !c.inUse)) {
+      err.textContent = (copies.length ? 'This browser holds only the vault you are using now — no earlier copy is stored here.' : 'No vault is stored in this browser.')
+        + ' If you have used Simpl from a home-screen icon and from a browser tab, or in another browser, try there: each keeps its own storage.';
+      return;
+    }
     const creds = [];
     if (pwd) creds.push(pwd);
     if (raw) {
@@ -14629,6 +14728,7 @@ async function enterApp() {
     setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
   }
   setTimeout(showBackupReminder, 1200); // gentle, after the app settles
+  maybePromptCloudBackup();
   // Nudge pre-recovery-phrase users — but never stack on top of another modal.
   setTimeout(() => {
     const mh = document.getElementById('modal-host');
@@ -15146,12 +15246,12 @@ function showMergeReport(report) {
 /* Backups are encrypted with the current master password (same AES-GCM vault
    format, plus a `format` tag so restore can tell them apart from old
    plain-JSON backups — which still restore fine). */
-async function backupFileText() {
-  await ensureDek();
+async function backupFileText(snap) {
+  if (!snap) { await ensureDek(); snap = { s: state, dek: currentDek, wr: currentWrappers }; }
   // Same envelope as the vault, reusing the very same wrappers — so a backup
   // opens with the master password AND (if set up) the recovery phrase. Without
   // this, losing the password would also lose every backup.
-  const encBlob = JSON.parse(await createVaultBlob(state, currentDek, currentWrappers));
+  const encBlob = JSON.parse(await createVaultBlob(snap.s, snap.dek, snap.wr));
   encBlob.format = 'seed-backup-encrypted';
   return JSON.stringify(encBlob, null, 2);
 }
