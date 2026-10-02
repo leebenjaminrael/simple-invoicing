@@ -3070,7 +3070,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.5.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3674,6 +3674,11 @@ async function saveState() {
   // is fenced: a tracker bug must never be able to block a save.
   try { trackChanges(state); } catch (e) {}
   await ensureDek();
+  // Taken before encrypting: the blob holds this state or a later one, never an
+  // earlier one, so a backup can be repeated but never wrongly skipped.
+  const enrolled = cloudEnrolled();
+  const fp = enrolled ? cloudFingerprint(state) : null;
+  const counts = enrolled ? cloudCounts(state) : null;
   const blob = await createVaultBlob(state, currentDek, currentWrappers);
   let where;
   try {
@@ -3683,7 +3688,7 @@ async function saveState() {
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
-  try { scheduleCloudBackup(blob); } catch (e) {}
+  try { scheduleCloudBackup(blob, fp, counts); } catch (e) {}
   // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
   // is effectively unlimited.
   if (where === 'localStorage' && !quotaWarned && blob.length > 3.5 * 1024 * 1024) {
@@ -3715,6 +3720,8 @@ function lockApp() {
   clearTimeout(cloudTimer); cloudTimer = null;
   runCloudBackup({ silent: true, closing: true });
   lastVaultBlob = null;
+  lastVaultFp = null;
+  lastVaultCounts = null;
   state = null;
   currentPassword = null;
   // Locked means the key goes too. Holding it would let anyone with the
@@ -4226,7 +4233,7 @@ function outstandingItems(asAt) {
     const owed = invoiceDueNet(d);
     if (owed <= 0) continue;                                  // fully credited — nothing owed
     const due = d.dueDate || d.date;
-    const daysLate = Math.floor((new Date(asAt) - new Date(due)) / 86400000);
+    const daysLate = daysBetween(due, asAt);
     const base = toBase(owed, d.currency);
     if (base == null) { uncounted.push({ doc: d, date: due, owed, daysLate }); continue; }
     const amount = round2(base);
@@ -4256,9 +4263,11 @@ function recognitionDate(doc, basis) {
 
 // Issued credit notes allocated to an invoice, in the invoice's own currency
 // (credit notes copy the invoice currency). Reduces what the client owes.
-function creditAllocatedTo(invId) {
+// onOrBefore (optional): only credits issued by that date.
+function creditAllocatedTo(invId, onOrBefore) {
   return (state.documents || [])
-    .filter((x) => x.type === 'credit' && x.status !== 'draft' && x.appliesToInvoiceId === invId)
+    .filter((x) => x.type === 'credit' && x.status !== 'draft' && x.appliesToInvoiceId === invId
+      && (!onOrBefore || (x.date || '') <= onOrBefore))
     .reduce((s, c) => s + calcTotals(c).due, 0);
 }
 // An unpaid invoice's still-owed amount after allocated credit notes (floored at 0).
@@ -4323,8 +4332,14 @@ function expensesByMonth(periodStart, periodEnd) {
 // client and their accountant read "30 days" on a statement (Sage Pastel's
 // convention; decided with Lee, 1 Oct 2026). Days past due is a different
 // number, shown as "N days overdue" where chasing is the point.
+// Whole days from one ISO date to another, on UTC midnights — a daylight-saving
+// change between them can't shave an hour off and lose a day.
+function daysBetween(fromIso, toIso) {
+  return Math.round((Date.parse(toIso + 'T00:00:00Z') - Date.parse(fromIso + 'T00:00:00Z')) / 86400000);
+}
+
 function ageBucket(invoiceDate, asAt) {
-  const days = Math.floor((new Date(asAt + 'T00:00:00') - new Date(invoiceDate + 'T00:00:00')) / 86400000);
+  const days = daysBetween(invoiceDate, asAt);
   return days > 90 ? '90+' : days > 60 ? '61-90' : days > 30 ? '31-60' : '0-30';
 }
 
@@ -6985,7 +7000,7 @@ function renderRecGroup(title, matches, kind) {
               let subControl = '';
               if (m.action === 'invoice-paid') {
                 // Show same-currency invoices first (most relevant), then others. Paid ones labelled.
-                const allInvs = state.documents.filter((d) => d.type === 'invoice');
+                const allInvs = state.documents.filter((d) => canSettle(d, m.tx));
                 const sortedInvs = [...allInvs].sort((a, b) => {
                   const aCcy = a.currency === m.tx.currency ? 0 : 1;
                   const bCcy = b.currency === m.tx.currency ? 0 : 1;
@@ -7962,6 +7977,14 @@ function parseDateFlexible(s) {
 
 /* ----- Matcher ----- */
 
+// A payment can only settle an invoice that existed when it was made. One rule
+// for automatic matching, the manual picker and the apply step alike: an August
+// receipt marked against a September invoice of the same amount moves that
+// invoice's paid date — and on cash basis its VAT — into the wrong period.
+function canSettle(doc, tx) {
+  return !!doc && doc.type === 'invoice' && !(doc.date && tx.date && doc.date > tx.date);
+}
+
 function buildMatches(parsedStatement) {
   // Build set of imported tx IDs across all archives
   const importedIds = new Set();
@@ -8040,11 +8063,7 @@ function buildMatches(parsedStatement) {
 
     if (isCredit) {
       // Match against ALL invoices (paid + unpaid). Paid matches → skip with reason.
-      // A payment cannot settle an invoice issued after it. Without this, an
-      // August receipt for an invoice already marked paid matched a September
-      // invoice of the same amount ("prefer unpaid", below), marked it paid in
-      // August and pulled its VAT into the wrong return.
-      const allInvoices = state.documents.filter((d) => d.type === 'invoice' && !(d.date && tx.date && d.date > tx.date));
+      const allInvoices = state.documents.filter((d) => canSettle(d, tx));
       const refInvNum = extractInvNum(ref) || extractInvNum(desc);
       let matched = null;
       let reasonMatch = '';
@@ -8115,15 +8134,7 @@ function buildMatches(parsedStatement) {
 // and to remember how a payee was categorised. Strips bank prefixes, card masks,
 // numbers, dates and locations down to the core merchant words.
 function payeeKey(desc) {
-  let s = (desc || '').toLowerCase();
-  s = s.replace(/^(pos purchase|card payment|debit card|debit order|sent money to|magtape debit|magtape credit|online|payshap[^a-z]*|fnb app[^a-z]*|internet (pmt|trf)( to| from)?|byc debit|rtc[^a-z]*|eft)\s+/i, '');
-  s = s.replace(/yoco\s*\*?\s*/i, '');                 // Yoco is a processor — keep the actual merchant
-  s = s.replace(/\*+\d+/g, ' ');                       // card masks ***0069
-  s = s.replace(/\b\d[\d,./:-]*\b/g, ' ');             // numbers, dates, refs
-  s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' '); // month names
-  s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
-  s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const words = s.split(' ').filter(Boolean);
+  const words = payeeWords(desc);
   /* Drop banking filler so the key reaches the actual merchant. Without this,
      "Payshap Account Off-Us Discovery Card" and "Payshap Account Off-Us
      Vodacom Sa" both keyed on "account off us" — one rule for two different
@@ -8132,24 +8143,32 @@ function payeeKey(desc) {
   const use = meaningful.length ? meaningful : words;   // never key on nothing
   return use.slice(0, 3).join(' ');
 }
+// The merchant words of a bank description: prefixes, card masks, numbers,
+// dates and places stripped. Shared by both keys, so they cannot drift apart.
+function payeeWords(desc) {
+  let s = (desc || '').toLowerCase();
+  s = s.replace(/^(pos purchase|card payment|debit card|debit order|sent money to|magtape debit|magtape credit|online|payshap[^a-z]*|fnb app[^a-z]*|internet (pmt|trf)( to| from)?|byc debit|rtc[^a-z]*|eft)\s+/i, '');
+  s = s.replace(/yoco\s*\*?\s*/i, '');                 // Yoco is a processor — keep the actual merchant
+  s = s.replace(/\*+\d+/g, ' ');                       // card masks ***0069
+  s = s.replace(/\b\d[\d,./:-]*\b/g, ' ');             // numbers, dates, refs
+  s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' '); // month names
+  s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
+  s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.split(' ').filter(Boolean);
+}
 /* Words that describe the payment, not who was paid. */
 const PAYEE_STOPWORDS = [
   'account', 'accounts', 'off', 'us', 'to', 'from', 'the', 'and', 'of', 'for',
   'payment', 'payments', 'pmt', 'purchase', 'card', 'transfer', 'trf',
   'debit', 'credit', 'order', 'ref', 'reference',
 ];
-/* The key this function produced before the stopword fix. Looked up as a
-   fallback so rules learned before the change keep working. */
+/* The key used before the stopword fix, looked up so rules learned then keep
+   working — but only when it names a merchant. A key of filler alone
+   ("account off us") was shared by unrelated payees, and resolving it would
+   carry one payee's category to another: the very mix-up the fix removed. */
 function payeeKeyLegacy(desc) {
-  let s = (desc || '').toLowerCase();
-  s = s.replace(/^(pos purchase|card payment|debit card|debit order|sent money to|magtape debit|magtape credit|online|payshap[^a-z]*|fnb app[^a-z]*|internet (pmt|trf)( to| from)?|byc debit|rtc[^a-z]*|eft)\s+/i, '');
-  s = s.replace(/yoco\s*\*?\s*/i, '');
-  s = s.replace(/\*+\d+/g, ' ');
-  s = s.replace(/\b\d[\d,./:-]*\b/g, ' ');
-  s = s.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/gi, ' ');
-  s = s.replace(/\b(cape town|hout bay|western cape|johannesburg|sandton|bangalore|pty|ltd|inc|cc)\b/gi, ' ');
-  s = s.replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return s.split(' ').filter(Boolean).slice(0, 3).join(' ');
+  const words = payeeWords(desc).slice(0, 3);
+  return words.some((w) => PAYEE_STOPWORDS.indexOf(w) === -1) ? words.join(' ') : '';
 }
 function payeeRuleFor(desc) {
   if (!state.payeeRules) return null;
@@ -8215,15 +8234,13 @@ async function applyReconcile() {
 
     if (m.action === 'invoice-paid') {
       const doc = state.documents.find((d) => d.id === m.docId);
-      if (doc) {
-        const wasPaid = doc.status === 'paid';
+      // An invoice already paid keeps its paid date: moving it would move the
+      // invoice between VAT periods on cash basis.
+      if (canSettle(doc, m.tx) && doc.status !== 'paid') {
         doc.status = 'paid';
         doc.paidDate = m.tx.date;
         doc.paidTxId = m.tx.id;
         invoicesPaid++;
-        if (wasPaid) {
-          // counted in invoicesPaid but mark separately if you want a different toast
-        }
       }
     } else if (m.action === 'expense' || m.action === 'fx-fee') {
       const amount = Math.abs(m.tx.amount);
@@ -9056,9 +9073,16 @@ function clientLedger(clientId) {
     if (d.type === 'invoice') {
       add(d.currency, 'billed', calcTotals(d).due);        // deposit-aware
       if (d.status === 'sent' || d.status === 'overdue') add(d.currency, 'outstanding', invoiceDueNet(d));
-      if (d.status === 'paid') add(d.currency, 'earned', invoiceDueNet(d));   // net of credits against it
+      // Earned is ex VAT, like every revenue figure in the app.
+      if (d.status === 'paid') add(d.currency, 'earned', calcTotals(d).dueSubtotal);
     } else if (d.type === 'credit') {
       add(d.currency, 'credited', calcTotals(d).due);
+      // A credit reduces earnings when it is against a paid invoice or against
+      // nothing in particular. Against an unpaid invoice it reduces what is
+      // owed instead — counting it here too would show a client who has paid
+      // nothing as having negative earnings.
+      const target = d.appliesToInvoiceId && docs.find((x) => x.id === d.appliesToInvoiceId);
+      if (!target || target.status === 'paid') add(d.currency, 'earned', -calcTotals(d).dueSubtotal);
     }
   }
   return {
@@ -9105,7 +9129,11 @@ function clientStatement(clientId, opts = {}) {
       const amt = calcTotals(d).due;
       if (from && d.date < from) opening = round2(opening + amt);
       else if (d.date <= to) lines.push({ date: d.date, ref: docNumber(d), label: 'Invoice', amount: amt });
-      const paid = d.status === 'paid' && d.paidDate ? invoiceDueNet(d) : 0;
+      // What arrived: the billed amount less credits already issued against it
+      // when it was paid. A credit issued afterwards is its own line below,
+      // leaving the client in credit — it never shrinks an earlier payment.
+      const paid = d.status === 'paid' && d.paidDate
+        ? round2(Math.max(0, calcTotals(d).due - creditAllocatedTo(d.id, d.paidDate))) : 0;
       if (paid) {
         if (from && d.paidDate < from) opening = round2(opening - paid);
         else if (d.paidDate <= to) lines.push({ date: d.paidDate, ref: docNumber(d), label: 'Payment received', amount: -paid });
@@ -9249,8 +9277,7 @@ async function buildStatementPdf(clientId, st) {
     }
   } else {
     for (const l of st.lines) {
-      const days = l.dueDate
-        ? Math.floor((new Date(st.asAt + 'T00:00:00') - new Date(l.dueDate + 'T00:00:00')) / 86400000) : 0;
+      const days = l.dueDate ? daysBetween(l.dueDate, st.asAt) : 0;
       body.push([fmtDate(l.date), l.ref, l.dueDate ? fmtDate(l.dueDate) : '—',
         days > 0 ? `${days} day${days === 1 ? '' : 's'}` : '—', money(l.amount)]);
     }
@@ -9447,7 +9474,7 @@ function renderClientDetail() {
       <div class="stat-v2 is-lime">
         <div class="label">Earnings to date</div>
         <div class="value">${lead ? fmtMoney(t.earned, lead) : '—'}</div>
-        <div class="sub">${paidCount ? `${paidCount} invoice${paidCount === 1 ? '' : 's'} paid` : 'Nothing paid yet'}${others('earned') ? ' · also ' + others('earned') : ''}</div>
+        <div class="sub">${paidCount ? `${paidCount} invoice${paidCount === 1 ? '' : 's'} paid · ex VAT` : 'Nothing paid yet'}${others('earned') ? ' · also ' + others('earned') : ''}</div>
       </div>
     </div>
     <div class="card-v2 is-cream b-cell" style="flex:1 1 260px;">
@@ -9545,13 +9572,8 @@ function renderClientDetail() {
 
 function renderClients() {
   const rows = state.clients.map((c) => {
-    const outstanding = state.documents
-      .filter((d) => d.type === 'invoice' && d.clientId === c.id && (d.status === 'sent' || d.status === 'overdue'))
-      .reduce((acc, d) => {
-        acc[d.currency] = (acc[d.currency] || 0) + invoiceDueNet(d);
-        return acc;
-      }, {});
-    const outStr = Object.entries(outstanding).map(([c, v]) => fmtMoney(v, c)).join(' · ') || '<span class="text-muted">—</span>';
+    const outStr = Object.entries(clientLedger(c.id).totals).filter(([, t]) => t.outstanding)
+      .map(([ccy, t]) => fmtMoney(t.outstanding, ccy)).join(' · ') || '<span class="text-muted">—</span>';
     return `
       <tr class="row-clickable" data-client-id="${c.id}">
         <td class="pri"><strong>${escapeHtml(c.name)}</strong>${c.contact ? `<div class="text-sm text-mid">${escapeHtml(c.contact)}</div>` : ''}</td>
@@ -11117,7 +11139,7 @@ function composeReminderEmail(d) {
   const co = (state.settings && state.settings.company) || {};
   const orgName = co.tradingName || co.name || '';
   const signOff = (co.attention || '').split(' ')[0] || '';
-  const days = d.dueDate ? Math.max(0, Math.floor((Date.now() - new Date(d.dueDate + 'T00:00:00').getTime()) / 86400000)) : 0;
+  const days = d.dueDate ? Math.max(0, daysBetween(d.dueDate, todayISO())) : 0;
   const overdueLabel = days > 0 ? `was due on ${fmtDate(d.dueDate)} — ${days} day${days === 1 ? '' : 's'} ago` : `was due on ${fmtDate(d.dueDate)}`;
   const subject = `Payment reminder: ${num}${orgName ? ' — ' + orgName : ''}`;
   const body = `Hi${c.contact ? ' ' + c.contact.split(' ')[0] : ''},\n\nJust a friendly reminder that invoice ${num}${d.projectTitle ? ' for ' + d.projectTitle : ''} (${fmtMoney(t.due, d.currency)}) ${overdueLabel}.\n\nIf you've already made the payment, please ignore this — otherwise I'd appreciate it if you could settle it when you get a chance. Happy to resend the invoice or answer any questions.\n\nKind regards${signOff ? ',\n' + signOff : ''}${orgName ? '\n' + orgName : ''}`;
@@ -12239,11 +12261,14 @@ function bindReconcileEvents() {
     if (!m) return;
     m.action = sel.value;
     if (sel.value === 'invoice-paid') {
-      // Pick best candidate. Try: same currency + amount match (any status), then same currency unpaid, then first.
-      const all = state.documents.filter((d) => d.type === 'invoice');
+      // Pick the best candidate among invoices this payment could settle: an
+      // unpaid one of the same amount, then any of the same amount, then the
+      // first unpaid in the currency.
+      const all = state.documents.filter((d) => canSettle(d, m.tx));
       const sameCcy = all.filter((d) => d.currency === m.tx.currency);
-      const exact = sameCcy.find((d) => Math.abs(calcTotals(d).due - Math.abs(m.tx.amount)) < 0.5);   // billed amount (deposit-aware)
       const unpaidSameCcy = sameCcy.filter((d) => d.status !== 'paid');
+      const sameAmount = (d) => Math.abs(calcTotals(d).due - Math.abs(m.tx.amount)) < 0.5;   // billed amount (deposit-aware)
+      const exact = unpaidSameCcy.find(sameAmount) || sameCcy.find(sameAmount);
       m.docId = (exact || unpaidSameCcy[0] || sameCcy[0] || all[0])?.id;
     } else if (sel.value === 'expense' || sel.value === 'fx-fee') {
       m.category = sel.value === 'fx-fee' ? 'FX fees' : (m.category || guessCategoryFromDesc(m.tx.description));
@@ -13835,6 +13860,8 @@ let cloudTimer = null;
 let cloudBusy = false;
 let cloudLastError = null;
 let lastVaultBlob = null;   // the encrypted copy written by the last save
+let lastVaultFp = null;     // the fingerprint of what that copy holds
+let lastVaultCounts = null; // and its record counts
 let cloudSaveSeq = 0;       // bumps on every save; an upload clears "dirty" only if none happened meanwhile
 let cloudShrinkOk = false;  // confirmed this session: a much smaller backup is intended
 let cloudShrinkAsked = false;
@@ -13849,12 +13876,12 @@ function cloudFingerprint(s) {
   return str.length + ':' + fnv1a(str);
 }
 
-function scheduleCloudBackup(blob) {
+function scheduleCloudBackup(blob, fp, counts) {
   try {
     if (!cloudEnrolled()) return;
-    if (blob) lastVaultBlob = blob;
+    if (blob) { lastVaultBlob = blob; lastVaultFp = fp || null; lastVaultCounts = counts || null; }
     cloudSaveSeq++;
-    if (cloudFingerprint(state) === cloudGet(CLOUD_FP_STORE)) { cloudSet(CLOUD_DIRTY_STORE, null); return; }
+    if (fp && fp === cloudGet(CLOUD_FP_STORE)) { cloudSet(CLOUD_DIRTY_STORE, null); return; }
     cloudSet(CLOUD_DIRTY_STORE, '1');
     clearTimeout(cloudTimer);
     cloudTimer = setTimeout(() => { cloudTimer = null; runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
@@ -13879,7 +13906,10 @@ async function runCloudBackup(opts) {
   const o = opts || {};
   if (cloudBusy || !cloudEnrolled() || !currentDek) return null;
   if (o.silent && cloudGet(CLOUD_DIRTY_STORE) !== '1') return null;   // nothing new to send
-  const counts = cloudCounts(state);
+  // Describe the copy that is actually sent: the saved copy's own counts, or the
+  // state's when re-encrypting it below.
+  const fromSave = !!(lastVaultBlob && lastVaultFp && lastVaultCounts);
+  const counts = fromSave ? lastVaultCounts : cloudCounts(state);
   if (cloudShrinks(counts)) {
     const mh = document.getElementById('modal-host');
     if (!o.closing && !cloudShrinkAsked && mh && !mh.innerHTML.trim()) openCloudShrinkModal(counts);
@@ -13888,11 +13918,13 @@ async function runCloudBackup(opts) {
   cloudBusy = true;
   cloudLastError = null;
   const seq = cloudSaveSeq;
-  const fp = cloudFingerprint(state);
+  // Record what is actually sent: the saved copy's own fingerprint, or — when
+  // re-encrypting — the state as it stands before that starts.
+  const fp = fromSave ? lastVaultFp : cloudFingerprint(state);
   try {
     // The copy already encrypted by the last save: nothing to re-encrypt, so a
     // close-time upload starts at once, within the event that announced it.
-    const blob = lastVaultBlob ? backupTextFromVaultBlob(lastVaultBlob) : await backupFileText();
+    const blob = fromSave ? backupTextFromVaultBlob(lastVaultBlob) : await backupFileText();
     const res = await cloudUpload(blob, counts, { keepalive: !!o.closing });
     if (res.conflict) {
       // Never resolve this quietly. The stale-device case looks exactly like
@@ -14005,12 +14037,14 @@ function openCloudEnrolModal(prefill, opts) {
     if (!email && onb && onb.email) email = onb.email;
   } catch (e) {}
 
+  // Say "we've emailed you" only when that is about to be true.
+  const autoSend = !!(opts && opts.auto && opts.send !== false && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:440px;">
         <div class="modal-head"><div class="ttl">Turn on backup</div><span class="modal-close" data-close>&times;</span></div>
         <div class="modal-body">
-          ${opts && opts.auto ? `<div class="phrase-warn" style="margin:0 0 14px;">Right now your data exists only on this device. Backup is on by default — we've emailed you a six-digit code to finish turning it on.</div>` : ''}
+          ${opts && opts.auto ? `<div class="phrase-warn" style="margin:0 0 14px;">Right now your data exists only on this device. Backup is on by default — ${autoSend ? 'we\'ve emailed you a six-digit code to finish turning it on.' : 'send yourself a six-digit code to finish turning it on.'}</div>` : ''}
           <div class="text-sm text-mid" style="line-height:1.65;margin-bottom:14px;">
             Your data is encrypted on this device before anything leaves it, with a key we never receive. We keep the encrypted file and cannot open it, so a cleared browser or a lost laptop is no longer the end of your records.
           </div>
@@ -14082,7 +14116,7 @@ function openCloudEnrolModal(prefill, opts) {
     document.getElementById('cloud-verify').style.display = 'none';
     document.getElementById('cloud-code-wrap').style.display = 'none';
   });
-  if (opts && opts.auto && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) document.getElementById('cloud-send').click();
+  if (autoSend) document.getElementById('cloud-send').click();
 }
 
 /* Backup is on by default: after unlock, a device without it is asked once a
@@ -14099,7 +14133,9 @@ function maybePromptCloudBackup() {
     const mh = document.getElementById('modal-host');
     if (currentRoute === 'dashboard' && mh && !mh.innerHTML.trim()) {
       try { localStorage.setItem(CLOUD_PROMPT_STORE, String(Date.now())); } catch (e) {}
-      openCloudEnrolModal(null, { auto: true });
+      // Only the first prompt sends the code unasked: the sign-up email may be
+      // mistyped, and a weekly code to a stranger's inbox is not a default.
+      openCloudEnrolModal(null, { auto: true, send: !last });
     } else if (++tries < 30) {
       setTimeout(attempt, 2000);   // wait for the recovery-phrase prompt and the like to finish
     }
