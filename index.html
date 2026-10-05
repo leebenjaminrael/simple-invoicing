@@ -1511,6 +1511,19 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   @keyframes cal-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .sm-cal { animation: none; } }
 
+  /* What's new — a calm dashboard card, never a popup. */
+  .whats-new { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 16px 20px; margin: 14px 0 18px; }
+  .wn-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .wn-title { font-family: 'DM Serif Display', serif; font-size: 20px; }
+  .wn-close { margin-left: auto; font-size: 20px; line-height: 1; color: var(--text-mid); padding: 2px 6px; }
+  .wn-close:hover { color: var(--text); }
+  .wn-item { padding: 10px 0; border-top: 1px solid var(--border); }
+  .wn-head + .wn-item, .whats-new-list .wn-item:first-child { border-top: 0; }
+  .wn-item-title { font-weight: 600; margin-bottom: 3px; }
+  .wn-flag { display: inline-block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: #0F0E0D; background: var(--accent-bright); border-radius: 999px; padding: 2px 8px; margin-right: 8px; vertical-align: 1px; }
+  .wn-link { margin-top: 6px; color: var(--accent-bright); font-size: 13px; font-weight: 600; }
+  .wn-link:hover { text-decoration: underline; }
+
   /* Chart columns: the whole month is the tap target, drawn over the bar. */
   .bar-hit { fill: transparent; cursor: pointer; }
   .bar-hit:hover, .bar-hit:focus-visible { fill: rgba(245,242,236,0.06); outline: none; }
@@ -2953,6 +2966,107 @@ function cloudCounts(s) {
   } catch (e) { return {}; }
 }
 </script>
+<script>/* What's new — the notes shown on the dashboard card and in Settings → Help &
+   Security. Newest release first; `version` is the APP_VERSION that shipped it.
+
+   Only releases with something a user would notice or should know get an
+   entry: wording tweaks and internal fixes stay out. Write for the person
+   using Simpl, not for us — what changed for them, in a sentence or two.
+   `important: true` floats an item to the top with a "Worth knowing" tag; keep
+   it for changes that alter numbers people rely on. `link.to` must be one of
+   the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
+   backup, security, feedback. (Checked by .claude/test-changelog.js.) */
+const CHANGELOG = [
+  {
+    version: '1.40.0.0', date: '2026-10-05', items: [
+      { title: 'What’s new, right here',
+        text: 'This card shows what has changed since you last looked, with a link to each new thing. The full history is in Settings → Help & Security.' },
+    ],
+  },
+  {
+    version: '1.39.9.0', date: '2026-10-05', items: [
+      { title: 'If something goes wrong, you’ll know',
+        text: 'If an action doesn’t work, Simpl now says so and lets you send us the details in one tap — never anything from your records. Feedback can include them too, so problems get fixed faster.',
+        link: { label: 'Send feedback', to: 'feedback' } },
+      { title: 'Saving can’t get stuck',
+        text: 'If your browser’s storage stops responding, Simpl now saves your work anyway instead of waiting for it.' },
+    ],
+  },
+  {
+    version: '1.39.5.0', date: '2026-10-02', items: [
+      { title: 'Encrypted backup: on by default, and continuous',
+        text: 'Turning on server backup now takes one six-digit code. Once on, an encrypted copy is sent within a minute of every change, Simpl asks before a much smaller copy replaces a fuller one, and licensed accounts keep a restore point for each of their last 30 days. We still can’t read anything we hold.',
+        link: { label: 'Backup settings', to: 'backup' } },
+      { title: 'Clearer recovery phrase setup',
+        text: 'Setting up a recovery phrase now says plainly that it creates a new phrase, and that typing three of the words back is what saves it.',
+        link: { label: 'Set up a recovery phrase', to: 'security' } },
+    ],
+  },
+  {
+    version: '1.39.3.0', date: '2026-10-02', items: [
+      { title: 'Safer when your browser’s storage misbehaves',
+        text: 'If Simpl can’t read your saved data, it now asks you to reopen it instead of offering a new vault. If an earlier vault is still on your device, “Recover an earlier vault” on the lock screen can bring it back. Lock now also clears your encryption key from memory.' },
+    ],
+  },
+  {
+    version: '1.39.2.0', date: '2026-10-01', items: [
+      { title: 'Ageing counts from the invoice date',
+        text: 'Statements and the Finances ageing table now group unpaid invoices by how long ago they were issued — 0–30, 31–60, 61–90 and 90+ days — the way clients and accountants read them.',
+        link: { label: 'Open Finances', to: 'finances' } },
+    ],
+  },
+  {
+    version: '1.39.1.0', date: '2026-10-01', items: [
+      { title: 'A proper date picker',
+        text: 'On a computer, date boxes open a calendar in Simpl’s own style, with weeks starting on Monday. Phones keep their own picker.' },
+    ],
+  },
+  {
+    version: '1.39.0.1', date: '2026-09-30', items: [
+      { title: 'Bank imports can’t mark the wrong invoice paid', important: true,
+        text: 'A payment can no longer be matched to an invoice dated after it, which could have moved that invoice into the wrong VAT period. If you imported statements recently, the VAT period view now flags any invoice marked paid before it was issued.',
+        link: { label: 'Check your VAT periods', to: 'vat' } },
+    ],
+  },
+  {
+    version: '1.39.0.0', date: '2026-09-30', items: [
+      { title: 'Revenue now excludes VAT', important: true,
+        text: 'Revenue, earnings and profit no longer include VAT — it’s collected for SARS, not earned — so these figures are lower than before. What clients owe you still includes VAT.',
+        link: { label: 'Open Finances', to: 'finances' } },
+      { title: 'Tap any figure to see what’s behind it',
+        text: 'On the Dashboard and in Finances, tap a figure — or a month in the revenue chart — to see exactly which invoices make it up.',
+        link: { label: 'Open Finances', to: 'finances' } },
+    ],
+  },
+  {
+    version: '1.38.1.0', date: '2026-09-29', items: [
+      { title: 'Search and date boxes behave',
+        text: 'Typing in search no longer jumps about, and date boxes keep your place while you edit them.' },
+    ],
+  },
+  {
+    version: '1.38.0.0', date: '2026-09-29', items: [
+      { title: 'Send a client their statement',
+        text: 'Open a client and tap Statement for what’s unpaid, or everything in a period with ageing, as a PDF you can send.',
+        link: { label: 'Go to Clients', to: 'clients' } },
+    ],
+  },
+  {
+    version: '1.37.0.0', date: '2026-09-29', items: [
+      { title: 'Everything for one client in one place',
+        text: 'Tap a client to see their invoices, quotes, credit notes, projects and time, with what they owe and what you’ve earned from them.',
+        link: { label: 'Go to Clients', to: 'clients' } },
+    ],
+  },
+  {
+    version: '1.36.1.0', date: '2026-09-28', items: [
+      { title: 'FNB PDF statements import properly',
+        text: 'PDF bank statements from FNB now read correctly, Reconcile shows expense amounts clearly, and one payee’s category no longer pre-fills a different payee.',
+        link: { label: 'Open Reconcile', to: 'reconcile' } },
+    ],
+  },
+];
+</script>
 <script>
 /* ============================================================
    SEED INVOICING — single-file local app
@@ -3071,7 +3185,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.9.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.40.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -5139,6 +5253,8 @@ function renderDashboard() {
 
     ${renderSetupChecklist()}
 
+    ${renderWhatsNewCard()}
+
     ${cloudEnrolled() ? '' : `
     <div class="phrase-warn" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:14px 0 18px;">
       <div><strong>Backup is off.</strong> Your data exists only on this device, so a cleared browser or a lost device would take it with it.</div>
@@ -5388,6 +5504,96 @@ function openDrill(key) {
   if (key === 'ytd') { const ty = taxYearFor(today); return openYtdDetail(ty.start, today, `Revenue · ${ty.label} to date`); }
   if (key === 'outstanding') return openOutstandingDetail();
   if (key.startsWith('month:')) { const ym = key.slice(6); return openRevenueDetail(ym + '-01', ym + '-31', `Revenue · ${monthTitle(ym)}`); }
+}
+
+/* ============================================================
+   WHAT'S NEW
+   ============================================================ */
+/* A calm card on the dashboard — never a popup — listing what has changed
+   since this device last looked, rolled up across releases. Notes live in
+   src/changelog.js; only releases with something worth telling get one, so a
+   day of small fixes doesn't nag. Items link straight to the thing that
+   changed. A vault created on this device starts with nothing to catch up on. */
+const WHATS_NEW_STORE = 'seed-whats-new-seen-v1';
+
+function versionNewer(a, b) {
+  const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d > 0;
+  }
+  return false;
+}
+// Unseen items, things that change your numbers first, otherwise newest first.
+function whatsNewUnseen() {
+  let seen = '';
+  try { seen = localStorage.getItem(WHATS_NEW_STORE) || ''; } catch (e) {}
+  const items = [];
+  for (const rel of CHANGELOG) {
+    if (seen && !versionNewer(rel.version, seen)) continue;
+    for (const it of rel.items) items.push(Object.assign({ date: rel.date }, it));
+  }
+  return items.sort((a, b) => (b.important ? 1 : 0) - (a.important ? 1 : 0));
+}
+function markWhatsNewSeen() {
+  try { localStorage.setItem(WHATS_NEW_STORE, CHANGELOG[0].version); } catch (e) {}
+}
+function whatsNewItemHtml(it) {
+  return `<div class="wn-item">
+    <div class="wn-item-title">${it.important ? '<span class="wn-flag">Worth knowing</span>' : ''}${escapeHtml(it.title)}</div>
+    <div class="text-sm text-mid">${escapeHtml(it.text)}</div>
+    ${it.link ? `<button class="wn-link" data-wn-go="${escapeHtml(it.link.to)}">${escapeHtml(it.link.label)} →</button>` : ''}
+  </div>`;
+}
+function renderWhatsNewCard() {
+  const items = whatsNewUnseen();
+  if (!items.length) return '';
+  return `<div class="whats-new">
+    <div class="wn-head"><span class="wn-title">What’s new</span>
+      <span class="text-sm text-mid">${items.length} update${items.length === 1 ? '' : 's'}</span>
+      <button class="wn-close" data-wn-dismiss aria-label="Dismiss what’s new">×</button></div>
+    ${items.slice(0, 3).map(whatsNewItemHtml).join('')}
+    ${items.length > 3 ? `<button class="btn btn-sm btn-ghost" data-wn-all style="margin-top:6px;">See all ${items.length}</button>` : ''}
+  </div>`;
+}
+// The full history, by date — Settings → Help & Security.
+function renderWhatsNewHistory() {
+  return CHANGELOG.map((rel) => `
+    <div class="text-sm text-muted" style="margin:14px 0 2px;">${fmtDate(rel.date)}</div>
+    ${rel.items.map(whatsNewItemHtml).join('')}`).join('');
+}
+// Where each "Show me" link lands.
+function whatsNewGo(to) {
+  markWhatsNewSeen();
+  closeModal();
+  if (to === 'finances' || to === 'reconcile' || to === 'vat') return goToFinanceTab(to === 'finances' ? 'overview' : to);
+  if (to === 'clients') { currentClientId = null; return setRoute('clients'); }
+  if (to === 'feedback') { render(); return openFeedbackModal(); }
+  if (to === 'backup' || to === 'security') {
+    settingsPage = to === 'backup' ? 'account' : 'help';
+    setRoute('settings');
+    const name = to === 'backup' ? 'Server backup' : 'Security';
+    const h = [...document.querySelectorAll('#view-host h3')].find((x) => x.textContent.trim() === name);
+    if (h) h.scrollIntoView({ block: 'start' });
+  }
+}
+function openWhatsNewModal() {
+  const items = whatsNewUnseen();
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:560px;">
+        <div class="modal-head"><div class="ttl">What’s new</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body whats-new-list">${items.map(whatsNewItemHtml).join('')}</div>
+        <div class="modal-foot"><button class="btn btn-primary" id="wn-done">Got it</button></div>
+      </div>
+    </div>`);
+  bindWhatsNew(document.getElementById('modal-host'));
+  document.getElementById('wn-done').addEventListener('click', () => { markWhatsNewSeen(); closeModal(); render(); });
+}
+function bindWhatsNew(scope) {
+  scope.querySelectorAll('[data-wn-go]').forEach((b) => b.addEventListener('click', () => whatsNewGo(b.dataset.wnGo)));
+  scope.querySelectorAll('[data-wn-dismiss]').forEach((b) => b.addEventListener('click', () => { markWhatsNewSeen(); render(); }));
+  scope.querySelectorAll('[data-wn-all]').forEach((b) => b.addEventListener('click', openWhatsNewModal));
 }
 
 // Lightweight table for the dashboard — no outer card frame, just rows
@@ -11617,12 +11823,17 @@ function renderSettingsAccount() {
 function renderSettingsHelp() {
   return `
     <div class="settings-section">
+      <h3>What’s new</h3>
+      <div class="text-sm text-mid">Changes to Simpl that you’d notice, newest first.</div>
+      ${renderWhatsNewHistory()}
+    </div>
+    <div class="settings-section">
       <h3>Help &amp; FAQ</h3>
       <div class="faq">
         <details><summary>What happens if I forget my master password?</summary><div>Use your <strong>recovery phrase</strong> — the 12 words you saved when setting up (Settings → Security if you haven't yet). On the lock screen choose "Forgot password — use recovery phrase", enter the words, and set a new password. Without that phrase there is no way back in: your data is encrypted with a key only you hold, so nobody — including us — can decrypt it, and your backups are sealed with the same password. Set up a phrase now if you haven't.</div></details>
         <details><summary>Why isn't there a "reset my password" email?</summary><div>Because we never hold your key. A reset link only works if the company can decrypt your data on your behalf — which would mean we could read your books, and so could anyone who breached us. The recovery phrase gives you the same safety net without handing anyone else access.</div></details>
-        <details><summary>Where is my data stored?</summary><div>Only in this browser, on this device, encrypted. Nothing financial is ever uploaded — there is no server. The only network calls are exchange rates, update checks, and loading the app itself.</div></details>
-        <details><summary>How do backups work?</summary><div>Settings → Backup → Download. The file is encrypted — it opens with your master password <em>or</em> your recovery phrase. This is also how you move data to another device or browser: back up on one, restore on the other.</div></details>
+        <details><summary>Where is my data stored?</summary><div>On this device, encrypted with a key only you hold. With server backup on (it is by default once you confirm your email), an encrypted copy is also kept on our server — it is sealed on your device before it leaves, so we hold it but can never read it. Beyond that, Simpl only connects to the internet for exchange rates, update checks, your licence, and feedback you choose to send. The personal details we hold are your name, email and licence — never your invoices, clients or figures in a form anyone can read.</div></details>
+        <details><summary>How do backups work?</summary><div>There are two kinds, and both open with your master password <em>or</em> your recovery phrase. <strong>Server backup</strong> (Settings → Account → Server backup) is on by default once you confirm a six-digit code: an encrypted copy is sent within a minute of every change, and you can restore it on any device by confirming your email again. Licensed accounts keep a restore point for each of their last 30 days with backups (7 on trial). <strong>Local backup</strong> (Settings → Account → Local backup) downloads an encrypted file for you to keep — useful as a second copy, or to move to a new device without the internet.</div></details>
         <details><summary>How do updates work?</summary><div>Automatically. When a new version is out you'll see an "update available" note — reloading puts you on the latest version with all your data intact.</div></details>
         <details><summary>Can I use it on my phone?</summary><div>Yes — open the app link in Safari (iPhone) or Chrome (Android) and choose "Add to Home Screen" / "Install app". Note that data is per device: use a backup to move it across.</div></details>
         <details><summary>Does it work for my country's VAT and currency?</summary><div>Base currency, VAT rate, VAT cycle and tax-year start are all configurable per business (Settings → Company). Set VAT % to 0 if you're not registered.</div></details>
@@ -12163,6 +12374,7 @@ function bindViewEvents() {
       else if (action === 'credit') createCreditNoteFromInvoice(id);
     });
   });
+  bindWhatsNew(document.getElementById('view-host'));
   document.querySelectorAll('[data-drill]').forEach((el) => el.addEventListener('click', () => openDrill(el.dataset.drill)));
   document.querySelectorAll('[data-bar]').forEach((el) => el.addEventListener('click', () => openDrill('month:' + el.dataset.bar)));
 
@@ -14941,6 +15153,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
     state = JSON.parse(JSON.stringify(SEED_DATA));
     installEntityAccessors();
     currentPassword = pwd;
+    markWhatsNewSeen();   // a brand-new vault has nothing to catch up on
     await saveState();
     await enterApp();
     fetchFxRates();
