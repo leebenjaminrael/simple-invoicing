@@ -13,6 +13,7 @@
 <link rel="manifest" href="./manifest.json" />
 <meta name="theme-color" content="#0F0E0D" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Invoicing" />
 <link rel="apple-touch-icon" href="./icon-180.png" />
@@ -3070,7 +3071,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.7.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.8.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3992,7 +3993,8 @@ async function withBusy(btn, busyLabel, fn) {
 }
 
 /* Toast with an Undo button — used by delete flows instead of confirm dialogs. */
-function toastUndo(msg, onUndo, ms = 10000) {
+// A toast with one action button (Undo, Send details…).
+function toastAction(msg, label, onClick, ms = 10000) {
   const host = document.getElementById('toast-host');
   const el = document.createElement('div');
   el.className = 'toast toast-with-undo';
@@ -4000,7 +4002,7 @@ function toastUndo(msg, onUndo, ms = 10000) {
   txt.textContent = msg;
   const btn = document.createElement('button');
   btn.className = 'toast-undo';
-  btn.textContent = 'Undo';
+  btn.textContent = label;
   el.appendChild(txt);
   el.appendChild(btn);
   host.appendChild(el);
@@ -4008,8 +4010,97 @@ function toastUndo(msg, onUndo, ms = 10000) {
   btn.addEventListener('click', async () => {
     clearTimeout(timer);
     el.remove();
-    await onUndo();
+    await onClick();
   });
+}
+function toastUndo(msg, onUndo, ms = 10000) { toastAction(msg, 'Undo', onUndo, ms); }
+
+/* ============================================================
+   ERROR SAFETY NET
+   ============================================================ */
+/* An unexpected error used to fail silently: a button did nothing and nobody
+   knew why (Paul, 5 Oct 2026 — hours reproducing what one error line would
+   have said). Now the user is told the action may not have worked, and can
+   send the technical details to the feedback inbox. They see exactly what is
+   sent first, and it never includes their data: the error (quoted text
+   removed — some browser errors quote what they were reading), the code
+   location, the app version, the screen and the browser. */
+let errorNoticeShownAt = 0;
+
+function reportableError(message, source) {
+  if (!message) return false;
+  if (/^Script error\.?$/i.test(message)) return false;                    // cross-origin: no detail to act on
+  if (/ResizeObserver loop/i.test(message)) return false;                  // harmless browser noise
+  if (/Failed to fetch|NetworkError|Load failed|network connection was lost/i.test(message)) return false;   // offline — expected
+  if (source && /^(chrome|moz|safari(-web)?)-extension:/i.test(source)) return false;                      // a browser extension's own error
+  return true;
+}
+
+function errorReportText(message, stack) {
+  // Double-quoted text goes (it is where browsers quote data); single-quoted
+  // text survives only if it is a code name — "(reading 'push')" is the clue.
+  const clean = (t) => String(t || '')
+    .replace(/"[^"\n]*"/g, '"…"')
+    .replace(/'([^'\n]*)'/g, (m, inner) => (/^[A-Za-z_$][\w$]{0,39}$/.test(inner) ? m : "'…'"))
+    .slice(0, 300);
+  const frames = String(stack || '').split('\n').slice(1, 7).map((l) => l.trim())
+    .filter(Boolean).map((l) => '  ' + clean(l.replace(/(?:https?|blob):\/\/[^\s)]*?(?=:\d+:\d+)/g, 'app')));
+  return [
+    `Simpl v${APP_VERSION} · screen: ${(typeof currentRoute !== 'undefined' && currentRoute) || 'lock'}`,
+    `Error: ${clean(message)}`,
+    ...frames,
+    `Browser: ${navigator.userAgent}`,
+    `Time: ${new Date().toISOString()}`,
+  ].join('\n');
+}
+
+function noticeError(message, stack, source) {
+  try {
+    if (!reportableError(message, source)) return;
+    if (Date.now() - errorNoticeShownAt < 30000) return;   // one notice per half-minute
+    errorNoticeShownAt = Date.now();
+    const report = errorReportText(message, stack);
+    toastAction('Something went wrong — that may not have worked.', 'Send details', () => openErrorReportModal(report), 15000);
+  } catch (e) { /* the safety net must never throw */ }
+}
+window.addEventListener('error', (e) => noticeError(e.message, e.error && e.error.stack, e.filename));
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  noticeError(r && r.message ? r.message : String(r), r && r.stack, '');
+});
+
+function openErrorReportModal(report) {
+  const prior = getOnboarding() || {};
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:540px;">
+        <div class="modal-head"><div class="ttl">Send error details</div><span class="modal-close" data-close>×</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="line-height:1.6;margin-bottom:10px;">This is everything that will be sent: the error and your browser version. Nothing from your invoices, clients or anything else you've entered.</div>
+          <pre style="white-space:pre-wrap;word-break:break-word;margin:0 0 12px;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;max-height:200px;overflow:auto;">${escapeHtml(report)}</pre>
+          <div class="field"><label>What were you doing? <span class="text-muted">(optional)</span></label><textarea id="er-note" rows="3" style="width:100%;resize:vertical;" placeholder="e.g. clicked Create project"></textarea></div>
+          <div class="err" id="er-err"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="er-send">Send</button>
+        </div>
+      </div>
+    </div>`);
+  document.getElementById('er-send').addEventListener('click', (e) => withBusy(e.currentTarget, 'Sending…', async () => {
+    const note = document.getElementById('er-note').value.trim();
+    let ok = false;
+    try {
+      const res = await fetch(ONBOARDING_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ _subject: `App error (v${APP_VERSION})`, type: 'error', message: (note ? note + '\n\n' : '') + report, email: prior.email || '', name: prior.name || '', appVersion: APP_VERSION }),
+      });
+      ok = res.ok;
+    } catch (e2) { ok = false; }
+    if (ok) { closeModal(); toast('Sent — thank you. That helps us fix it.'); }
+    else document.getElementById('er-err').textContent = 'Could not send — check your connection and try again.';
+  }));
 }
 
 /* ============================================================
