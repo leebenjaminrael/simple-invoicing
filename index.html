@@ -3071,7 +3071,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.8.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.9.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3179,7 +3179,7 @@ async function idbKeys() { const db = await idbOpen(); try { return await idbReq
    after a phone sleeps, the app fell back to an empty localStorage, and the
    new vault it offered became the one in use. */
 const VAULT_IN_IDB_STORE = 'seed-vault-in-idb-v1';
-function markVaultInIdb() { try { localStorage.setItem(VAULT_IN_IDB_STORE, '1'); } catch (e) {} }
+function markVaultInIdb() { try { localStorage.setItem(VAULT_IN_IDB_STORE, '1'); } catch (e) { noteQuietError('vault flag', e); } }
 function vaultKnownInIdb() { try { return localStorage.getItem(VAULT_IN_IDB_STORE) === '1'; } catch (e) { return false; } }
 
 async function sha256Hex(str) {
@@ -3249,7 +3249,7 @@ async function vaultSet(blob) {
 }
 
 async function vaultDelete() {
-  try { await idbDel('vault'); await idbDel('ls-snapshot-hash'); } catch (e) {}
+  try { await idbDel('vault'); await idbDel('ls-snapshot-hash'); } catch (e) { noteQuietError('vault reset', e); }
   try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
 }
 
@@ -3437,7 +3437,7 @@ async function refreshLicenceState() {
     try {
       const raw = localStorage.getItem(LICENCE_KEY_STORE);
       if (raw) payload = await verifyLicence(raw);
-    } catch (e) {}
+    } catch (e) { noteQuietError('licence state', e); }
     try {
       const meta = JSON.parse(localStorage.getItem(TRIAL_META_STORE) || 'null');
       if (meta && meta.start) trialStart = meta.start;
@@ -3446,7 +3446,7 @@ async function refreshLicenceState() {
         trialStart = new Date().toISOString();
         localStorage.setItem(TRIAL_META_STORE, JSON.stringify({ start: trialStart }));
       }
-    } catch (e) {}
+    } catch (e) { noteQuietError('licence state', e); }
   }
   licenceState = licenceStatusFrom({ active, licencePayload: payload, trialStart });
   refreshLicenceNotice();
@@ -3559,7 +3559,7 @@ async function applyLicenceFromUrl() {
     return false;
   }
 
-  try { localStorage.setItem(LICENCE_KEY_STORE, raw); } catch (e) {}
+  try { localStorage.setItem(LICENCE_KEY_STORE, raw); } catch (e) { noteQuietError('licence link', e); }
   await refreshLicenceState();
   reportLicenceActivated(payload, 'link');
   const until = new Date(payload.exp).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -3601,7 +3601,7 @@ function drawBrandFooter(doc, pageW, y) {
     try {
       doc.setFontSize(8); doc.setTextColor(158, 157, 153);
       doc.text(`Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}`, pageW / 2, y, { align: 'center' });
-    } catch (e2) {}
+    } catch (e2) { noteQuietError('PDF footer logo', e2); }
   }
 }
 
@@ -3686,7 +3686,7 @@ async function saveState() {
   applyAutoOverdue(state);
   // Change tracking runs after auto-overdue (so status flips are stamped) and
   // is fenced: a tracker bug must never be able to block a save.
-  try { trackChanges(state); } catch (e) {}
+  try { trackChanges(state); } catch (e) { noteQuietError('change tracking', e); }
   await ensureDek();
   // Taken before encrypting: the blob holds this state or a later one, never an
   // earlier one, so a backup can be repeated but never wrongly skipped.
@@ -3702,7 +3702,7 @@ async function saveState() {
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
-  try { scheduleCloudBackup(blob, fp, counts); } catch (e) {}
+  try { scheduleCloudBackup(blob, fp, counts); } catch (e) { noteQuietError('backup scheduling', e); }
   // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
   // is effectively unlimited.
   if (where === 'localStorage' && !quotaWarned && blob.length > 3.5 * 1024 * 1024) {
@@ -4036,27 +4036,74 @@ function reportableError(message, source) {
   return true;
 }
 
-function errorReportText(message, stack) {
-  // Double-quoted text goes (it is where browsers quote data); single-quoted
-  // text survives only if it is a code name — "(reading 'push')" is the clue.
-  const clean = (t) => String(t || '')
+// Double-quoted text goes (it is where browsers quote data); single-quoted
+// text survives only if it is a code name — "(reading 'push')" is the clue.
+function cleanErrorText(t) {
+  return String(t || '')
     .replace(/"[^"\n]*"/g, '"…"')
     .replace(/'([^'\n]*)'/g, (m, inner) => (/^[A-Za-z_$][\w$]{0,39}$/.test(inner) ? m : "'…'"))
     .slice(0, 300);
-  const frames = String(stack || '').split('\n').slice(1, 7).map((l) => l.trim())
-    .filter(Boolean).map((l) => '  ' + clean(l.replace(/(?:https?|blob):\/\/[^\s)]*?(?=:\d+:\d+)/g, 'app')));
+}
+// Stack lines with addresses reduced to code positions.
+function cleanStackFrames(stack, max) {
+  return String(stack || '').split('\n').slice(1, 1 + max).map((l) => l.trim()).filter(Boolean)
+    .map((l) => cleanErrorText(l.replace(/(?:https?|blob):\/\/[^\s)]*?(?=:\d+:\d+)/g, 'app')));
+}
+
+function errorReportText(message, stack) {
+  const recent = recentErrorsText(8);
   return [
     `Simpl v${APP_VERSION} · screen: ${(typeof currentRoute !== 'undefined' && currentRoute) || 'lock'}`,
-    `Error: ${clean(message)}`,
-    ...frames,
+    `Error: ${cleanErrorText(message)}`,
+    ...cleanStackFrames(stack, 6).map((f) => '  ' + f),
     `Browser: ${navigator.userAgent}`,
     `Time: ${new Date().toISOString()}`,
+    ...(recent ? ['', 'Recent errors on this device:', recent] : []),
   ].join('\n');
+}
+
+/* Black box: the last 20 errors on this device — the ones the user was told
+   about, and the ones the code deliberately swallows where a real failure
+   could hide (noteQuietError). Same rules as a report: no user data. It
+   travels with every report — error, feedback, support details — so "X
+   doesn't work" arrives with its cause. Kept in memory too, for when the
+   browser's storage is the thing failing. */
+const ERROR_LOG_STORE = 'seed-error-log-v1';
+const ERROR_LOG_MAX = 20;
+let errorLogMemory = [];
+function recordError(kind, where, message, stack) {
+  try {
+    const entry = { t: new Date().toISOString(), v: APP_VERSION, kind, where: String(where || '').slice(0, 40),
+      msg: cleanErrorText(message), at: cleanStackFrames(stack, 1)[0] || '' };
+    errorLogMemory = errorLogMemory.concat(entry).slice(-ERROR_LOG_MAX);
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(ERROR_LOG_STORE) || '[]'); } catch (e) { saved = []; }
+    localStorage.setItem(ERROR_LOG_STORE, JSON.stringify((Array.isArray(saved) ? saved : []).concat(entry).slice(-ERROR_LOG_MAX)));
+  } catch (e) { /* the recorder must never throw */ }
+}
+function noteQuietError(where, err) {
+  recordError('quiet', where, err && err.message ? err.message : String(err), err && err.stack);
+}
+// Stored and in-memory entries merged: when storage is what's failing, the
+// newest errors exist only in memory, and they are the ones that matter.
+function recentErrors() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(ERROR_LOG_STORE) || '[]'); } catch (e) { saved = []; }
+  const seen = new Set();
+  return (Array.isArray(saved) ? saved : []).concat(errorLogMemory)
+    .filter((e) => { const k = e.t + '|' + e.where + '|' + e.msg; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => String(a.t).localeCompare(String(b.t)))
+    .slice(-ERROR_LOG_MAX);
+}
+function recentErrorsText(n) {
+  return recentErrors().slice(-n).map((e) =>
+    `${String(e.t).slice(0, 16).replace('T', ' ')}  v${e.v}  ${e.kind}  ${e.where}: ${e.msg}${e.at ? '  @ ' + e.at : ''}`).join('\n');
 }
 
 function noticeError(message, stack, source) {
   try {
     if (!reportableError(message, source)) return;
+    recordError('error', (typeof currentRoute !== 'undefined' && currentRoute) || 'lock', message, stack);
     if (Date.now() - errorNoticeShownAt < 30000) return;   // one notice per half-minute
     errorNoticeShownAt = Date.now();
     const report = errorReportText(message, stack);
@@ -7792,7 +7839,7 @@ function ownAccountIdentity() {
       for (const m of text.match(/\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,32}\b/gi) || []) addAccount(m);   // IBAN
       for (const m of text.match(/\d[\d \-]{4,}\d/g) || []) addAccount(m);                 // account numbers
     }
-  } catch (e) {}
+  } catch (e) { noteQuietError('own-account detection', e); }
   if (typeof FNB_ACCOUNT_REF === 'string') addAccount(FNB_ACCOUNT_REF);    // '' is ignored by the length guard
   return { names, accounts };
 }
@@ -11834,7 +11881,7 @@ function bindSettingsEvents() {
       const payload = await verifyLicence(val);
       if (!payload) { err.textContent = 'That licence key isn\'t valid. Check you copied all of it.'; return; }
       if (Date.now() > payload.exp) { err.textContent = 'That licence has expired — please renew.'; return; }
-      try { localStorage.setItem(LICENCE_KEY_STORE, val); } catch (e2) {}
+      try { localStorage.setItem(LICENCE_KEY_STORE, val); } catch (e2) { noteQuietError('licence save', e2); }
       await refreshLicenceState();
       reportLicenceActivated(payload, 'paste');
       render();
@@ -13730,7 +13777,7 @@ async function initMigrationTarget() {
     for (const k of Object.keys(incoming)) {
       if (allowed.indexOf(k) === -1) continue;
       if (typeof incoming[k] !== 'string') continue;
-      try { localStorage.setItem(k, incoming[k]); } catch (e) {}
+      try { localStorage.setItem(k, incoming[k]); } catch (e) { noteQuietError('migration keys', e); }
     }
     // v1 payloads (pre-release shape) — kept so an old tab still works.
     if (data.onboarding) { try { localStorage.setItem('seed-onboarding-v2', data.onboarding); } catch (e) {} }
@@ -14001,7 +14048,7 @@ function scheduleCloudBackup(blob, fp, counts) {
     cloudSet(CLOUD_DIRTY_STORE, '1');
     clearTimeout(cloudTimer);
     cloudTimer = setTimeout(() => { cloudTimer = null; runCloudBackup({ silent: true }); }, CLOUD_DEBOUNCE_MS);
-  } catch (e) {}
+  } catch (e) { noteQuietError('backup scheduling', e); }
 }
 
 function cloudCountTotal(c) {
@@ -14696,7 +14743,7 @@ async function showLockForm(returningUser) {
     // Only offer phrase recovery if this vault actually has one.
     if (recBtn) {
       let has = false;
-      try { const b = await vaultGet(); has = b ? vaultHasRecovery(b) : false; } catch (e) {}
+      try { const b = await vaultGet(); has = b ? vaultHasRecovery(b) : false; } catch (e) { noteQuietError('lock screen vault check', e); }
       recBtn.style.display = has ? 'inline' : 'none';
     }
   } else {
@@ -14765,6 +14812,8 @@ async function vaultStorageReport() {
   lines.push('Fallback copy: ' + (fallback ? 'yes' : 'no') + ' · marked as kept in IndexedDB: ' + (vaultKnownInIdb() ? 'yes' : 'no'));
   lines.push((navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)) ? 'Opened as: home-screen app' : 'Opened as: browser tab');
   lines.push(navigator.userAgent);
+  const recent = recentErrorsText(10);
+  if (recent) lines.push('', 'Recent errors on this device:', recent);
   return lines.join('\n');
 }
 
@@ -14853,7 +14902,7 @@ function openEarlierVaultModal() {
 
 document.getElementById('lock-reset').addEventListener('click', async () => {
   let hasRec = false;
-  try { const b = await vaultGet(); hasRec = b ? vaultHasRecovery(b) : false; } catch (e) {}
+  try { const b = await vaultGet(); hasRec = b ? vaultHasRecovery(b) : false; } catch (e) { noteQuietError('reset vault check', e); }
   if (hasRec && !confirm('Wait — this vault HAS a recovery phrase.\n\nIf you have your 12 words, close this and use "Forgot password — use recovery phrase" instead. Resetting erases everything.\n\nContinue to reset anyway?')) return;
   if (!confirm('Reset the vault? This permanently deletes ALL stored clients, invoices, quotes and settings. This cannot be undone.')) return;
   if (!confirm('Are you absolutely sure? Everything in the vault will be lost.')) return;
@@ -14887,7 +14936,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
     if (pwd.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return; }
     if (pwd !== pwd2) { err.textContent = 'Passwords do not match.'; return; }
     let earlier = [];
-    try { earlier = await vaultCopiesOnDevice(); } catch (e3) {}
+    try { earlier = await vaultCopiesOnDevice(); } catch (e3) { noteQuietError('earlier copies', e3); }
     if (earlier.length && !confirm('This device has an earlier vault. Creating a new one won\'t delete it, but you may want to recover it first with "Recover an earlier vault on this device".\n\nCreate a new, empty vault anyway?')) return;
     state = JSON.parse(JSON.stringify(SEED_DATA));
     installEntityAccessors();
@@ -15145,7 +15194,7 @@ function initPwa() {
   const dismissBtn = document.getElementById('update-dismiss');
   if (reloadBtn) reloadBtn.addEventListener('click', async () => {
     // Safety net: download a backup before reloading to the new version
-    try { if (state && currentPassword) await downloadBackupSilent(); } catch (e) {}
+    try { if (state && currentPassword) await downloadBackupSilent(); } catch (e) { noteQuietError('backup download', e); }
     setTimeout(() => location.reload(), 400);
   });
   if (dismissBtn) dismissBtn.addEventListener('click', () => {
@@ -15222,7 +15271,7 @@ async function refreshStorageStatus() {
   try {
     const blob = await vaultGet();
     if (blob) { const kb = new Blob([blob]).size / 1024; usage = ` · vault ~${kb < 1024 ? kb.toFixed(0) + ' KB' : (kb / 1024).toFixed(1) + ' MB'}${vaultBackend === 'idb' ? '' : ' · legacy storage'}`; }
-  } catch (e) {}
+  } catch (e) { noteQuietError('storage status', e); }
   const persisted = await navigator.storage.persisted();
   const age = backupAgeDays();
   const backupLine = age == null
@@ -15571,6 +15620,8 @@ function setOnboarding(obj) {
    type:'feedback' so the rows are easy to tell apart. */
 function openFeedbackModal() {
   const prior = getOnboarding() || {};
+  const recent = recentErrorsText(10);
+  const fbTech = recent ? `Simpl v${APP_VERSION} · ${navigator.userAgent}\nRecent errors on this device:\n${recent}` : '';
   const html = `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:480px;">
@@ -15587,6 +15638,8 @@ function openFeedbackModal() {
             <label>Your email <span class="text-muted">(so we can reply)</span></label>
             <input id="fb-email" type="email" value="${escapeHtml(prior.email || '')}" />
           </div>
+          ${fbTech ? `<label class="checkbox" style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;"><input type="checkbox" id="fb-tech" checked style="margin-top:3px;" /><span class="text-sm">Include technical details <span class="text-muted">— recent errors on this device, no data from your records</span></span></label>
+          <details style="margin-top:6px;"><summary class="text-sm text-mid" style="cursor:pointer;">See what's included</summary><pre style="white-space:pre-wrap;word-break:break-word;margin:6px 0 0;padding:8px;border:1px solid var(--border);border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;max-height:160px;overflow:auto;">${escapeHtml(fbTech)}</pre></details>` : ''}
           <div class="err" id="fb-err"></div>
         </div>
         <div class="modal-foot">
@@ -15608,7 +15661,9 @@ function openFeedbackModal() {
         const res = await fetch(ONBOARDING_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({ _subject: `App feedback (v${APP_VERSION})`, type: 'feedback', message: msg, email, name: prior.name || '', appVersion: APP_VERSION }),
+          body: JSON.stringify({ _subject: `App feedback (v${APP_VERSION})`, type: 'feedback',
+            message: msg + (fbTech && document.getElementById('fb-tech') && document.getElementById('fb-tech').checked ? '\n\n---\n' + fbTech : ''),
+            email, name: prior.name || '', appVersion: APP_VERSION }),
         });
         ok = res.ok;
       } catch (e2) { ok = false; }
