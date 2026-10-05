@@ -3070,7 +3070,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.39.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.39.7.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3137,20 +3137,33 @@ const IDB_NAME = 'seed-vault-db';
 const IDB_STORE = 'kv';
 let vaultBackend = 'localStorage'; // set to 'idb' by initVaultStorage() when available
 
+/* Every IndexedDB request has a time limit. Safari's and Chrome's IndexedDB can
+   fail by never answering — typically after a device sleeps — and without a
+   limit a save waited for ever: the dialog stayed open, nothing was saved and
+   nothing was said (Paul, 5 Oct 2026, the same device whose database failed on
+   2 Oct). A request that times out fails like any other IndexedDB error, so
+   vaultSet falls back to localStorage, which the next start promotes. A healthy
+   request takes milliseconds; the limit is generous. */
+const IDB_TIMEOUT_MS = 4000;
 function idbOpen() {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+    const timer = setTimeout(() => finish(reject, new Error('idb_timeout')), IDB_TIMEOUT_MS);
     const req = indexedDB.open(IDB_NAME, 1);
     req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('idb open failed'));
-    req.onblocked = () => reject(new Error('idb blocked'));
+    // A connection that arrives after the time limit is closed, not leaked.
+    req.onsuccess = () => { if (settled) { try { req.result.close(); } catch (e) {} } else finish(resolve, req.result); };
+    req.onerror = () => finish(reject, req.error || new Error('idb open failed'));
+    req.onblocked = () => finish(reject, new Error('idb blocked'));
   });
 }
 function idbReq(db, mode, op) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('idb_timeout')), IDB_TIMEOUT_MS);
     const rq = op(db.transaction(IDB_STORE, mode).objectStore(IDB_STORE));
-    rq.onsuccess = () => resolve(rq.result);
-    rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => { clearTimeout(timer); resolve(rq.result); };
+    rq.onerror = () => { clearTimeout(timer); reject(rq.error); };
   });
 }
 async function idbGet(key) { const db = await idbOpen(); try { return await idbReq(db, 'readonly', (s) => s.get(key)); } finally { db.close(); } }
@@ -4790,11 +4803,18 @@ function renderCalendar() {
       <button type="button" tabindex="-1" data-cal-today>Today</button>
     </div>`;
   el.setAttribute('aria-activedescendant', 'cal-' + cursor);
-  // Below the field, or above it when there is no room underneath.
+  // Below the field — unless there is no room there, or it would cover the
+  // dialog's buttons (a click aimed at "Create project" would land on the
+  // calendar and do nothing). Then above, where there is room.
   const r = el.getBoundingClientRect();
   const h = node.offsetHeight, w = node.offsetWidth;
-  node.style.top = (r.bottom + 6 + h > innerHeight - 8 && r.top - 6 - h > 8 ? r.top - 6 - h : r.bottom + 6) + 'px';
-  node.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+  const left = Math.max(8, Math.min(r.left, innerWidth - w - 8));
+  const below = r.bottom + 6, above = r.top - 6 - h;
+  const foot = el.closest('.modal') && el.closest('.modal').querySelector('.modal-foot');
+  const f = foot && foot.getBoundingClientRect();
+  const coversButtons = !!f && below < f.bottom && below + h > f.top && left < f.right && left + w > f.left;
+  node.style.top = ((below + h > innerHeight - 8 || coversButtons) && above > 8 ? above : below) + 'px';
+  node.style.left = left + 'px';
 }
 
 function shiftCalendarMonth(n) {
@@ -8641,21 +8661,26 @@ function openProjectModal(existing) {
         </div>
       </div>
     </div>`);
-  document.getElementById('pjm-save').addEventListener('click', async () => {
+  // One project per dialog however often Create is pressed: the button is
+  // disabled while saving, and a retry after a failed save reuses the same one.
+  let created = null;
+  document.getElementById('pjm-save').addEventListener('click', (ev) => withBusy(ev.currentTarget, existing ? 'Saving…' : 'Creating…', async () => {
+    const err = document.getElementById('pjm-err');
     const name = document.getElementById('pjm-name').value.trim();
-    if (!name) { document.getElementById('pjm-err').textContent = 'Give the project a name.'; return; }
-    let target = existing;
-    if (!target) { target = ensureProjectShape({ id: uid('pj-'), clientId: null, name: '', rate: 0, status: 'active', archived: false, createdAt: new Date().toISOString() }); state.projects.push(target); }
+    if (!name) { err.textContent = 'Give the project a name.'; return; }
+    let target = existing || created;
+    if (!target) { target = ensureProjectShape({ id: uid('pj-'), clientId: null, name: '', rate: 0, status: 'active', archived: false, createdAt: new Date().toISOString() }); state.projects.push(target); created = target; }
     target.name = name;
     target.clientId = document.getElementById('pjm-client').value || null;
     target.description = document.getElementById('pjm-desc').value.trim();
     target.startDate = document.getElementById('pjm-start').value || '';
     target.endDate = document.getElementById('pjm-end').value || '';
-    await saveState();
+    try { await saveState(); }
+    catch (e) { err.textContent = 'This couldn\'t be saved just now. Close Simpl completely and open it again, then try once more.'; return; }
     closeModal();
     currentProjectId = target.id;
     render();
-  });
+  }));
   const del = document.getElementById('pjm-delete');
   if (del) del.addEventListener('click', async () => {
     const linkedDocs = (state.documents || []).some((d) => d.projectId === existing.id);
