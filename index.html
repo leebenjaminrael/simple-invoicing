@@ -2980,8 +2980,15 @@ function cloudCounts(s) {
    `important: true` floats an item to the top with a "Worth knowing" tag; keep
    it for changes that alter numbers people rely on. `link.to` must be one of
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
-   backup, security, feedback, export. (Checked by .claude/test-changelog.js.) */
+   backup, security, feedback, export, terms. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.42.0.0', date: '2026-10-06', items: [
+      { title: 'Your own terms — and different ones per client',
+        text: 'Set your payment days and the wording on invoices and quotes in Settings → Terms. A client can have its own: new documents for them pick it up, and the due date follows. Worth a look — until now everyone started from the same default wording.',
+        link: { label: 'Set your terms', to: 'terms' } },
+    ],
+  },
   {
     version: '1.41.0.1', date: '2026-10-06', items: [
       { title: 'Projects work in a newly added business',
@@ -3095,7 +3102,18 @@ const CHANGELOG = [
 
 const DEFAULT_LOGO_SVG = `<svg width="323" height="122" viewBox="0 0 323 122" xmlns="http://www.w3.org/2000/svg"><path d="M124.267 96.326C119.779 96.326 115.835 95.85 112.435 94.898C109.103 93.946 106.281 92.552 103.969 90.716C101.725 88.812 100.059 86.5 98.9706 83.78C97.8826 81.06 97.4066 77.898 97.5426 74.294L106.009 72.458C105.737 75.994 106.315 78.952 107.743 81.332C109.171 83.712 111.347 85.514 114.271 86.738C117.195 87.894 120.629 88.472 124.573 88.472C128.381 88.472 131.611 87.996 134.263 87.044C136.915 86.092 138.887 84.766 140.179 83.066C141.539 81.366 142.219 79.428 142.219 77.252C142.219 74.804 141.437 72.866 139.873 71.438C138.309 70.01 136.201 68.922 133.549 68.174C130.965 67.358 128.075 66.61 124.879 65.93C121.751 65.25 118.623 64.468 115.495 63.584C112.367 62.7 109.545 61.578 107.029 60.218C104.581 58.79 102.575 56.954 101.011 54.71C99.5146 52.398 98.7666 49.474 98.7666 45.938C98.7666 41.926 99.7526 38.458 101.725 35.534C103.765 32.61 106.621 30.366 110.293 28.802C113.965 27.17 118.283 26.354 123.247 26.354C128.143 26.354 132.495 27.136 136.303 28.7C140.179 30.264 143.239 32.576 145.483 35.636C147.727 38.628 148.917 42.334 149.053 46.754L140.281 48.896C140.281 46.448 139.839 44.306 138.955 42.47C138.139 40.566 136.983 39.036 135.487 37.88C133.991 36.656 132.189 35.738 130.081 35.126C127.973 34.446 125.661 34.106 123.145 34.106C120.085 34.106 117.399 34.582 115.087 35.534C112.775 36.486 110.973 37.778 109.681 39.41C108.389 41.042 107.743 42.98 107.743 45.224C107.743 47.876 108.661 49.984 110.497 51.548C112.401 53.044 114.849 54.234 117.841 55.118C120.833 56.002 124.029 56.818 127.429 57.566C130.353 58.178 133.209 58.926 135.997 59.81C138.853 60.626 141.437 61.748 143.749 63.176C146.061 64.536 147.897 66.338 149.257 68.582C150.617 70.826 151.297 73.682 151.297 77.15C151.297 81.026 150.277 84.392 148.237 87.248C146.265 90.104 143.273 92.348 139.261 93.98C135.249 95.544 130.251 96.326 124.267 96.326ZM183.301 96.326C179.153 96.326 175.481 95.714 172.285 94.49C169.157 93.198 166.505 91.362 164.329 88.982C162.153 86.602 160.521 83.78 159.433 80.516C158.345 77.252 157.801 73.58 157.801 69.5C157.801 65.352 158.345 61.544 159.433 58.076C160.521 54.608 162.119 51.582 164.227 48.998C166.335 46.414 168.919 44.442 171.979 43.082C175.039 41.654 178.541 40.94 182.485 40.94C185.953 40.94 189.115 41.518 191.971 42.674C194.827 43.83 197.241 45.632 199.213 48.08C201.253 50.46 202.783 53.486 203.803 57.158C204.823 60.762 205.231 65.012 205.027 69.908L163.615 70.214V63.89L199.417 63.584L196.255 67.868C196.595 63.584 196.187 60.048 195.031 57.26C193.875 54.472 192.209 52.364 190.033 50.936C187.925 49.508 185.409 48.794 182.485 48.794C179.357 48.794 176.603 49.61 174.223 51.242C171.843 52.874 170.007 55.22 168.715 58.28C167.491 61.34 166.879 65.046 166.879 69.398C166.879 75.654 168.273 80.448 171.061 83.78C173.849 87.044 177.997 88.676 183.505 88.676C185.613 88.676 187.449 88.438 189.013 87.962C190.645 87.418 192.005 86.704 193.093 85.82C194.249 84.868 195.167 83.78 195.847 82.556C196.595 81.332 197.173 80.006 197.581 78.578L205.741 80.516C205.129 82.964 204.177 85.174 202.885 87.146C201.661 89.05 200.097 90.682 198.193 92.042C196.357 93.402 194.215 94.456 191.767 95.204C189.319 95.952 186.497 96.326 183.301 96.326ZM236.994 96.326C232.846 96.326 229.174 95.714 225.978 94.49C222.85 93.198 220.198 91.362 218.022 88.982C215.846 86.602 214.214 83.78 213.126 80.516C212.038 77.252 211.494 73.58 211.494 69.5C211.494 65.352 212.038 61.544 213.126 58.076C214.214 54.608 215.812 51.582 217.92 48.998C220.028 46.414 222.612 44.442 225.672 43.082C228.732 41.654 232.234 40.94 236.178 40.94C239.646 40.94 242.808 41.518 245.664 42.674C248.52 43.83 250.934 45.632 252.906 48.08C254.946 50.46 256.476 53.486 257.496 57.158C258.516 60.762 258.924 65.012 258.72 69.908L217.308 70.214V63.89L253.11 63.584L249.948 67.868C250.288 63.584 249.88 60.048 248.724 57.26C247.568 54.472 245.902 52.364 243.726 50.936C241.618 49.508 239.102 48.794 236.178 48.794C233.05 48.794 230.296 49.61 227.916 51.242C225.536 52.874 223.7 55.22 222.408 58.28C221.184 61.34 220.572 65.046 220.572 69.398C220.572 75.654 221.966 80.448 224.754 83.78C227.542 87.044 231.69 88.676 237.198 88.676C239.306 88.676 241.142 88.438 242.706 87.962C244.338 87.418 245.698 86.704 246.786 85.82C247.942 84.868 248.86 83.78 249.54 82.556C250.288 81.332 250.866 80.006 251.274 78.578L259.434 80.516C258.822 82.964 257.87 85.174 256.578 87.146C255.354 89.05 253.79 90.682 251.886 92.042C250.05 93.402 247.908 94.456 245.46 95.204C243.012 95.952 240.19 96.326 236.994 96.326ZM286.807 96.326C282.319 96.326 278.477 95.136 275.281 92.756C272.085 90.376 269.637 87.112 267.937 82.964C266.305 78.816 265.489 74.056 265.489 68.684C265.489 63.312 266.305 58.552 267.937 54.404C269.569 50.256 271.949 46.992 275.077 44.612C278.205 42.232 282.047 41.042 286.603 41.042C290.343 41.042 293.403 41.824 295.783 43.388C298.163 44.952 300.067 46.992 301.495 49.508C302.991 51.956 304.079 54.642 304.759 57.566H306.595C306.255 55.594 305.949 53.554 305.677 51.446C305.405 49.27 305.167 47.162 304.963 45.122C304.759 43.014 304.657 41.144 304.657 39.512V23.6H314.041V68.99V95H305.677L306.187 80.72H304.555C303.739 83.78 302.583 86.5 301.087 88.88C299.591 91.192 297.687 93.028 295.375 94.388C293.063 95.68 290.207 96.326 286.807 96.326ZM288.949 88.166C291.397 88.166 293.607 87.588 295.579 86.432C297.551 85.276 299.217 83.78 300.577 81.944C301.937 80.04 302.957 78 303.637 75.824C304.385 73.648 304.759 71.54 304.759 69.5V68.276C304.759 66.848 304.555 65.318 304.147 63.686C303.739 61.986 303.127 60.286 302.311 58.586C301.563 56.886 300.543 55.322 299.251 53.894C298.027 52.398 296.565 51.242 294.865 50.426C293.165 49.542 291.261 49.1 289.153 49.1C286.093 49.1 283.509 49.984 281.401 51.752C279.361 53.452 277.797 55.798 276.709 58.79C275.689 61.782 275.179 65.148 275.179 68.888C275.179 72.764 275.723 76.164 276.811 79.088C277.899 81.944 279.463 84.188 281.503 85.82C283.611 87.384 286.093 88.166 288.949 88.166Z" fill="black"/><circle cx="37.8606" cy="61" r="37.8606" fill="#00D2B0"/></svg>`;
 
+/* Terms. Until v1.42 these two were the only wording any business could
+   start from — Lee's own, R1000 rate and all. Now each business keeps its own
+   (Settings → Terms; termsInvoice / termsQuote / paymentDays) and each client
+   can override them (termsFor, paymentDaysFor). These remain only as the
+   starting wording for businesses that existed before, so nothing changed
+   for anyone until they edit it. New vaults start from the neutral ones. */
 const STANDARD_TERMS_INVOICE = 'Payment due within 7 days of invoice date. Any items not quoted on will be charged in addition at our hourly rate.';
+const NEUTRAL_TERMS_INVOICE = 'Payment is due within [payment days] days of the invoice date, by [due date].';
+const NEUTRAL_TERMS_QUOTE = 'This quote is valid until [expiry date].';
+// What an existing business starts with: its old wording, with the fixed
+// "7 days" tied to its payment days so the two can never disagree.
+const LEGACY_TERMS_INVOICE = STANDARD_TERMS_INVOICE.replace('within 7 days', 'within [payment days] days');
 const STANDARD_TERMS_QUOTE = 'Our terms are: 50% of total upfront, and 50% balance on completion of the project. Any items not quoted on will be charged in addition at our hourly rate of R1000. Any changes in original brief might incur an additional charge at R1000 per hour. This quote is valid until [expiry date].';
 
 const DEFAULT_EXPENSE_CATEGORIES = ['Software', 'Hosting', 'Hardware', 'Travel', 'Office', 'Subcontractor', 'Bank fees', 'FX fees', 'Marketing', 'Professional fees', 'Drawings / Salary', 'Other'];
@@ -3189,6 +3207,9 @@ const SEED_DATA = {
       runningTimer: null,
       payeeRules: {},
       defaultHourlyRate: 0,
+      paymentDays: 7,
+      termsInvoice: NEUTRAL_TERMS_INVOICE,
+      termsQuote: NEUTRAL_TERMS_QUOTE,
       fxRates: {},
       fxFetchedAt: null,
     },
@@ -3206,7 +3227,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.41.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.42.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3457,7 +3478,7 @@ function installEntityAccessors() {
   };
   ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries', 'runningTimer', 'payeeRules'].forEach((k) => defineProxy(state, k));
   state.settings = state.settings || {};
-  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'nextCredit', 'invoicePrefix', 'quotePrefix', 'creditPrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed'].forEach((k) => defineProxy(state.settings, k));
+  ['company', 'logo', 'banking', 'nextInv', 'nextQt', 'nextCredit', 'invoicePrefix', 'quotePrefix', 'creditPrefix', 'numberDigits', 'baseCurrency', 'vatPercent', 'vatCycle', 'taxYearStartMonth', 'goals', 'savedLineItems', 'defaultHourlyRate', 'fxRates', 'fxFetchedAt', 'setupDismissed', 'paymentDays', 'termsInvoice', 'termsQuote'].forEach((k) => defineProxy(state.settings, k));
 }
 
 /* ============================================================
@@ -3503,8 +3524,14 @@ function getDeviceId() {
 function entitySettingsFingerprint(ent) {
   const { name, company, logo, banking, nextInv, nextQt, invoicePrefix, quotePrefix, numberDigits,
           baseCurrency, vatPercent, vatCycle, taxYearStartMonth, goals, savedLineItems, defaultHourlyRate } = ent;
+  // Terms join the fingerprint only once edited: the upgrade that fills them in
+  // must not stamp every business's settings as freshly changed (which would
+  // let a stale device's settings win the next merge).
+  const edited = (k, start) => ent[k] !== undefined && ent[k] !== start;
+  const terms = (edited('paymentDays', 7) || edited('termsInvoice', LEGACY_TERMS_INVOICE) || edited('termsQuote', STANDARD_TERMS_QUOTE))
+    ? { paymentDays: ent.paymentDays, termsInvoice: ent.termsInvoice, termsQuote: ent.termsQuote } : undefined;
   return JSON.stringify({ name, company, logo, banking, nextInv, nextQt, invoicePrefix, quotePrefix, numberDigits,
-                          baseCurrency, vatPercent, vatCycle, taxYearStartMonth, goals, savedLineItems, defaultHourlyRate });
+                          baseCurrency, vatPercent, vatCycle, taxYearStartMonth, goals, savedLineItems, defaultHourlyRate, terms });
 }
 
 function trackChanges(s) {
@@ -4050,6 +4077,41 @@ function committedIncomeZAR() {
 function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
   return c ? c.name : '—';
+}
+/* A client's own terms if set, else the business's. Blank on the client means
+   "use the default". Credit notes carry no terms. */
+function paymentDaysFor(clientId) {
+  const c = (state.clients || []).find((x) => x.id === clientId);
+  if (c && c.paymentDays !== null && c.paymentDays !== undefined && c.paymentDays !== '' && Number(c.paymentDays) >= 0) return Number(c.paymentDays);
+  const b = Number(state.settings && state.settings.paymentDays);
+  return b >= 0 ? b : 7;
+}
+function termsFor(type, clientId) {
+  if (type !== 'invoice' && type !== 'quote') return '';
+  const c = (state.clients || []).find((x) => x.id === clientId);
+  const own = c && (type === 'quote' ? c.termsQuote : c.termsInvoice);
+  if (own && own.trim()) return own;
+  const s = state.settings || {};
+  return (type === 'quote' ? s.termsQuote : s.termsInvoice) || '';
+}
+// Terms as printed: [payment days], [due date] and [expiry date] filled in from
+// the document itself, so the wording always matches its dates.
+// Picking a different client on a draft brings that client's terms and
+// payment days — unless the wording or due date was changed by hand on this
+// document. A document that has been sent is never touched.
+function applyClientTerms(d, prevClientId) {
+  if (!d || d.status !== 'draft') return;
+  if (!d.terms || d.terms === termsFor(d.type, prevClientId)) d.terms = termsFor(d.type, d.clientId);
+  if (d.type === 'invoice' && d.date && (!d.dueDate || d.dueDate === addDays(d.date, paymentDaysFor(prevClientId)))) {
+    d.dueDate = addDays(d.date, paymentDaysFor(d.clientId));
+  }
+}
+function resolveTerms(d) {
+  const days = d.date && d.dueDate ? daysBetween(d.date, d.dueDate) : paymentDaysFor(d.clientId);
+  return (d.terms || '')
+    .replace(/\[expiry date\]/gi, d.expiry ? fmtDate(d.expiry) : '')
+    .replace(/\[due date\]/gi, d.dueDate ? fmtDate(d.dueDate) : '')
+    .replace(/\[payment days\]/gi, String(days >= 0 ? days : paymentDaysFor(d.clientId)));
 }
 // Subtotal of the normal (non-percentage) lines — the base a % line applies to.
 function lineBaseSubtotal(doc) {
@@ -4681,6 +4743,10 @@ function ensureEntityShape(ent) {
   if (!ent.timeEntries) ent.timeEntries = [];
   if (ent.runningTimer === undefined) ent.runningTimer = null;
   if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
+  // v1.42: terms per business (clients can override). Existing wording kept.
+  if (typeof ent.paymentDays !== 'number') ent.paymentDays = 7;
+  if (typeof ent.termsInvoice !== 'string') ent.termsInvoice = LEGACY_TERMS_INVOICE;
+  if (typeof ent.termsQuote !== 'string') ent.termsQuote = STANDARD_TERMS_QUOTE;
   // v6.6: customisable document numbering (prefix + zero-padding width).
   if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
   if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
@@ -5895,10 +5961,10 @@ function whatsNewGo(to) {
   if (to === 'clients') { currentClientId = null; return setRoute('clients'); }
   if (to === 'feedback') { render(); return openFeedbackModal(); }
   if (to === 'export') { goToFinanceTab('overview'); return openAccountantExportModal(); }
-  if (to === 'backup' || to === 'security') {
-    settingsPage = to === 'backup' ? 'account' : 'help';
+  if (to === 'backup' || to === 'security' || to === 'terms') {
+    settingsPage = to === 'backup' ? 'account' : to === 'terms' ? 'business' : 'help';
     setRoute('settings');
-    const name = to === 'backup' ? 'Server backup' : 'Security';
+    const name = to === 'backup' ? 'Server backup' : to === 'terms' ? 'Terms' : 'Security';
     const h = [...document.querySelectorAll('#view-host h3')].find((x) => x.textContent.trim() === name);
     if (h) h.scrollIntoView({ block: 'start' });
   }
@@ -7273,9 +7339,9 @@ async function billTime(clientId, entries, target) {
       id: uid('d-'), type: 'invoice', number: state.settings.nextInv,
       clientId, currency: baseCcy(),
       bankId: (state.settings.banking.find((b) => b.currency === baseCcy()) || state.settings.banking[0] || { id: 'sa' }).id,
-      date: today, dueDate: addDays(today, 7), expiry: null,
+      date: today, dueDate: addDays(today, paymentDaysFor(clientId)), expiry: null,
       projectTitle: '', poNumber: '', lines,
-      depositPct: 0, terms: STANDARD_TERMS_INVOICE, notes: '', includeNotes: false,
+      depositPct: 0, terms: termsFor('invoice', clientId), notes: '', includeNotes: false,
       status: 'draft', paidDate: null, sourceQuoteId: null,
     };
     state.documents.push(doc);
@@ -9889,7 +9955,7 @@ async function createQuoteFromProject(p, mode, withUnits) {
     date: todayISO(), dueDate: null, expiry: addDays(todayISO(), 30),
     currency: baseCcy(), bankId: bank.id, lines,
     status: 'draft', paidDate: null, sourceQuoteId: null,
-    notes: '', includeNotes: false, terms: STANDARD_TERMS_QUOTE,
+    notes: '', includeNotes: false, terms: termsFor('quote', p.clientId),
   };
   state.settings.nextQt += 1;
   state.documents.push(doc);
@@ -10771,6 +10837,22 @@ function openClientModal(client) {
             </div>
           </div>
           <div class="text-sm text-muted" style="margin-top:-6px;">New invoices/quotes for this client default to this currency (you can still override per document). Only ${baseCcy()} (your base currency) is charged VAT.</div>
+          <div class="form-grid" style="margin-top:18px;">
+            <div class="field full"><label style="font-weight:600;">Terms for this client <span class="text-muted" style="font-weight:400;">(leave blank to use your defaults from Settings)</span></label></div>
+            <div class="field">
+              <label>Payment due <span class="text-muted">(days)</span></label>
+              <input data-cf="paymentDays" type="number" min="0" max="365" step="1" value="${client.paymentDays === null || client.paymentDays === undefined || client.paymentDays === '' ? '' : client.paymentDays}" placeholder="${paymentDaysFor(null)} (default)" />
+            </div>
+            <div class="field full">
+              <label>Invoice terms</label>
+              <textarea data-cf="termsInvoice" rows="3" placeholder="${escapeHtml(state.settings.termsInvoice || '')}">${escapeHtml(client.termsInvoice || '')}</textarea>
+            </div>
+            <div class="field full">
+              <label>Quote terms</label>
+              <textarea data-cf="termsQuote" rows="3" placeholder="${escapeHtml(state.settings.termsQuote || '')}">${escapeHtml(client.termsQuote || '')}</textarea>
+            </div>
+          </div>
+          <div class="text-sm text-muted">Used on new invoices and quotes for this client. Existing documents keep their terms.</div>
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Cancel</button>
@@ -10782,7 +10864,9 @@ function openClientModal(client) {
   showModal(html);
   document.getElementById('client-save').addEventListener('click', async () => {
     const get = (f) => document.querySelector(`[data-cf="${f}"]`).value.trim();
+    const days = get('paymentDays');
     const updated = {
+      ...client,   // keep anything this dialog doesn't show
       id: client.id,
       name: get('name'),
       addr: get('addr'),
@@ -10791,6 +10875,9 @@ function openClientModal(client) {
       vat: get('vat'),
       rate: Number(document.querySelector('[data-cf="rate"]').value) || 0,
       currency: document.querySelector('[data-cf="currency"]').value || baseCcy(),
+      paymentDays: days === '' ? null : Math.min(365, Math.max(0, Math.round(Number(days) || 0))),
+      termsInvoice: get('termsInvoice'),
+      termsQuote: get('termsQuote'),
     };
     if (!updated.name) { toast('Name is required'); return; }
     const idx = state.clients.findIndex((c) => c.id === client.id);
@@ -10832,7 +10919,7 @@ function openDocEditor(docId, defaultType, presetClientId) {
       currency: startCcy,
       bankId: (state.settings.banking.find((b) => b.currency === startCcy) || state.settings.banking[0] || { id: 'sa' }).id,
       date: today,
-      dueDate: type === 'invoice' ? addDays(today, 7) : null,
+      dueDate: type === 'invoice' ? addDays(today, paymentDaysFor(firstClient && firstClient.id)) : null,
       expiry: type === 'quote' ? addDays(today, 30) : null,
       projectTitle: '',
       poNumber: '',
@@ -10841,7 +10928,7 @@ function openDocEditor(docId, defaultType, presetClientId) {
       portionLabel: '',
       billingGroupId: null,
       appliesToInvoiceId: type === 'credit' ? null : undefined,
-      terms: type === 'invoice' ? STANDARD_TERMS_INVOICE : type === 'quote' ? STANDARD_TERMS_QUOTE : '',
+      terms: termsFor(type, firstClient && firstClient.id),
       notes: '',
       includeNotes: false,
       status: 'draft',
@@ -11065,6 +11152,7 @@ function renderDocEditor() {
         <div class="field full">
           <label>Terms <span class="text-muted">(always shown on PDF)</span></label>
           <textarea data-df="terms">${escapeHtml(d.terms || '')}</textarea>
+          <div class="text-sm text-muted" id="ed-terms-printed" style="margin-top:6px;${/\[[a-z ]+\]/i.test(d.terms || '') ? '' : 'display:none;'}">Prints as: ${escapeHtml(resolveTerms(d))}</div>
         </div>
         <div class="field full">
           <label class="checkbox" style="margin-bottom:8px;">
@@ -11098,9 +11186,9 @@ function bindEditorEvents() {
       if (newType === editingDoc.type) return;
       editingDoc.type = newType;
       editingDoc.number = newType === 'invoice' ? state.settings.nextInv : newType === 'credit' ? state.settings.nextCredit : state.settings.nextQt;
-      editingDoc.terms = newType === 'invoice' ? STANDARD_TERMS_INVOICE : newType === 'quote' ? STANDARD_TERMS_QUOTE : '';
+      editingDoc.terms = termsFor(newType, editingDoc.clientId);
       if (newType === 'invoice') {
-        editingDoc.dueDate = editingDoc.dueDate || addDays(editingDoc.date, 7);
+        editingDoc.dueDate = editingDoc.dueDate || addDays(editingDoc.date, paymentDaysFor(editingDoc.clientId));
         editingDoc.expiry = null;
       } else if (newType === 'quote') {
         editingDoc.expiry = editingDoc.expiry || addDays(editingDoc.date, 30);
@@ -11121,7 +11209,13 @@ function bindEditorEvents() {
     el.addEventListener(evt, () => {
       const f = el.dataset.df;
       let v = el.type === 'checkbox' ? el.checked : el.value;
+      const before = editingDoc[f];
       editingDoc[f] = v;
+      const printed = document.getElementById('ed-terms-printed');
+      if (printed && (f === 'terms' || f === 'date' || f === 'dueDate' || f === 'expiry')) {
+        printed.style.display = /\[[a-z ]+\]/i.test(editingDoc.terms || '') ? '' : 'none';
+        printed.textContent = 'Prints as: ' + resolveTerms(editingDoc);
+      }
       if (f === 'projectId') {
         // Keep the display title in sync — PDFs and lists show projectTitle.
         const pj = projectById(v || null);
@@ -11136,14 +11230,18 @@ function bindEditorEvents() {
           const match = state.settings.banking.find((b) => b.currency === cl.currency);
           if (match) editingDoc.bankId = match.id;
         }
+        applyClientTerms(editingDoc, before);
         renderDocEditor();
       } else if (f === 'currency') {
         const match = state.settings.banking.find((b) => b.currency === v);
         if (match) editingDoc.bankId = match.id;
         renderDocEditor();
       } else if (f === 'date') {
-        if (editingDoc.type === 'invoice' && !host.querySelector('[data-df="dueDate"]').value) {
-          editingDoc.dueDate = addDays(v, 7);
+        // The due date follows the invoice date while it is still the default
+        // gap; a due date the user chose stays put.
+        const days = paymentDaysFor(editingDoc.clientId);
+        if (editingDoc.type === 'invoice' && v && (!host.querySelector('[data-df="dueDate"]').value || (before && editingDoc.dueDate === addDays(before, days)))) {
+          editingDoc.dueDate = addDays(v, days);
           renderDocEditor();
         }
       } else if (f === 'status') {
@@ -11341,7 +11439,7 @@ async function doAutoSave() {
   const hasContent = d.clientId || (d.lines || []).some((l) =>
     (l.desc && l.desc.trim()) || Number(l.qty) || Number(l.price) || (l.type === 'percent' && Number(l.percent)));
   if (!hasContent) { setAutoSaveStatus(''); return; }
-  if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, 7);
+  if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, paymentDaysFor(d.clientId));
   if (d.type === 'quote' && !d.expiry) d.expiry = addDays(d.date, 30);
   const idx = state.documents.findIndex((x) => x.id === d.id);
   if (idx >= 0) {
@@ -11361,7 +11459,7 @@ async function saveDocFromEditor(redirect) {
   if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
   const d = editingDoc;
   if (!d.clientId) { toast('Please select a client'); return; }
-  if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, 7);
+  if (d.type === 'invoice' && !d.dueDate) d.dueDate = addDays(d.date, paymentDaysFor(d.clientId));
   if (d.type === 'quote' && !d.expiry) d.expiry = addDays(d.date, 30);
 
   const idx = state.documents.findIndex((x) => x.id === d.id);
@@ -11420,7 +11518,7 @@ function openDocPreview(docId) {
     logoHtml = `<img src="${state.settings.logo}" alt="logo" />`;
   }
 
-  const termsResolved = (d.terms || '').replace('[expiry date]', d.expiry ? fmtDate(d.expiry) : '');
+  const termsResolved = resolveTerms(d);
 
   const html = `
     <div class="modal-overlay" id="modal-overlay">
@@ -11625,7 +11723,7 @@ async function cloneDocument(docId, opts = {}) {
   if (d.type === 'invoice') state.settings.nextInv = clone.number + 1;
   else state.settings.nextQt = clone.number + 1;
   clone.date = todayISO();
-  if (clone.type === 'invoice') clone.dueDate = addDays(clone.date, 7);
+  if (clone.type === 'invoice') clone.dueDate = addDays(clone.date, paymentDaysFor(clone.clientId));
   if (clone.type === 'quote') clone.expiry = addDays(clone.date, 30);
   clone.status = 'draft';
   clone.paidDate = null;
@@ -11782,7 +11880,7 @@ async function createBalanceInvoice(docId) {
   clone.number = state.settings.nextInv;
   state.settings.nextInv += 1;
   clone.date = todayISO();
-  clone.dueDate = addDays(clone.date, 7);
+  clone.dueDate = addDays(clone.date, paymentDaysFor(clone.clientId));
   clone.status = 'draft';
   clone.paidDate = null;
   clone.sourceQuoteId = null;
@@ -11849,12 +11947,12 @@ async function convertQuoteToInvoice(quoteId) {
     type: 'invoice',
     number: state.settings.nextInv,
     date: today,
-    dueDate: addDays(today, 7),
+    dueDate: addDays(today, paymentDaysFor(q.clientId)),
     expiry: null,
     status: 'draft',
     paidDate: null,
     sourceQuoteId: q.id,
-    terms: STANDARD_TERMS_INVOICE,
+    terms: termsFor('invoice', q.clientId),
   };
   state.settings.nextInv += 1;
   q.status = 'converted';
@@ -12116,7 +12214,7 @@ async function buildPdfDoc(d) {
   y += 18;
 
   // Terms
-  const termsResolved = (d.terms || '').replace('[expiry date]', d.expiry ? fmtDate(d.expiry) : '');
+  const termsResolved = resolveTerms(d);
   if (termsResolved) {
     y = drawBlock(doc, M, PAGE_W, y, 'TERMS', termsResolved);
   }
@@ -12376,6 +12474,25 @@ function renderSettingsBusiness() {
         </div>
       </div>
       <div class="text-sm text-mid" style="margin-top:10px;">Base currency is what this business's dashboard and finance reports convert everything into — its new invoices default to it too. VAT applies to invoices in the base currency at the rate above (foreign-currency sales are treated as zero-rated); set 0% if this business isn't VAT/tax registered. Each business can use different values.</div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Terms</h3>
+      <div class="form-grid">
+        <div class="field">
+          <label>Payment due <span class="text-muted">(days after the invoice date)</span></label>
+          <input data-cs="paymentDays" type="number" min="0" max="365" step="1" value="${paymentDaysFor(null)}" />
+        </div>
+        <div class="field full">
+          <label>Invoice terms</label>
+          <textarea data-cs="termsInvoice" rows="3">${escapeHtml(state.settings.termsInvoice || '')}</textarea>
+        </div>
+        <div class="field full">
+          <label>Quote terms</label>
+          <textarea data-cs="termsQuote" rows="3">${escapeHtml(state.settings.termsQuote || '')}</textarea>
+        </div>
+      </div>
+      <div class="text-sm text-mid" style="margin-top:10px;">Used on new invoices and quotes. A client can have its own (Clients → edit a client). Write <strong>[payment days]</strong>, <strong>[due date]</strong> or <strong>[expiry date]</strong> and each document fills in its own. Documents you've already created keep the terms they have.</div>
     </div>
 
     <div class="settings-section">
@@ -12657,8 +12774,9 @@ function bindSettingsEvents() {
       if (f === 'vatPercent') v = Math.max(0, Number(v) || 0);
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
       if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
+      if (f === 'paymentDays') v = Math.min(365, Math.max(0, Math.round(Number(v) || 0)));
       if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
-      if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate'].includes(f)) state.settings[f] = v;
+      if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate','paymentDays','termsInvoice','termsQuote'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
         state.settings.company[f] = v;
@@ -13007,13 +13125,13 @@ function openHistoricalModal() {
       currency,
       bankId: state.settings.banking.find((b) => b.currency === currency)?.id || 'sa',
       date,
-      dueDate: addDays(date, 7),
+      dueDate: addDays(date, paymentDaysFor(document.getElementById('h-client').value)),
       expiry: null,
       projectTitle: document.getElementById('h-project').value || '',
       poNumber: '',
       lines: [{ id: uid('l-'), desc, qty: 1, price, vat: isZAR }],
       depositPct: 0,
-      terms: STANDARD_TERMS_INVOICE,
+      terms: termsFor('invoice', document.getElementById('h-client').value),
       notes: '',
       includeNotes: false,
       status,
@@ -15913,6 +16031,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
     try { earlier = await vaultCopiesOnDevice(); } catch (e3) { noteQuietError('earlier copies', e3); }
     if (earlier.length && !confirm('This device has an earlier vault. Creating a new one won\'t delete it, but you may want to recover it first with "Recover an earlier vault on this device".\n\nCreate a new, empty vault anyway?')) return;
     state = JSON.parse(JSON.stringify(SEED_DATA));
+    (state.entities || []).forEach(ensureEntityShape);   // every list and setting, from the first save
     installEntityAccessors();
     currentPassword = pwd;
     markWhatsNewSeen();   // a brand-new vault has nothing to catch up on
@@ -16077,6 +16196,8 @@ async function addEntityFlow() {
     savedLineItems: [],
     clients: [], documents: [], expenses: [], statements: [],
     fxRates: {}, fxFetchedAt: null,
+    // A new business starts from the current one's terms, like its currency.
+    paymentDays: paymentDaysFor(null), termsInvoice: state.settings.termsInvoice, termsQuote: state.settings.termsQuote,
   }));
   state.activeEntityId = id;
   await saveState();
