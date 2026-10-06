@@ -5,7 +5,7 @@
 <!-- Content-Security-Policy: the app is one inline bundle (needs 'unsafe-inline'),
      so the key protection here is connect-src — even if a script were injected, it
      can only reach these endpoints, not exfiltrate your decrypted vault elsewhere. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://formspree.io https://simpl-licence.lee-4e1.workers.dev; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://api.frankfurter.dev https://formspree.io https://simpl-licence.lee-4e1.workers.dev; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
 <meta name="referrer" content="no-referrer" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Invoicing</title>
@@ -1151,6 +1151,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .badge-issued { color: #C4B5FD; border-color: #C4B5FD; }
 
   /* Forms */
+  /* `hidden` always wins — .field and .form-grid set display, which would otherwise override it. */
+  [hidden] { display: none !important; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .form-grid .full { grid-column: 1 / -1; }
   .field { display: flex; flex-direction: column; }
@@ -2975,8 +2977,18 @@ function cloudCounts(s) {
    `important: true` floats an item to the top with a "Worth knowing" tag; keep
    it for changes that alter numbers people rely on. `link.to` must be one of
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
-   backup, security, feedback. (Checked by .claude/test-changelog.js.) */
+   backup, security, feedback, export. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.41.0.0', date: '2026-10-06', items: [
+      { title: 'Foreign currency at the rate on the day', important: true,
+        text: 'Invoices, credit notes and expenses in another currency now convert at the exchange rate for their own date, not today’s, so past figures no longer move when rates change. When you mark a foreign invoice paid, you can enter what actually reached your bank.',
+        link: { label: 'Open Finances', to: 'finances' } },
+      { title: 'An export your accountant can work from',
+        text: 'Choose last tax year, this year or any dates, as Excel, PDF or CSV. It ties out: income adds up to revenue, expenses by category, VAT by period, what clients owed at year end, and the exchange rates used.',
+        link: { label: 'Export for your accountant', to: 'export' } },
+    ],
+  },
   {
     version: '1.40.0.0', date: '2026-10-05', items: [
       { title: 'What’s new, right here',
@@ -3185,7 +3197,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.40.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.41.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3800,6 +3812,11 @@ async function saveState() {
   applyAutoOverdue(state);
   // Change tracking runs after auto-overdue (so status flips are stamped) and
   // is fenced: a tracker bug must never be able to block a save.
+  // Exchange rates are stamped first, so the tracker sees them as part of the edit.
+  try {
+    const fx = stampFxRates(state);
+    if (fx.wanted.some((w) => w.date <= todayISO() && !fxTried.has(w.base + '|' + w.ccy + '|' + w.date))) setTimeout(refreshFxHistory, 0);
+  } catch (e) { noteQuietError('exchange rates', e); }
   try { trackChanges(state); } catch (e) { noteQuietError('change tracking', e); }
   await ensureDek();
   // Taken before encrypting: the blob holds this state or a later one, never an
@@ -3950,7 +3967,9 @@ function round2(n) {
 function csvCell(v) {
   if (v == null) return '';
   let s = String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  // A plain negative number is a number, not a formula — "'-200.00" would
+  // reach the spreadsheet as text and drop out of every sum.
+  if (/^[=+\-@\t\r]/.test(s) && !/^-\d+(\.\d+)?$/.test(s)) s = "'" + s;
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 function fmtMoney(n, currency) {
@@ -4297,11 +4316,248 @@ async function fetchFxRates(force = false) {
   }
 }
 
+// Today's rate. Right for what hasn't happened yet (quotes, still to invoice);
+// anything already invoiced, paid or spent converts with toBaseAt below.
 function toBase(amount, currency) {
   if (currency === baseCcy()) return amount;
   const r = (state.settings.fxRates || {})[currency];
   if (!r) return null;
   return amount * r;
+}
+
+/* ============================================================
+   EXCHANGE RATES ON RECORDS (v1.41)
+
+   A foreign-currency invoice, credit note or expense is worth what it was
+   worth on its own date, not on the day someone opens a report. Before v1.41
+   every conversion used today's rate, so last year's figures moved whenever
+   rates were refreshed — and SARS wants the rate on the transaction date.
+
+   Each such record carries the rate it was converted at:
+     fx     — on the record's date (invoice, credit note or expense date)
+     paidFx — on an invoice's paid date: what the money was worth when it came in
+   both { rate, date, base, source }, rate = base-currency units per 1 unit of
+   the record's currency. `date` and `base` say what the rate is for, so a
+   changed date or base currency re-stamps it. source:
+     'ecb'      ECB reference rate for the date (or the last published before it)
+     'live'     the day's market rate, fetched on that day
+     'actual'   from what actually arrived — typed in, or a matched bank receipt
+     'manual'   typed in by the user
+     'estimate' the best rate on hand when the exact one wasn't (offline, or a
+                currency the ECB doesn't publish). Locked like the others —
+                never re-read from today's rates — but replaced once found.
+   stampFxRates runs inside saveState, like trackChanges, so no mutation site
+   needs to know about it. Historical rates come from the ECB via frankfurter
+   (free, no key) and are cached on the device outside the vault: they're public.
+   ============================================================ */
+const FX_HISTORY_STORE = 'seed-fx-history-v1';
+const FX_API = 'https://api.frankfurter.dev/v1/';
+// Currencies the ECB publishes reference rates for.
+const FX_ECB_CURRENCIES = ['AUD', 'BRL', 'CAD', 'CHF', 'CNY', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'IDR', 'ILS', 'INR', 'ISK', 'JPY', 'KRW', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'RON', 'SEK', 'SGD', 'THB', 'TRY', 'USD', 'ZAR'];
+const FX_SOURCE_LABELS = { ecb: 'ECB rate', live: 'market rate on the day', actual: 'amount received', manual: 'entered by you', estimate: 'estimated' };
+let fxHistoryCache = null;
+const fxTried = new Set();   // base|ccy|date already asked for this session
+let fxRefreshing = null;
+
+function round6(n) { return Math.round(n * 1e6) / 1e6; }
+function isoOfMs(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// { base: { ccy: { 'YYYY-MM-DD': rate } } } — one entry per calendar day.
+function fxHistory() {
+  if (!fxHistoryCache) {
+    try { fxHistoryCache = JSON.parse(localStorage.getItem(FX_HISTORY_STORE) || '{}') || {}; } catch (e) { fxHistoryCache = {}; }
+  }
+  return fxHistoryCache;
+}
+
+// The rate to stamp on a record for one date, or null if no rate is known.
+function fxStamp(base, ccy, date, ent) {
+  const hist = ((fxHistory()[base] || {})[ccy] || {})[date];
+  if (hist > 0) return { rate: hist, date, base, source: 'ecb' };
+  const cur = (ent.fxRates || {})[ccy];
+  if (!(cur > 0)) return null;
+  const live = !!ent.fxFetchedAt && isoOfMs(ent.fxFetchedAt) === date;
+  return { rate: round6(cur), date, base, source: live ? 'live' : 'estimate' };
+}
+
+// Stamps rec[key] for `date` unless it already holds a settled rate for that
+// date and base. Records a wish for the exact rate when it only has an estimate.
+function fxRestamp(rec, key, date, base, ent, wanted) {
+  const cur = rec[key];
+  const valid = !!cur && cur.rate > 0 && cur.date === date && cur.base === base;
+  if (valid && cur.source !== 'estimate') return false;
+  const next = fxStamp(base, rec.currency, date, ent);
+  if (!next || next.source === 'estimate') wanted.push({ base, ccy: rec.currency, date });
+  if (valid && (!next || next.source === 'estimate')) return false;   // keep the estimate already locked in
+  if (!next) {
+    if (!cur) return false;
+    delete rec[key];
+    return true;
+  }
+  rec[key] = next;
+  return true;
+}
+
+// Runs inside saveState: every foreign-currency invoice, credit note and
+// expense gets the rate for its own date, and a paid invoice the rate for its
+// paid date. Returns how many changed and which rates are still wanted.
+function stampFxRates(s) {
+  const wanted = [];
+  let changed = 0;
+  for (const ent of (s.entities || [])) {
+    const base = ent.baseCurrency || 'ZAR';
+    const docs = (ent.documents || []).filter((d) => d.type === 'invoice' || d.type === 'credit');
+    for (const r of docs.concat(ent.expenses || [])) {
+      if (!r.currency || r.currency === base || !r.date) {
+        if (r.fx || r.paidFx) { delete r.fx; delete r.paidFx; changed++; }
+        continue;
+      }
+      if (fxRestamp(r, 'fx', r.date, base, ent, wanted)) changed++;
+      if (r.type === 'invoice' && r.status === 'paid' && r.paidDate) {
+        if (fxRestamp(r, 'paidFx', r.paidDate, base, ent, wanted)) changed++;
+      } else if (r.paidFx) { delete r.paidFx; changed++; }
+    }
+  }
+  return { changed, wanted };
+}
+
+// The rate a record converts at: { rate, source } — base-currency units per
+// 1 unit of its currency. which = 'paid' asks for an invoice's paid-date rate.
+// Falls back to the record's own date, then to today's rate for a record not
+// yet stamped (source 'today'); null if no rate is known at all.
+function recordFx(rec, which) {
+  const base = baseCcy();
+  if (!rec || !rec.currency || rec.currency === base) return { rate: 1, source: 'base' };
+  const ok = (f, date) => (f && f.rate > 0 && f.base === base && f.date === date ? f : null);
+  const f = (which === 'paid' && rec.paidDate ? ok(rec.paidFx, rec.paidDate) : null) || ok(rec.fx, rec.date);
+  if (f) return { rate: f.rate, source: f.source };
+  const cur = (state.settings.fxRates || {})[rec.currency];
+  return cur > 0 ? { rate: cur, source: 'today' } : null;
+}
+function recordRate(rec, which) {
+  const f = recordFx(rec, which);
+  return f ? f.rate : null;
+}
+function toBaseAt(rec, amount, which) {
+  const r = recordRate(rec, which);
+  return r == null ? null : amount * r;
+}
+// The rate implied by what actually arrived: `received` in base currency for
+// `settled` in the invoice's currency. Bank charges come off what arrived, so
+// this is the rand value the books should show for the payment.
+function setActualPaidRate(d, received, settled) {
+  if (!(received > 0 && settled > 0) || !d.paidDate) return;
+  d.paidFx = { rate: round6(received / settled), date: d.paidDate, base: baseCcy(), source: 'actual' };
+}
+// An exchange-rate box for a foreign-currency document or expense. Shows the
+// rate it converts at and where that came from; typing one in overrides it.
+function fxEditorField(rec, which) {
+  const f = recordFx(rec, which);
+  const note = !f ? 'No rate yet — type one in'
+    : f.source === 'today' ? 'Today’s rate for now — the rate for the date is filled in when you save'
+    : 'Source: ' + (FX_SOURCE_LABELS[f.source] || f.source);
+  return `<div class="field">
+    <label>${which === 'paid' ? 'Rate when paid' : 'Exchange rate'} <span class="text-muted">(${baseCcy()} per 1 ${rec.currency})</span></label>
+    <input data-fx="${which}" type="number" inputmode="decimal" step="0.0001" min="0" value="${f ? f.rate.toFixed(4) : ''}" />
+    <div class="text-sm text-muted" style="margin-top:4px;">${escapeHtml(note)}</div>
+  </div>`;
+}
+function setManualRate(rec, which, value) {
+  const key = which === 'paid' ? 'paidFx' : 'fx';
+  const date = which === 'paid' ? rec.paidDate : rec.date;
+  const v = Number(value);
+  if (v > 0 && date) rec[key] = { rate: round6(v), date, base: baseCcy(), source: 'manual' };
+  else delete rec[key];   // cleared: the rate for the date is looked up again
+}
+// What a record's rate is, in words: "1 USD = R18.2345 · ECB rate".
+function fxRateLabel(rec, which) {
+  const f = recordFx(rec, which);
+  if (!f) return 'No exchange rate yet';
+  const src = f.source === 'today' ? 'today’s rate' : FX_SOURCE_LABELS[f.source] || '';
+  return `1 ${rec.currency} = ${SYM[baseCcy()] || baseCcy() + ' '}${f.rate.toFixed(4)}${src ? ' · ' + src : ''}`;
+}
+
+// Fetches ECB reference rates for [from, to] and files one rate per calendar
+// day — a weekend or holiday gets the last rate published before it — so a
+// lookup is always for an exact date. Quoted against EUR, the ECB's own base,
+// and crossed here, which keeps the precision the ECB publishes.
+async function fetchFxHistory(base, ccys, from, to) {
+  const want = ccys.filter((c) => c !== base && FX_ECB_CURRENCIES.includes(c));
+  if (!FX_ECB_CURRENCIES.includes(base) || !want.length) return false;
+  const symbols = [...new Set([base].concat(want))].filter((c) => c !== 'EUR');
+  // A hung request must not hold up anything waiting on it (the export does).
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 8000) : null;
+  let res;
+  try {
+    res = await fetch(`${FX_API}${addDays(from, -7)}..${to}?base=EUR&symbols=${symbols.join(',')}`, ctl ? { signal: ctl.signal } : undefined);
+  } finally { clearTimeout(timer); }
+  if (!res.ok) throw new Error('exchange rates HTTP ' + res.status);
+  const data = await res.json();
+  const rates = (data && data.rates) || {};
+  const days = Object.keys(rates).filter((k) => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
+  if (!days.length) return false;
+  const into = fxHistory()[base] = fxHistory()[base] || {};
+  let i = 0, last = null;
+  for (let d = days[0]; d <= to; d = addDays(d, 1)) {
+    while (i < days.length && days[i] <= d) { last = rates[days[i]]; i++; }
+    const eur = (c) => (c === 'EUR' ? 1 : Number(last && last[c]));
+    for (const c of want) {
+      const b = eur(base), x = eur(c);
+      if (b > 0 && x > 0 && isFinite(b / x)) (into[c] = into[c] || {})[d] = round6(b / x);
+    }
+  }
+  try { localStorage.setItem(FX_HISTORY_STORE, JSON.stringify(fxHistory())); } catch (e) {}
+  return true;
+}
+
+// Finds the exact rates still missing (backfilling records from before v1.41
+// too), re-stamps and saves. Each date is asked for at most once a session.
+async function refreshFxHistory() {
+  if (!state || !currentPassword) return false;
+  if (fxRefreshing) return fxRefreshing;
+  // Cleared only by the run that set it: a run with nothing to fetch finishes
+  // before the assignment below, and a `finally` inside it would clear the
+  // marker too early — leaving every later refresh waiting on a done promise.
+  const run = (async () => {
+    try {
+      const first = stampFxRates(state);
+      const today = todayISO();
+      const byBase = {};
+      for (const w of first.wanted) {
+        const k = w.base + '|' + w.ccy + '|' + w.date;
+        if (w.date > today || fxTried.has(k)) continue;
+        fxTried.add(k);
+        (byBase[w.base] = byBase[w.base] || []).push(w);
+      }
+      let fetched = false;
+      for (const base of Object.keys(byBase)) {
+        const ws = byBase[base];
+        const dates = ws.map((w) => w.date).sort();
+        try {
+          if (await fetchFxHistory(base, [...new Set(ws.map((w) => w.ccy))], dates[0], dates[dates.length - 1])) fetched = true;
+        } catch (e) {
+          if (navigator.onLine !== false) noteQuietError('exchange rates', e);
+        }
+      }
+      const second = fetched ? stampFxRates(state) : { changed: 0 };
+      if (first.changed || second.changed) {
+        await saveState();
+        // Fresh figures on screen — unless someone is typing, when a redraw would lose their place.
+        const el = document.activeElement;
+        if (second.changed && !(el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) render();
+      }
+      return true;
+    } catch (e) {
+      noteQuietError('exchange rates', e);
+      return false;
+    }
+  })();
+  fxRefreshing = run;
+  run.then(() => { if (fxRefreshing === run) fxRefreshing = null; });
+  return run;
 }
 
 /* ============================================================
@@ -4476,7 +4732,8 @@ function revenueItems(basis, pStart, pEnd) {
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
     const sign = d.type === 'credit' ? -1 : 1;
-    const base = toBase(t.dueSubtotal, d.currency);
+    // Cash basis counts the money when it arrived, so at the paid-date rate.
+    const base = toBaseAt(d, t.dueSubtotal, basis === 'cash' ? 'paid' : 'issue');
     if (base == null) { uncounted.push({ doc: d, date: rd, gross: sign * t.due }); continue; }
     const amount = round2(sign * base);
     items.push({ doc: d, date: rd, amount, gross: sign * t.due });
@@ -4489,17 +4746,28 @@ function revenueItems(basis, pStart, pEnd) {
 // THE source for money owed: invoices still owing something after credit notes.
 // VAT-inclusive, because that is what the client owes. Dashboard, Finances,
 // ageing, the pipeline and the accountant export all read these items.
+// Given a date (the accountant export's period end), what was owed THEN:
+// issued by that date, not paid by it, less the credit notes issued by it.
+// Without one, what is owed now, by status.
 function outstandingItems(asAt) {
-  asAt = asAt || todayISO();
+  const at = asAt || todayISO();
   const items = [], uncounted = [];
   let total = 0;
   for (const d of state.documents) {
-    if (d.type !== 'invoice' || (d.status !== 'sent' && d.status !== 'overdue')) continue;
-    const owed = invoiceDueNet(d);
+    if (d.type !== 'invoice' || d.status === 'draft') continue;
+    let owed;
+    if (asAt) {
+      if ((d.date || '') > asAt) continue;
+      if (d.status === 'paid' && (d.paidDate || d.date) <= asAt) continue;
+      owed = Math.max(0, calcTotals(d).due - creditAllocatedTo(d.id, asAt));
+    } else {
+      if (d.status !== 'sent' && d.status !== 'overdue') continue;
+      owed = invoiceDueNet(d);
+    }
     if (owed <= 0) continue;                                  // fully credited — nothing owed
     const due = d.dueDate || d.date;
-    const daysLate = daysBetween(due, asAt);
-    const base = toBase(owed, d.currency);
+    const daysLate = daysBetween(due, at);
+    const base = toBaseAt(d, owed);   // at the invoice-date rate, as it was recognised
     if (base == null) { uncounted.push({ doc: d, date: due, owed, daysLate }); continue; }
     const amount = round2(base);
     items.push({ doc: d, date: due, owed, daysLate, amount });
@@ -4542,6 +4810,29 @@ function invoiceDueNet(d) {
 
 const DRAWINGS_CATEGORY = 'Drawings / Salary';
 
+// Exchange differences on foreign-currency invoices paid in the period: the
+// invoice counted at its invoice-date rate, the money arrived at the paid-date
+// rate, and the difference is a gain or loss. Accrual basis only — on cash
+// basis revenue is already counted at the paid-date rate, so there is none.
+// THE source for the figure; the P&L and the accountant export both read it.
+function fxGainItems(pStart, pEnd) {
+  const items = [];
+  let total = 0;
+  for (const d of state.documents) {
+    if (d.type !== 'invoice' || d.status !== 'paid' || !d.paidDate) continue;
+    if (d.paidDate < pStart || d.paidDate > pEnd || d.currency === baseCcy()) continue;
+    const issue = recordRate(d, 'issue'), paid = recordRate(d, 'paid');
+    if (issue == null || paid == null || issue === paid) continue;
+    const settled = Math.max(0, calcTotals(d).due - creditAllocatedTo(d.id, d.paidDate));
+    const amount = round2(settled * (paid - issue));
+    if (!amount) continue;
+    items.push({ doc: d, date: d.paidDate, settled, issueRate: issue, paidRate: paid, amount });
+    total += amount;
+  }
+  items.sort((a, b) => a.date.localeCompare(b.date));
+  return { total: round2(total), items };
+}
+
 // Profit & Loss for a date range, all ex-VAT and in base currency.
 // Revenue = invoice subtotals (ex output VAT). Expenses = amount minus reclaimable
 // input VAT. Owner drawings are split out (distribution of profit, not a cost).
@@ -4553,16 +4844,17 @@ function profitForPeriod(pStart, pEnd, basis) {
   let missingFx = rev.missingFx > 0;
   for (const e of state.expenses) {
     if (!e.date || e.date < pStart || e.date > pEnd) continue;
-    const gross = toBase(e.amount, e.currency);
+    const gross = toBaseAt(e, e.amount);
     if (gross == null) { missingFx = true; continue; }
     const net = gross - inputVatOf(e);                          // ex input VAT
     if (e.category === DRAWINGS_CATEGORY) { drawings += net; continue; }
     if (e.directCost) directCost += net; else overhead += net;
   }
+  const fxGain = basis === 'accrual' ? fxGainItems(pStart, pEnd).total : 0;
   const grossProfit = revenue - directCost;
-  const netProfit = grossProfit - overhead;
+  const netProfit = grossProfit - overhead + fxGain;
   return {
-    revenue, directCost, overhead, grossProfit, netProfit, drawings, missingFx,
+    revenue, directCost, overhead, grossProfit, netProfit, drawings, missingFx, fxGain,
     expenses: directCost + overhead,
     grossMargin: revenue > 0 ? grossProfit / revenue : 0,
     netMargin: revenue > 0 ? netProfit / revenue : 0,
@@ -4583,7 +4875,7 @@ function expensesByMonth(periodStart, periodEnd) {
   let missingFx = false;
   for (const e of state.expenses) {
     if (e.date < periodStart || e.date > periodEnd) continue;
-    const z = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
+    const z = toBaseAt(e, e.amount);
     if (z == null) { missingFx = true; continue; }
     const ym = ymOf(e.date);
     out[ym] = (out[ym] || 0) + z;
@@ -4688,10 +4980,11 @@ const VAT_CYCLE_LABELS = { 'monthly': 'Monthly', 'bi-monthly': 'Bi-monthly', 'qu
 function vatCycle() { return (state && state.settings && state.settings.vatCycle) || 'bi-monthly'; }
 function vatCycleLabel() { return VAT_CYCLE_LABELS[vatCycle()] || 'Bi-monthly'; }
 
-function vatPeriods(n, cycle) {
+// The latest n periods, newest first, up to today (or up to `asOf`).
+function vatPeriods(n, cycle, asOf) {
   cycle = cycle || vatCycle();
   const L = VAT_CYCLE_MONTHS[cycle] || 2;
-  const today = new Date();
+  const today = asOf ? new Date(asOf + 'T00:00:00') : new Date();
   const periods = [];
   let y = today.getFullYear();
   let startM = Math.floor(today.getMonth() / L) * L; // 0-based start month of current period
@@ -4708,6 +5001,10 @@ function vatPeriods(n, cycle) {
     if (startM < 0) { startM += 12; y -= 1; }
   }
   return periods;
+}
+// Every whole VAT period that overlaps [from, to], oldest first.
+function vatPeriodsBetween(from, to) {
+  return vatPeriods(60, null, to).filter((p) => p.end >= from).reverse();
 }
 function monthShort(m) {
   return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m];
@@ -4738,13 +5035,14 @@ function vatForPeriod(pStart, pEnd, basis) {
     if (!rd || rd < pStart || rd > pEnd) continue;
     const t = calcTotals(d);
     const sign = d.type === 'credit' ? -1 : 1;   // credit notes reduce supplies and VAT
-    const excl = toBase(t.dueSubtotal, d.currency);
-    const incl = toBase(t.due, d.currency);
-    if (excl == null || incl == null) { missingFx++; continue; }
+    const which = basis === 'cash' ? 'paid' : 'issue';
+    const rate = recordRate(d, which);
+    if (rate == null) { missingFx++; continue; }
+    const excl = t.dueSubtotal * rate, incl = t.due * rate;
     if (docHasVat(d)) {
       standardExcl += sign * excl;
       standardIncl += sign * incl;
-      output += sign * t.dueVat;
+      output += sign * t.dueVat * rate;   // a foreign invoice charging VAT: VAT in base currency too
     } else {
       noVatSupplies += sign * excl;             // no VAT, so excl === incl
     }
@@ -4755,7 +5053,7 @@ function vatForPeriod(pStart, pEnd, basis) {
     const iv = inputVatOf(e);   // stored at entry (or computed for legacy records)
     if (iv <= 0) continue;
     input += iv;
-    const amt = toBase(e.amount, e.currency);
+    const amt = toBaseAt(e, e.amount);
     if (amt == null) { missingFx++; continue; }
     vatablePurchases += amt;
   }
@@ -5569,6 +5867,7 @@ function whatsNewGo(to) {
   if (to === 'finances' || to === 'reconcile' || to === 'vat') return goToFinanceTab(to === 'finances' ? 'overview' : to);
   if (to === 'clients') { currentClientId = null; return setRoute('clients'); }
   if (to === 'feedback') { render(); return openFeedbackModal(); }
+  if (to === 'export') { goToFinanceTab('overview'); return openAccountantExportModal(); }
   if (to === 'backup' || to === 'security') {
     settingsPage = to === 'backup' ? 'account' : 'help';
     setRoute('settings');
@@ -5691,7 +5990,7 @@ function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
     const { bold, color, indent, border, note } = opts;
     return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;${border ? 'border-top:1px solid rgba(15,14,13,0.14);margin-top:4px;padding-top:11px;' : ''}">
       <span style="${indent ? `padding-left:16px;color:${INK_MUTED};` : `color:${INK};`}${bold ? 'font-weight:650;' : ''}">${label}${note ? ` <span class="text-sm" style="color:${INK_FAINT};">${note}</span>` : ''}</span>
-      <span class="amount" style="color:${color || INK};${bold ? 'font-weight:700;font-size:17px;' : ''}">${fmtMoney(val, ccy)}</span>
+      <span class="amount" style="color:${color || INK};white-space:nowrap;${bold ? 'font-weight:700;font-size:17px;' : ''}">${fmtMoney(val, ccy)}</span>
     </div>`;
   };
   return `
@@ -5703,6 +6002,7 @@ function renderProfitAndLoss(pl, profitMonthValues, monthLabels, ty) {
           ${line('Direct project costs (COGS)', -pl.directCost, { indent: true })}
           ${line('Gross profit', pl.grossProfit, { bold: true, border: true, note: pl.revenue > 0 ? `· ${pct(pl.grossMargin)} margin` : '' })}
           ${line('Overheads', -pl.overhead, { indent: true })}
+          ${pl.fxGain ? line(pl.fxGain > 0 ? 'Exchange gains' : 'Exchange losses', pl.fxGain, { indent: true, note: '· paid at a different rate' }) : ''}
           ${line('Net profit', pl.netProfit, { bold: true, border: true, color: netColor, note: pl.revenue > 0 ? `· ${pct(pl.netMargin)} margin` : '' })}
           ${pl.drawings ? `<div style="margin-top:14px;padding-top:12px;border-top:1px dashed rgba(15,14,13,0.2);">
             ${line('Owner drawings / salary', pl.drawings, { note: '· distribution of profit, not a business cost' })}
@@ -5824,6 +6124,7 @@ function renderFinancesOverviewParts() {
         <div class="opt ${financesBasis === 'accrual' ? 'active' : ''}" data-basis="accrual">Accrual</div>
       </div>
       <button class="btn" id="refresh-fx-fin">Refresh FX</button>
+      <button class="btn" id="fin-export-report">Export for accountant</button>
     `,
     subtitle: `SA tax year ${ty.label} · ${financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis'}`,
     body: `
@@ -7076,6 +7377,11 @@ function openExpenseModal(expense) {
                 ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === expense.currency ? 'selected' : ''}>${c}</option>`).join('')}
               </select>
             </div>
+            <div class="field full" id="exp-base-field" ${expense.currency === baseCcy() ? 'hidden' : ''}>
+              <label>Amount in ${baseCcy()} <span class="text-muted">(optional — what left your account)</span></label>
+              <input id="exp-base" type="number" inputmode="decimal" step="0.01" min="0" value="${expense.fx && (expense.fx.source === 'actual' || expense.fx.source === 'manual') ? round2(expense.amount * expense.fx.rate) : ''}" />
+              <div class="text-sm text-muted" id="exp-base-note" style="margin-top:4px;"></div>
+            </div>
             <div class="field">
               <label>Project <span class="text-muted">(optional)</span></label>
               <select data-ef="projectId">
@@ -7129,6 +7435,19 @@ function openExpenseModal(expense) {
     const amt = Number(efGet('amount').value) || 0;
     const vatBox = efGet('vat');
     const applicable = ccy === baseCcy() && vatRate() > 0;
+    const baseField = document.getElementById('exp-base-field');
+    if (baseField) {
+      baseField.hidden = ccy === baseCcy();
+      // What blank would give: the rate already stamped for this date, or
+      // today's as a stand-in until the date's rate is looked up on save.
+      const stamped = expense.fx && expense.fx.source !== 'actual' && expense.fx.source !== 'manual' ? expense.fx : null;
+      const f = ccy === baseCcy() ? null : recordFx({ currency: ccy, date: efGet('date').value, fx: stamped }, 'issue');
+      document.getElementById('exp-base-note').textContent = !f
+        ? 'Leave blank to convert at the rate on the expense date.'
+        : f.source === 'today'
+          ? `Leave blank to convert at the rate on the expense date (about ${fmtMoney(amt * f.rate, baseCcy())} at today’s rate).`
+          : `Leave blank to use the ${FX_SOURCE_LABELS[f.source] || 'rate'} for that date: ${fmtMoney(amt * f.rate, baseCcy())}.`;
+    }
     vatBox.disabled = !applicable;
     if (!applicable) {
       if (vatBox.checked) vatBox.checked = false;
@@ -7144,7 +7463,7 @@ function openExpenseModal(expense) {
       calcEl.textContent = `Tick if this ${vatRate()}% VAT-inclusive amount has claimable input tax.`;
     }
   }
-  ['amount', 'currency', 'vat'].forEach((f) => {
+  ['amount', 'currency', 'vat', 'date'].forEach((f) => {
     const el = efGet(f);
     if (el) { el.addEventListener('input', updateVatCalc); el.addEventListener('change', updateVatCalc); }
   });
@@ -7169,6 +7488,12 @@ function openExpenseModal(expense) {
       projectId: get('projectId') ? (get('projectId').value || null) : (expense.projectId || null),
       notes: get('notes').value.trim(),
     };
+    // Keep the rate it was converted at (re-stamped if the date or currency
+    // changed); a typed home-currency amount is what it actually cost.
+    if (expense.fx) updated.fx = expense.fx;
+    const paidBase = currency === baseCcy() ? 0 : Number(document.getElementById('exp-base').value);
+    if (paidBase > 0 && amount > 0) updated.fx = { rate: round6(paidBase / amount), date: updated.date, base: baseCcy(), source: 'actual' };
+    else if (updated.fx && (updated.fx.source === 'actual' || updated.fx.source === 'manual')) delete updated.fx;
     if (!updated.desc) { toast('Description is required'); return; }
     if (!updated.amount) { toast('Amount must be > 0'); return; }
     const idx = state.expenses.findIndex((x) => x.id === expense.id);
@@ -8604,6 +8929,9 @@ async function applyReconcile() {
         doc.status = 'paid';
         doc.paidDate = m.tx.date;
         doc.paidTxId = m.tx.id;
+        // A foreign invoice paid into a home-currency account: the receipt
+        // says exactly what the payment was worth.
+        if (doc.currency !== baseCcy() && m.tx.currency === baseCcy()) setActualPaidRate(doc, Math.abs(m.tx.amount), invoiceDueNet(doc));
         invoicesPaid++;
       }
     } else if (m.action === 'expense' || m.action === 'fx-fee') {
@@ -8653,101 +8981,487 @@ async function applyReconcile() {
   toast(`Applied: ${invoicesPaid} paid · ${expensesCreated} expenses · ${transfersLogged} transfers`);
 }
 
-/* ----- Spreadsheet export (CSV with sections) ----- */
+/* ----- Accountant export -----
+   One report, three formats. accountantReport() assembles everything an
+   accountant needs for a period from the same functions the app's own figures
+   use (revenueItems, profitForPeriod, vatForPeriod, outstandingItems,
+   fxGainItems), so every total in the export is a number the app shows too —
+   and the income list adds up to the P&L revenue line, which the accountant
+   will check first. CSV, Excel and PDF are only renderings of that model.
+   Tests: node .claude/test-accountant-export.js */
 
-function exportAccountantReport() {
-  const ty = taxYearFor(todayISO());
-  const periodStart = ty.start;
-  const periodEnd = todayISO();
+const BUSINESS_TYPES = { sole: 'Sole proprietor', company: 'Company (Pty) Ltd', cc: 'Close corporation', partnership: 'Partnership', trust: 'Trust', npo: 'Non-profit organisation', other: 'Other' };
 
-  const lines = [];
-  const csvEsc = csvCell;
-  const row = (...cells) => lines.push(cells.map(csvEsc).join(','));
+// The periods offered. The year just closed comes first for the first half of
+// a tax year (when the return is being prepared); after that, this year so far.
+function exportPeriodOptions(today) {
+  const ty = taxYearFor(today);
+  const prev = taxYearFor(addDays(ty.start, -1));
+  const opts = [
+    { key: 'last', label: `Last tax year (${prev.label})`, from: prev.start, to: prev.end },
+    { key: 'this', label: `This tax year so far (${ty.label})`, from: ty.start, to: today },
+  ];
+  const monthsIn = (Number(today.slice(0, 4)) - Number(ty.start.slice(0, 4))) * 12 + Number(today.slice(5, 7)) - Number(ty.start.slice(5, 7));
+  return { options: opts, preferred: monthsIn < 6 ? 'last' : 'this' };
+}
 
+// Gaps in a document number run, explained: "INV-0805 (draft)". Accountants
+// check the sequence — a missing number needs a reason.
+function numberGaps(docs, all) {
+  const nums = docs.map((d) => Number(d.number)).filter((n) => n > 0).sort((a, b) => a - b);
+  const out = [];
+  if (nums.length < 2) return out;
+  const have = new Set(nums);
+  for (let n = nums[0] + 1; n < nums[nums.length - 1] && out.length < 50; n++) {
+    if (have.has(n)) continue;
+    const other = all.find((d) => d.type === docs[0].type && Number(d.number) === n);
+    const why = !other ? 'not in Simpl — deleted?' : other.status === 'draft' ? 'draft' : `dated ${other.date}`;
+    out.push(`${docNumber(Object.assign({}, docs[0], { number: n }))} (${why})`);
+  }
+  return out;
+}
+
+function accountantReport(from, to, basis) {
+  const ccy = baseCcy();
   const co = state.settings.company || {};
-  const orgName = co.name || 'Business';
-  row(`${orgName} — Accountant Report`);
-  row(`Period`, `${periodStart} to ${periodEnd} (SA tax year ${ty.label})`);
-  row(`Generated`, new Date().toISOString().slice(0, 19).replace('T', ' '));
-  row();
+  const ent = activeEntity() || {};
+  const docs = state.documents || [], exps = state.expenses || [];
+  const cash = basis === 'cash';
+  const which = (d) => (cash && d.type === 'invoice' ? 'paid' : 'issue');
+  const pl = profitForPeriod(from, to, basis);
+  const rev = revenueItems(basis, from, to);
+  const vat = vatForPeriod(from, to, basis);
+  const debtors = outstandingItems(to);
+  const fxg = fxGainItems(from, to);
+  const sections = [];
+  const C = (h, k) => ({ h, k });   // column: heading + kind (t text, d date, m money, r rate, n count, p percent)
+  const sum = (rows, i) => round2(rows.reduce((a, r) => a + (Number(r[i]) || 0), 0));
+  const typeName = (d) => (d.type === 'credit' ? 'Credit note' : 'Invoice');
+  const fxUsed = { ecb: 0, live: 0, actual: 0, manual: 0, estimate: 0, today: 0 };
+  const noteFx = (rec, w) => { const f = recordFx(rec, w); if (f && fxUsed[f.source] != null) fxUsed[f.source]++; };
 
-  // INCOME — paid invoices in period (cash basis)
-  row(`INCOME (cash basis)`);
-  row('Invoice #', 'Date', 'Paid date', 'Client', 'Project', 'Currency', 'Subtotal', 'VAT', 'Total', baseCcy() + ' equiv');
-  let incZAR = 0, incVAT = 0;
-  for (const d of state.documents.filter((x) => x.type === 'invoice' && x.status === 'paid' && x.paidDate >= periodStart && x.paidDate <= periodEnd).sort((a, b) => (a.paidDate || '').localeCompare(b.paidDate || ''))) {
-    const t = calcTotals(d);
-    const zar = toBase(t.due, d.currency);   // deposit-aware
-    if (zar != null) incZAR += zar;
-    incVAT += docHasVat(d) ? t.dueVat : 0;
-    row(docNumber(d), d.date, d.paidDate, clientName(d.clientId), d.projectTitle || '', d.currency, t.dueSubtotal.toFixed(2), t.dueVat.toFixed(2), t.due.toFixed(2), zar == null ? '' : zar.toFixed(2));
+  // Summary — the P&L, VAT and debtors in one place
+  const pct = (n) => (pl.revenue > 0 ? n : '');
+  const summary = [
+    ['Revenue (excluding VAT)', pl.revenue, ''],
+    ['Less: direct costs (cost of sales)', -round2(pl.directCost), ''],
+    ['Gross profit', round2(pl.grossProfit), pct(pl.grossMargin)],
+    ['Less: overheads', -round2(pl.overhead), ''],
+  ];
+  if (!cash) summary.push(['Exchange gains / (losses)', round2(pl.fxGain), '']);
+  summary.push(['Net profit', round2(pl.netProfit), pct(pl.netMargin)]);
+  summary.push(['', '', '']);
+  summary.push(['Owner drawings / salary (not counted as an expense above)', round2(pl.drawings), '']);
+  summary.push(['Output VAT', round2(vat.output), '']);
+  summary.push(['Input VAT', round2(vat.input), '']);
+  summary.push(['Net VAT for the period', round2(vat.net), '']);
+  summary.push([`Owed to you at ${to}`, debtors.total, '']);
+  sections.push({ key: 'summary', sheet: 'Summary', title: 'Profit & loss', columns: [C('', 't'), C(ccy, 'm'), C('Margin', 'p')], rows: summary });
+
+  // Income — exactly the documents behind the revenue figure
+  const incRows = [];
+  for (const it of rev.items) {
+    const d = it.doc, t = calcTotals(d), sign = d.type === 'credit' ? -1 : 1;
+    const rate = recordRate(d, which(d));
+    noteFx(d, which(d));
+    const vatDoc = docHasVat(d) ? sign * t.dueVat : 0;
+    const vatBase = round2(vatDoc * rate);
+    incRows.push([it.date, docNumber(d), typeName(d), clientName(d.clientId), d.projectTitle || '', d.date, d.type === 'invoice' ? (d.paidDate || '') : '',
+      d.currency, round2(sign * t.dueSubtotal), round2(vatDoc), round2(sign * t.dueSubtotal + vatDoc), d.currency === ccy ? '' : rate,
+      it.amount, vatBase, round2(it.amount + vatBase)]);
   }
-  row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', '', '', '', incZAR.toFixed(2));
-  row();
-
-  // EXPENSES
-  row(`EXPENSES`);
-  row('Date', 'Description', 'Category', 'Type', 'Currency', 'Amount', baseCcy() + ' equiv', 'VAT (input)', baseCcy() + ' ex-VAT', 'Notes');
-  let expZAR = 0, expInputVAT = 0;
-  for (const e of state.expenses.filter((x) => x.date >= periodStart && x.date <= periodEnd).sort((a, b) => a.date.localeCompare(b.date))) {
-    const zar = e.currency === baseCcy() ? e.amount : toBase(e.amount, e.currency);
-    if (zar != null) expZAR += zar;
-    const inputVAT = inputVatOf(e);
-    expInputVAT += inputVAT;
-    const exVat = zar == null ? null : zar - inputVAT;
-    const type = e.category === DRAWINGS_CATEGORY ? 'Drawings' : (e.directCost ? 'Direct cost' : 'Overhead');
-    row(e.date, e.desc, e.category || '', type, e.currency, e.amount.toFixed(2), zar == null ? '' : zar.toFixed(2), inputVAT.toFixed(2), exVat == null ? '' : exVat.toFixed(2), e.notes || '');
+  for (const u of rev.uncounted) {
+    const d = u.doc, t = calcTotals(d), sign = d.type === 'credit' ? -1 : 1;
+    incRows.push([u.date, docNumber(d), typeName(d) + ' — NOT COUNTED, no exchange rate', clientName(d.clientId), d.projectTitle || '', d.date, d.paidDate || '',
+      d.currency, round2(sign * t.dueSubtotal), round2(docHasVat(d) ? sign * t.dueVat : 0), round2(sign * t.due), '', '', '', '']);
   }
-  row('', '', '', '', '', 'TOTAL ' + baseCcy() + ' equiv', expZAR.toFixed(2));
-  row();
+  sections.push({ key: 'income', sheet: 'Income', title: `Income (${cash ? 'counted when paid' : 'counted when invoiced'})`,
+    intro: `Every invoice and credit note in the revenue figure. Amounts are what was billed on each document (a deposit invoice counts only its deposit). Credit notes are negative. The ${ccy} excl. VAT total equals Revenue in the profit & loss.`,
+    columns: [C('Counted on', 'd'), C('Number', 't'), C('Type', 't'), C('Client', 't'), C('Project', 't'), C('Invoice date', 'd'), C('Paid date', 'd'),
+      C('Currency', 't'), C('Excl. VAT', 'm'), C('VAT', 'm'), C('Total', 'm'), C('Rate', 'r'), C(`${ccy} excl. VAT`, 'm'), C(`${ccy} VAT`, 'm'), C(`${ccy} total`, 'm')],
+    rows: incRows,
+    total: ['Total', '', '', '', '', '', '', '', '', '', '', '', rev.total, sum(incRows, 13), sum(incRows, 14)] });
 
-  // VAT SUMMARY
-  row(`VAT SUMMARY (${baseCcy()} invoices @ ${vatRate()}%, output VAT)`);
-  row('Period', 'Output VAT', 'Input VAT', 'Net payable');
-  for (const p of vatPeriods(6).reverse()) {
-    const v = vatForPeriod(p.start, p.end, financesBasis);
-    row(p.label, v.output.toFixed(2), v.input.toFixed(2), v.net.toFixed(2));
+  // Every document issued in the period, in number order, with the gaps explained
+  const issued = docs.filter((d) => (d.type === 'invoice' || d.type === 'credit') && d.status !== 'draft' && d.date >= from && d.date <= to)
+    .sort((a, b) => (a.type === b.type ? Number(a.number) - Number(b.number) : a.type === 'invoice' ? -1 : 1));
+  const regRows = issued.map((d) => {
+    const sign = d.type === 'credit' ? -1 : 1, due = calcTotals(d).due, r = recordRate(d, 'issue');
+    return [docNumber(d), typeName(d), d.date, clientName(d.clientId), d.status === 'paid' ? 'Paid' : d.type === 'credit' ? 'Issued' : 'Unpaid',
+      d.type === 'invoice' ? (d.paidDate || '') : '', d.currency, round2(sign * due), d.currency === ccy ? '' : (r == null ? '' : r), r == null ? '' : round2(sign * due * r)];
+  });
+  const gaps = numberGaps(issued.filter((d) => d.type === 'invoice'), docs).concat(numberGaps(issued.filter((d) => d.type === 'credit'), docs));
+  sections.push({ key: 'issued', sheet: 'Documents issued', title: 'Invoices and credit notes issued',
+    intro: `Everything dated ${from} to ${to}, paid or not, at the rate on its own date.${gaps.length ? ' Numbers missing from the run: ' + gaps.join(', ') + '.' : ' The numbering has no gaps.'}`,
+    columns: [C('Number', 't'), C('Type', 't'), C('Date', 'd'), C('Client', 't'), C('Status', 't'), C('Paid date', 'd'), C('Currency', 't'), C('Amount incl. VAT', 'm'), C('Rate', 'r'), C(`${ccy} incl. VAT`, 'm')],
+    rows: regRows, total: ['Total', '', '', '', '', '', '', '', '', sum(regRows, 9)] });
+
+  // Expenses, one by one and by category
+  const expRows = [], byCat = {};
+  for (const e of exps.filter((x) => x.date >= from && x.date <= to).sort((a, b) => a.date.localeCompare(b.date))) {
+    const rate = recordRate(e, 'issue');
+    noteFx(e, 'issue');
+    const base = rate == null ? null : round2(e.amount * rate);
+    const iv = round2(inputVatOf(e));
+    const kind = e.category === DRAWINGS_CATEGORY ? 'Drawings' : (e.directCost ? 'Direct cost' : 'Overhead');
+    const pj = e.projectId ? projectById(e.projectId) : null;
+    expRows.push([e.date, e.desc || '', e.category || '', kind, pj ? pj.name : '', e.currency, round2(e.amount), e.currency === ccy ? '' : (rate == null ? '' : rate),
+      base == null ? '' : base, iv, base == null ? '' : round2(base - iv), e.notes || '']);
+    if (base == null) continue;
+    const k = kind + '|' + (e.category || 'Other');
+    const c = byCat[k] = byCat[k] || [e.category || 'Other', kind, 0, 0, 0, 0];
+    c[2]++; c[3] = round2(c[3] + base); c[4] = round2(c[4] + iv); c[5] = round2(c[5] + base - iv);
   }
-  row();
+  sections.push({ key: 'expenses', sheet: 'Expenses', title: 'Expenses',
+    intro: `Every expense dated ${from} to ${to}. Input VAT is what was recorded as claimable. Drawings are listed here but are not a business expense.`,
+    columns: [C('Date', 'd'), C('Description', 't'), C('Category', 't'), C('Type', 't'), C('Project', 't'), C('Currency', 't'), C('Amount', 'm'), C('Rate', 'r'),
+      C(`${ccy} amount`, 'm'), C('Input VAT', 'm'), C(`${ccy} excl. VAT`, 'm'), C('Notes', 't')],
+    rows: expRows, total: ['Total', '', '', '', '', '', '', '', sum(expRows, 8), sum(expRows, 9), sum(expRows, 10), ''] });
+  const order = { 'Direct cost': 0, Overhead: 1, Drawings: 2 };
+  const catRows = Object.values(byCat).sort((a, b) => order[a[1]] - order[b[1]] || b[5] - a[5]);
+  sections.push({ key: 'categories', sheet: 'By category', title: 'Expenses by category',
+    intro: `Direct costs and overheads excl. VAT add up to the profit & loss; drawings are shown apart.`,
+    columns: [C('Category', 't'), C('Type', 't'), C('Count', 'n'), C(`${ccy} amount`, 'm'), C('Input VAT', 'm'), C(`${ccy} excl. VAT`, 'm')],
+    rows: catRows, total: ['Total', '', catRows.reduce((a, r) => a + r[2], 0), sum(catRows, 3), sum(catRows, 4), sum(catRows, 5)] });
 
-  // OUTSTANDING
-  // The same items as the Outstanding tile: owed after credit notes, so an
-  // accountant never sees a figure the app itself does not show.
-  row(`OUTSTANDING (unpaid invoices, after credit notes)`);
-  row('Invoice #', 'Date', 'Due date', 'Client', 'Currency', 'Amount owed', baseCcy() + ' equiv', 'Days overdue');
-  const owedNow = outstandingItems();
-  for (const it of owedNow.items.concat(owedNow.uncounted).sort((a, b) => a.doc.date.localeCompare(b.doc.date))) {
-    const d = it.doc;
-    row(docNumber(d), d.date, d.dueDate || '', clientName(d.clientId), d.currency, it.owed.toFixed(2), it.amount == null ? '' : it.amount.toFixed(2), Math.max(it.daysLate, 0));
+  // VAT, period by period
+  if (vatRate() > 0) {
+    const vRows = vatPeriodsBetween(from, to).map((p) => {
+      const v = vatForPeriod(p.start, p.end, basis);
+      return [p.label, p.start, p.end, round2(v.standardExcl), round2(v.output), round2(v.noVatSupplies), round2(v.vatablePurchases), round2(v.input), round2(v.net)];
+    });
+    sections.push({ key: 'vat', sheet: 'VAT', title: `VAT returns (${vatCycleLabel().toLowerCase()}, ${vatRate()}%)`,
+      intro: `Each whole VAT period that overlaps ${from} to ${to}, on the same basis as the rest of this report. Compare with the returns filed.`,
+      columns: [C('Period', 't'), C('From', 'd'), C('To', 'd'), C('Standard-rated sales excl. VAT', 'm'), C('Output VAT', 'm'), C('Sales without VAT', 'm'), C('Purchases with VAT', 'm'), C('Input VAT', 'm'), C('Net VAT', 'm')],
+      rows: vRows, total: ['Total', '', '', sum(vRows, 3), sum(vRows, 4), sum(vRows, 5), sum(vRows, 6), sum(vRows, 7), sum(vRows, 8)] });
   }
-  row();
 
-  // P&L SUMMARY (ex-VAT, gross + net, drawings shown separately)
-  const pl = profitForPeriod(periodStart, periodEnd, 'cash');
-  const pctStr = (n) => `${Math.round(n * 100)}%`;
-  row(`PROFIT & LOSS (cash basis, ex-VAT, ${baseCcy()} equivalent)`);
-  row('Revenue (ex output VAT)', pl.revenue.toFixed(2));
-  row('Less: direct project costs (COGS)', (-pl.directCost).toFixed(2));
-  row('Gross profit', pl.grossProfit.toFixed(2), pl.revenue > 0 ? pctStr(pl.grossMargin) + ' margin' : '');
-  row('Less: overheads', (-pl.overhead).toFixed(2));
-  row('Net profit', pl.netProfit.toFixed(2), pl.revenue > 0 ? pctStr(pl.netMargin) + ' margin' : '');
-  row();
-  row('Owner drawings / salary (distribution of profit, not a cost)', pl.drawings.toFixed(2));
-  row();
-  row('Memo — VAT (not part of profit)');
-  row('Output VAT (period invoices)', incVAT.toFixed(2));
-  row('Input VAT (period expenses)', expInputVAT.toFixed(2));
+  // Debtors at the period end
+  const ages = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
+  const debtRows = debtors.items.concat(debtors.uncounted).sort((a, b) => a.doc.date.localeCompare(b.doc.date)).map((it) => {
+    const d = it.doc, b = ageBucket(d.date, to);
+    if (it.amount != null) ages[b] = round2(ages[b] + it.amount);
+    return [docNumber(d), d.date, d.dueDate || '', clientName(d.clientId), d.currency, round2(it.owed), d.currency === ccy ? '' : (recordRate(d, 'issue') || ''),
+      it.amount == null ? '' : it.amount, b.replace('-', '–') + ' days', Math.max(0, it.daysLate)];
+  });
+  sections.push({ key: 'debtors', sheet: 'Debtors', title: `Owed to you at ${to}`,
+    intro: `Invoices issued by ${to} and not paid by then, less credit notes issued by then. Ageing counts from the invoice date. Foreign amounts are at the invoice-date rate. Ageing: ${Object.entries(ages).map(([k, v]) => `${k} days ${fmtMoney(v, ccy)}`).join(' · ')}.`,
+    columns: [C('Invoice', 't'), C('Date', 'd'), C('Due', 'd'), C('Client', 't'), C('Currency', 't'), C('Owed', 'm'), C('Rate', 'r'), C(`${ccy} owed`, 'm'), C('Age', 't'), C('Days overdue', 'n')],
+    rows: debtRows, total: ['Total', '', '', '', '', '', '', debtors.total, '', ''] });
 
-  const csv = lines.join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  if (!cash && fxg.items.length) {
+    fxg.items.forEach((it) => noteFx(it.doc, 'paid'));
+    const fxRows = fxg.items.map((it) => [docNumber(it.doc), it.doc.date, it.date, clientName(it.doc.clientId), it.doc.currency, round2(it.settled), it.issueRate, it.paidRate, it.amount]);
+    sections.push({ key: 'fx', sheet: 'Exchange differences', title: 'Exchange gains and losses',
+      intro: 'Foreign-currency invoices paid in the period at a different rate from their invoice date. The total is the exchange line in the profit & loss.',
+      columns: [C('Invoice', 't'), C('Invoice date', 'd'), C('Paid date', 'd'), C('Client', 't'), C('Currency', 't'), C('Amount settled', 'm'), C('Rate at invoice', 'r'), C('Rate when paid', 'r'), C(`${ccy} gain / (loss)`, 'm')],
+      rows: fxRows, total: ['Total', '', '', '', '', '', '', '', fxg.total] });
+  }
+
+  // Notes the accountant should read before the numbers
+  const type = co.businessType || '';
+  const notes = [
+    cash ? 'Basis: cash (payments). Income counts on the date it was paid; credit notes on their own date; expenses on their date.'
+      : 'Basis: accrual (invoice). Income counts on the invoice date; credit notes on their own date; expenses on their date.',
+    `All totals are in ${ccy}. Revenue excludes VAT, which is collected for SARS and shown separately.`,
+  ];
+  const foreign = Object.values(fxUsed).reduce((a, b) => a + b, 0);
+  if (foreign) {
+    const parts = [['ecb', 'ECB reference rate for the date'], ['actual', 'from the amount actually received or paid'], ['manual', 'rate entered by the user'], ['live', 'market rate fetched on the day'], ['estimate', 'ESTIMATED — the exact rate was not available'], ['today', 'ESTIMATED at today’s rate']]
+      .filter(([k]) => fxUsed[k]).map(([k, label]) => `${fxUsed[k]} ${label}`);
+    notes.push(`Foreign currency: each document and expense is converted at the rate for its own date${cash ? ' (an invoice at the rate on the day it was paid)' : ' (an invoice at its invoice date; the difference on payment is an exchange gain or loss)'}. Rates used: ${parts.join('; ')}. The Rate column shows ${ccy} per 1 unit of the document currency.`);
+  }
+  const missing = rev.uncounted.length + (pl.missingFx && !rev.uncounted.length ? 1 : 0);
+  if (missing) notes.push('Some foreign-currency items had no exchange rate at all and are NOT counted in the totals — they are listed and marked.');
+  notes.push(type === 'sole' || !type
+    ? 'Drawings: the owner paying themselves. Not a business expense, so not in the profit & loss.'
+    : 'Drawings / Salary: payments to the owners or directors, kept out of the expenses above. For this type of business they are usually salary (with PAYE) or a loan account — please classify them.');
+  if ((state.entities || []).length > 1) notes.push(`This report covers ${co.name || ent.name || 'this business'} only. Each business in Simpl is exported separately.`);
+  notes.push('Not recorded in Simpl: bank balances, fixed assets and depreciation, loans, payroll, stock and opening balances. Your accountant adds these from other records.');
+
+  const label = from === taxYearFor(from).start && to === taxYearFor(from).end ? `tax year ${taxYearFor(from).label}` : `${from} to ${to}`;
+  const meta = [
+    ['Business', co.name || ent.name || ''],
+    ['Trading name', co.tradingName || ''],
+    ['Business type', BUSINESS_TYPES[type] || ''],
+    ['Registration number', co.taxRef || ''],
+    ['Income tax number', co.incomeTaxNo || ''],
+    ['VAT number', co.vat || (vatRate() > 0 ? '' : 'Not VAT registered')],
+    ['Address', co.address || ''],
+    ['Period', `${from} to ${to}${label.startsWith('tax') ? ' (' + label + ')' : ''}`],
+    ['Basis', cash ? 'Cash (payments)' : 'Accrual (invoice)'],
+    ['Currency', ccy],
+    ['Prepared', `${todayISO()} with Simpl v${APP_VERSION}`],
+  ].filter((m) => m[1]);
+  const slug = (co.name || ent.name || 'business').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'business';
+  return { title: `${co.name || ent.name || 'Business'} — accountant report`, meta, sections, notes, fileStem: `${slug}-accountant-${label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}` };
+}
+
+// Text for one cell in CSV / PDF.
+function reportCellText(v, kind, forCsv) {
+  if (v === '' || v == null) return '';
+  if (kind === 'm') return forCsv ? Number(v).toFixed(2) : fmtMoney(v, '').trim();
+  if (kind === 'r') return Number(v).toFixed(4);
+  if (kind === 'p') return Math.round(v * 100) + '%';
+  return String(v);
+}
+
+function accountantCsv(r) {
+  const lines = [];
+  const row = (...cells) => lines.push(cells.map(csvCell).join(','));
+  row(r.title);
+  for (const m of r.meta) row(m[0], m[1]);
+  row();
+  row('NOTES');
+  for (const n of r.notes) row(n);
+  for (const s of r.sections) {
+    row();
+    row(s.title.toUpperCase());
+    if (s.intro) row(s.intro);
+    row(...s.columns.map((c) => c.h));
+    const cells = (vals) => vals.map((v, i) => reportCellText(v, s.columns[i].k, true));
+    for (const x of s.rows) row(...cells(x));
+    if (!s.rows.length) row('None');
+    if (s.total) row(...cells(s.total));
+  }
+  return lines.join('\n');
+}
+
+/* A minimal .xlsx writer: one sheet per section, real numbers and dates (so
+   the accountant can sum and filter), stored in an uncompressed zip. No
+   library — the format needs only a handful of XML parts. */
+function crc32(bytes) {
+  let t = crc32.table;
+  if (!t) {
+    t = crc32.table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  }
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function zipStore(files) {
+  const enc = new TextEncoder();
+  const parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = typeof f.data === 'string' ? enc.encode(f.data) : f.data;
+    const crc = crc32(data);
+    const head = new DataView(new ArrayBuffer(30));
+    head.setUint32(0, 0x04034b50, true); head.setUint16(4, 20, true); head.setUint16(6, 0x0800, true);
+    head.setUint16(10, 0, true); head.setUint16(12, 33, true);
+    head.setUint32(14, crc, true); head.setUint32(18, data.length, true); head.setUint32(22, data.length, true);
+    head.setUint16(26, name.length, true);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true);
+    cd.setUint16(14, 33, true); cd.setUint32(16, crc, true); cd.setUint32(20, data.length, true); cd.setUint32(24, data.length, true);
+    cd.setUint16(28, name.length, true); cd.setUint32(42, offset, true);
+    parts.push(new Uint8Array(head.buffer), name, data);
+    central.push(new Uint8Array(cd.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((a, p) => a + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  const all = parts.concat(central, [new Uint8Array(end.buffer)]);
+  const out = new Uint8Array(all.reduce((a, p) => a + p.length, 0));
+  let at = 0;
+  for (const p of all) { out.set(p, at); at += p.length; }
+  return out;
+}
+function xmlText(s) {
+  return String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function accountantXlsx(r) {
+  // Styles: 0 plain · 1 bold · 2 money · 3 money bold · 4 rate · 5 date · 6 title · 7 count · 8 percent · 9 wrapped note
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="3"><numFmt numFmtId="164" formatCode="#,##0.00;-#,##0.00"/><numFmt numFmtId="165" formatCode="0.0000"/><numFmt numFmtId="166" formatCode="yyyy-mm-dd"/></numFmts><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="14"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="10"><xf/><xf fontId="1" applyFont="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="164" fontId="1" applyNumberFormat="1" applyFont="1"/><xf numFmtId="165" applyNumberFormat="1"/><xf numFmtId="166" applyNumberFormat="1"/><xf fontId="2" applyFont="1"/><xf numFmtId="3" applyNumberFormat="1"/><xf numFmtId="9" applyNumberFormat="1"/><xf applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>`;
+  const colName = (i) => { let s = ''; i++; while (i) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+  const serial = (iso) => (Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) - Date.UTC(1899, 11, 30)) / 86400000;
+  const sheetXml = (rows, widths) => {
+    const body = rows.map((cells, ri) => `<row r="${ri + 1}">${cells.map((c, ci) => {
+      if (!c || c.v === '' || c.v == null) return '';
+      const ref = colName(ci) + (ri + 1);
+      const num = (v, s) => `<c r="${ref}" s="${s}"><v>${v}</v></c>`;
+      if (c.k === 'm' && typeof c.v === 'number') return num(c.v, c.b ? 3 : 2);
+      if (c.k === 'r' && typeof c.v === 'number') return num(c.v, 4);
+      if (c.k === 'n' && typeof c.v === 'number') return num(c.v, 7);
+      if (c.k === 'p' && typeof c.v === 'number') return num(c.v, 8);
+      if (c.k === 'd' && /^\d{4}-\d{2}-\d{2}$/.test(c.v)) return num(serial(c.v), 5);
+      const s = c.title ? 6 : c.b ? 1 : c.wrap ? 9 : 0;
+      return `<c r="${ref}" t="inlineStr" s="${s}"><is><t xml:space="preserve">${xmlText(c.v)}</t></is></c>`;
+    }).join('')}</row>`).join('');
+    const cols = widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${cols}</cols><sheetData>${body}</sheetData></worksheet>`;
+  };
+  const widthFor = (k, h) => Math.max(h.length + 2, k === 'm' ? 14 : k === 'r' ? 10 : k === 'd' ? 12 : k === 'n' ? 8 : k === 'p' ? 8 : 18);
+  const sheets = [];
+  // Summary sheet: who, what period, the P&L, then the notes
+  const summary = r.sections[0];
+  const sRows = [[{ v: r.title, title: true }], []];
+  for (const m of r.meta) sRows.push([{ v: m[0], b: true }, { v: m[1] }]);
+  sRows.push([], [{ v: summary.title, b: true }, { v: summary.columns[1].h, b: true }, { v: 'Margin', b: true }]);
+  for (const x of summary.rows) sRows.push([{ v: x[0], b: /profit/i.test(x[0]) }, { v: x[1], k: 'm', b: /profit/i.test(x[0]) }, { v: x[2], k: 'p' }]);
+  sRows.push([], [{ v: 'Notes', b: true }]);
+  for (const n of r.notes) sRows.push([{ v: n, wrap: true }]);
+  sheets.push({ name: 'Summary', xml: sheetXml(sRows, [60, 18, 10]) });
+  for (const s of r.sections.slice(1)) {
+    const rows = [[{ v: s.title, title: true }]];
+    if (s.intro) rows.push([{ v: s.intro }]);
+    rows.push([], s.columns.map((c) => ({ v: c.h, b: true })));
+    for (const x of s.rows) rows.push(x.map((v, i) => ({ v, k: s.columns[i].k })));
+    if (!s.rows.length) rows.push([{ v: 'None' }]);
+    if (s.total) rows.push(s.total.map((v, i) => ({ v, k: s.columns[i].k, b: true })));
+    sheets.push({ name: s.sheet.slice(0, 31), xml: sheetXml(rows, s.columns.map((c) => widthFor(c.k, c.h))) });
+  }
+  const ns = 'http://schemas.openxmlformats.org';
+  const files = [
+    { name: '[Content_Types].xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="${ns}/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>` },
+    { name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${ns}/package/2006/relationships"><Relationship Id="rId1" Type="${ns}/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: 'xl/workbook.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="${ns}/spreadsheetml/2006/main" xmlns:r="${ns}/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${xmlText(s.name.replace(/[\[\]:*?\/\\]/g, ' '))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` },
+    { name: 'xl/_rels/workbook.xml.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${ns}/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="${ns}/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="${ns}/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { name: 'xl/styles.xml', data: styles },
+  ].concat(sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: s.xml })));
+  return zipStore(files);
+}
+
+function accountantPdf(r) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'landscape' });
+  const PAGE_W = doc.internal.pageSize.getWidth(), M = 36;
+  const INK = [28, 27, 25], MUTED = [92, 91, 87];
+  let y = M + 8;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(...INK);
+  doc.text(r.title, M, y); y += 18;
+  const table = (head, body, opts = {}) => {
+    doc.autoTable(Object.assign({
+      head: head ? [head] : undefined, body, startY: y, margin: { left: M, right: M }, theme: 'plain',
+      styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 3, textColor: INK, overflow: 'linebreak' },
+      headStyles: { textColor: MUTED, fontStyle: 'normal', fontSize: 7, lineWidth: { top: 0.6, bottom: 0.6 }, lineColor: INK },
+      bodyStyles: { lineWidth: { bottom: 0.3 }, lineColor: [224, 221, 215] },
+    }, opts));
+    y = doc.lastAutoTable.finalY + 14;
+  };
+  const heading = (t, intro) => {
+    if (y > doc.internal.pageSize.getHeight() - 120) { doc.addPage(); y = M + 8; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...INK);
+    doc.text(t, M, y); y += 6;
+    if (intro) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
+      const lines = doc.splitTextToSize(intro, PAGE_W - 2 * M);
+      doc.text(lines, M, y + 8); y += 8 + lines.length * 10;
+    }
+    y += 4;
+  };
+  table(null, r.meta, { columnStyles: { 0: { fontStyle: 'bold', cellWidth: 120 } }, bodyStyles: {} });
+  const s0 = r.sections[0];
+  heading(s0.title);
+  table(null, s0.rows.map((x) => [x[0], reportCellText(x[1], 'm'), reportCellText(x[2], 'p')]),
+    { tableWidth: 420, columnStyles: { 1: { halign: 'right', cellWidth: 100 }, 2: { halign: 'right', cellWidth: 50 } },
+      didParseCell: (h) => { if (/profit/i.test(String(h.row.raw[0]))) h.cell.styles.fontStyle = 'bold'; } });
+  heading('Notes');
+  table(null, r.notes.map((n) => [n]), { bodyStyles: {}, styles: { font: 'helvetica', fontSize: 8, cellPadding: 3, textColor: INK } });
+  for (const s of r.sections.slice(1)) {
+    heading(s.title, s.intro);
+    const right = {};
+    s.columns.forEach((c, i) => { if ('mrnp'.includes(c.k)) right[i] = { halign: 'right' }; });
+    const body = s.rows.map((x) => x.map((v, i) => reportCellText(v, s.columns[i].k)));
+    if (!body.length) body.push(['None']);
+    if (s.total) body.push(s.total.map((v, i) => reportCellText(v, s.columns[i].k)));
+    const last = s.total ? body.length - 1 : -1;
+    table(s.columns.map((c) => c.h), body, { columnStyles: right,
+      didParseCell: (h) => { if (h.section === 'body' && h.row.index === last) h.cell.styles.fontStyle = 'bold'; } });
+  }
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p); doc.setFontSize(7); doc.setTextColor(158, 157, 153);
+    doc.text(`${r.meta.find((m) => m[0] === 'Period')[1]} · page ${p} of ${pages}`, PAGE_W - M, doc.internal.pageSize.getHeight() - 18, { align: 'right' });
+  }
+  return doc;
+}
+
+function downloadBytes(data, type, filename) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
   const a = document.createElement('a');
-  a.href = url;
-  const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'business';
-  a.download = `${slug}-accountant-${ty.label.replace('/', '-')}-${todayISO()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-  toast('Report downloaded');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openAccountantExportModal() {
+  const today = todayISO();
+  const { options, preferred } = exportPeriodOptions(today);
+  const html = `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head">
+          <div class="ttl">Export for your accountant</div>
+          <span class="modal-close" data-close>×</span>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label>Period</label>
+            ${options.map((o) => `<label class="checkbox" style="margin-top:6px;"><input type="radio" name="ax-period" value="${o.key}" ${o.key === preferred ? 'checked' : ''} /><span>${o.label}</span></label>`).join('')}
+            <label class="checkbox" style="margin-top:6px;"><input type="radio" name="ax-period" value="custom" /><span>Choose dates</span></label>
+            <div id="ax-custom" class="form-grid" style="margin-top:8px;" hidden>
+              <div class="field"><label>From</label><input id="ax-from" type="date" value="${options[0].from}" /></div>
+              <div class="field"><label>To</label><input id="ax-to" type="date" value="${options[0].to}" /></div>
+            </div>
+          </div>
+          <div class="field">
+            <label>Basis</label>
+            <select id="ax-basis">
+              <option value="cash" ${financesBasis === 'cash' ? 'selected' : ''}>Cash — income when paid</option>
+              <option value="accrual" ${financesBasis === 'accrual' ? 'selected' : ''}>Accrual — income when invoiced</option>
+            </select>
+            <div class="text-sm text-muted" style="margin-top:4px;">Most sole proprietors use cash. Your accountant will know.</div>
+          </div>
+          <div class="field">
+            <label>Format</label>
+            <select id="ax-format">
+              <option value="xlsx">Excel workbook (.xlsx) — a sheet per section</option>
+              <option value="pdf">PDF — to read or print</option>
+              <option value="csv">CSV — one sheet, any program</option>
+            </select>
+          </div>
+          <div class="text-sm text-muted">Includes the profit &amp; loss, every invoice, credit note and expense, VAT by period, what clients owed at the end of the period, and the exchange rates used.</div>
+          <div class="text-sm" id="ax-err" style="color:var(--danger);margin-top:8px;"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="ax-go">Download</button>
+        </div>
+      </div>
+    </div>`;
+  showModal(html);
+  enhanceDatePickers(document.getElementById('modal-overlay'));
+  document.querySelectorAll('input[name="ax-period"]').forEach((el) => el.addEventListener('change', () => {
+    document.getElementById('ax-custom').hidden = el.value !== 'custom' || !el.checked;
+  }));
+  document.getElementById('ax-go').addEventListener('click', () => withBusy(document.getElementById('ax-go'), 'Preparing…', async () => {
+    const err = document.getElementById('ax-err');
+    const key = (document.querySelector('input[name="ax-period"]:checked') || {}).value;
+    let from, to;
+    if (key === 'custom') { from = document.getElementById('ax-from').value; to = document.getElementById('ax-to').value; }
+    else { const o = options.find((x) => x.key === key) || options[0]; from = o.from; to = o.to; }
+    if (!from || !to || from > to) { err.textContent = 'Choose a start date before the end date.'; return; }
+    const basis = document.getElementById('ax-basis').value;
+    const format = document.getElementById('ax-format').value;
+    // Exact rates for anything still on an estimate, before the numbers are written down.
+    try { await refreshFxHistory(); } catch (e) { noteQuietError('exchange rates', e); }
+    const r = accountantReport(from, to, basis);
+    if (format === 'csv') downloadBytes(accountantCsv(r), 'text/csv;charset=utf-8', r.fileStem + '.csv');
+    else if (format === 'xlsx') downloadBytes(accountantXlsx(r), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', r.fileStem + '.xlsx');
+    else accountantPdf(r).save(r.fileStem + '.pdf');
+    closeModal();
+    toast('Report downloaded');
+  }));
 }
 
 /* ============================================================
@@ -8810,14 +9524,15 @@ function projectActuals(p) {
   const docs = (state.documents || []).filter((d) => d.projectId === p.id);
   let invoiced = 0, paid = 0, quoted = 0, missingFx = false;
   for (const d of docs) {
-    const z = toBase(calcTotals(d).due, d.currency);   // deposit-aware
+    // Quotes haven't happened yet, so today's rate; invoices at their own.
+    const z = d.type === 'quote' ? toBase(calcTotals(d).due, d.currency) : toBaseAt(d, calcTotals(d).due);   // deposit-aware
     if (z == null) { missingFx = true; continue; }
     if (d.type === 'invoice' && d.status !== 'draft') { invoiced += z; if (d.status === 'paid') paid += z; }
     if (d.type === 'quote' && d.status !== 'draft') quoted += z;
   }
   let expenses = 0;
   for (const e of (state.expenses || []).filter((x) => x.projectId === p.id)) {
-    const z = toBase(Number(e.amount) || 0, e.currency);
+    const z = toBaseAt(e, Number(e.amount) || 0);
     if (z == null) { missingFx = true; continue; }
     expenses += z;
   }
@@ -10227,6 +10942,7 @@ function renderDocEditor() {
             ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === d.currency ? 'selected' : ''}>${c}</option>`).join('')}
           </select>
         </div>
+        ${d.type !== 'quote' && d.currency !== baseCcy() ? fxEditorField(d, 'issue') + (d.type === 'invoice' && d.status === 'paid' ? fxEditorField(d, 'paid') : '') : ''}
         ${vatRate() > 0 ? `
         <div class="field">
           <label>VAT</label>
@@ -10372,6 +11088,7 @@ function bindEditorEvents() {
     });
   });
 
+  host.querySelectorAll('[data-fx]').forEach((el) => el.addEventListener('change', () => setManualRate(editingDoc, el.dataset.fx, el.value)));
   host.querySelectorAll('[data-df]').forEach((el) => {
     const evt = (el.tagName === 'SELECT' || el.type === 'date' || el.type === 'checkbox') ? 'change' : 'input';
     el.addEventListener(evt, () => {
@@ -10828,6 +11545,8 @@ function openDocPreview(docId) {
 function openMarkPaidModal(docId) {
   const d = state.documents.find((x) => x.id === docId);
   if (!d) return;
+  const foreign = d.currency !== baseCcy();
+  const owed = invoiceDueNet(d);
   const html = `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:420px;">
@@ -10840,6 +11559,11 @@ function openMarkPaidModal(docId) {
             <label>Payment date</label>
             <input id="paid-date" type="date" value="${todayISO()}" />
           </div>
+          ${foreign ? `<div class="field" style="margin-top:14px;">
+            <label>Amount received in ${baseCcy()} <span class="text-muted">(optional)</span></label>
+            <input id="paid-base" type="number" inputmode="decimal" step="0.01" min="0" placeholder="What reached your bank, for ${fmtMoney(owed, d.currency)}" />
+            <div class="text-sm text-muted" style="margin-top:6px;">Leave blank to use the exchange rate on the payment date.</div>
+          </div>` : ''}
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Cancel</button>
@@ -10852,6 +11576,8 @@ function openMarkPaidModal(docId) {
   document.getElementById('paid-confirm').addEventListener('click', async () => {
     d.status = 'paid';
     d.paidDate = document.getElementById('paid-date').value || todayISO();
+    const received = foreign ? Number(document.getElementById('paid-base').value) : 0;
+    if (received > 0 && owed > 0) setActualPaidRate(d, received, owed);
     await saveState();
     closeModal();
     render();
@@ -11590,6 +12316,9 @@ function renderSettingsBusiness() {
         <div class="field full"><label>Address</label><input data-cs="address" value="${escapeHtml(co.address || '')}" /></div>
         <div class="field"><label>VAT number</label><input data-cs="vat" value="${escapeHtml(co.vat || '')}" /></div>
         <div class="field"><label>Business registration number <span class="text-muted">(optional)</span></label><input data-cs="taxRef" value="${escapeHtml(co.taxRef || '')}" /></div>
+        <div class="field"><label>Business type <span class="text-muted">(for your accountant)</span></label>
+          <select data-cs="businessType"><option value="">— not set —</option>${Object.entries(BUSINESS_TYPES).map(([k, v]) => `<option value="${k}" ${co.businessType === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="field"><label>Income tax number <span class="text-muted">(optional)</span></label><input data-cs="incomeTaxNo" value="${escapeHtml(co.incomeTaxNo || '')}" /></div>
         <div class="field"><label>Email</label><input data-cs="email" value="${escapeHtml(co.email || '')}" /></div>
         <div class="field"><label>Phone</label><input data-cs="phone" value="${escapeHtml(co.phone || '')}" /></div>
         <div class="field">
@@ -12508,6 +13237,8 @@ function bindViewEvents() {
       convWindow = v === 'all' ? 'all' : Number(v);
       render();
     }));
+    const finExp = document.getElementById('fin-export-report');
+    if (finExp) finExp.addEventListener('click', openAccountantExportModal);
     const fx2 = document.getElementById('refresh-fx-fin');
     if (fx2) fx2.addEventListener('click', async () => {
       fx2.textContent = 'Refreshing…';
@@ -12611,7 +13342,7 @@ function bindReconcileEvents() {
   }));
 
   const exp = document.getElementById('rec-export-report');
-  if (exp) exp.addEventListener('click', exportAccountantReport);
+  if (exp) exp.addEventListener('click', openAccountantExportModal);
 
   // Active session controls
   const cancel = document.getElementById('rec-cancel');
@@ -15230,6 +15961,9 @@ async function enterApp() {
     setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
   }
   setTimeout(showBackupReminder, 1200); // gentle, after the app settles
+  // Exact exchange rates for foreign-currency records still on an estimate,
+  // including everything from before v1.41 — fetched once, then cached.
+  setTimeout(() => { refreshFxHistory().catch((e) => noteQuietError('exchange rates', e)); }, 3000);
   maybePromptCloudBackup();
   // Changes a previous session couldn't send before it closed go now.
   if (cloudEnrolled() && cloudGet(CLOUD_DIRTY_STORE) === '1') setTimeout(() => runCloudBackup({ silent: true }), 5000);
