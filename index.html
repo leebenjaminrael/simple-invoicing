@@ -2861,7 +2861,10 @@ async function cloudRequestCode(email) {
     err.retryAfter = body && body.retryAfter;
     throw err;
   }
-  return true;
+  // The staging server sends no email and hands the code back instead; the
+  // production server never does (see isStaging in worker/src/index.js).
+  const body = await res.json().catch(() => ({}));
+  return body && /^\d{6}$/.test(String(body.devCode || '')) ? { devCode: String(body.devCode) } : true;
 }
 
 /* Swap a code for a device token. */
@@ -2979,6 +2982,12 @@ function cloudCounts(s) {
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
    backup, security, feedback, export. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.41.0.1', date: '2026-10-06', items: [
+      { title: 'Projects work in a newly added business',
+        text: 'Creating a project straight after adding a second business could fail until the app was reopened. It now works first time.' },
+    ],
+  },
   {
     version: '1.41.0.0', date: '2026-10-06', items: [
       { title: 'Foreign currency at the rate on the day', important: true,
@@ -3197,7 +3206,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.41.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.41.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4637,52 +4646,70 @@ function migrateState() {
 
   // v6.1: per-business VAT rate (defaults to 15% for existing businesses)
   // v6.2: per-business VAT cycle (defaults to bi-monthly = previous SA behaviour)
-  for (const ent of (state.entities || [])) {
-    if (ent.vatPercent === undefined) ent.vatPercent = 15;
-    if (ent.vatCycle === undefined) ent.vatCycle = 'bi-monthly';
-    if (ent.taxYearStartMonth === undefined) ent.taxYearStartMonth = 3; // v6.3: configurable tax year (default March)
-    // v6.4: profit tracking — default a direct-cost (COGS) flag on existing expenses.
-    // Subcontractor spend is treated as a direct project cost; everything else as overhead.
-    for (const e of (ent.expenses || [])) {
-      if (e.directCost === undefined) e.directCost = (e.category === 'Subcontractor');
-    }
-    // v6.5: time tracking — projects, tasks, time entries, running timer, default rate.
-    if (!ent.projects) ent.projects = [];
-    if (!ent.tasks) ent.tasks = [];
-    if (!ent.payeeRules) ent.payeeRules = {};
-    if (!ent.timeEntries) ent.timeEntries = [];
-    if (ent.runningTimer === undefined) ent.runningTimer = null;
-    if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
-    // v6.6: customisable document numbering (prefix + zero-padding width).
-    if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
-    if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
-    if (ent.numberDigits === undefined) ent.numberDigits = 4;
-    // v6.9: credit notes get their own sequence + prefix.
-    if (ent.nextCredit === undefined) ent.nextCredit = 1;
-    if (ent.creditPrefix === undefined) ent.creditPrefix = 'CN-';
-    // v6.7: record-level change tracking (sync plumbing) — maps are also
-    // created lazily by trackChanges(), this just keeps shapes predictable.
-    if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
-    // v6.8: projects grow budgets/people/dates; documents + expenses gain an
-    // optional projectId. Old free-text projectTitle matches by name when
-    // unambiguous, so existing invoices link up automatically.
-    for (const p of (ent.projects || [])) ensureProjectShape(p);
-    for (const d of (ent.documents || [])) {
-      if (d.projectId === undefined) {
-        const title = (d.projectTitle || '').trim().toLowerCase();
-        const matches = title ? (ent.projects || []).filter((p) => p.name.trim().toLowerCase() === title) : [];
-        d.projectId = matches.length === 1 ? matches[0].id : null;
-      }
-    }
-    for (const e of (ent.expenses || [])) { if (e.projectId === undefined) e.projectId = null; }
-    // v6.9: part-invoicing group + label defaults; credit-note allocation field.
-    for (const d of (ent.documents || [])) {
-      if (d.billingGroupId === undefined) d.billingGroupId = null;
-      if (d.portionLabel === undefined) d.portionLabel = (Number(d.depositPct) > 0 ? 'Deposit' : '');
-      if (d.type === 'credit' && d.appliesToInvoiceId === undefined) d.appliesToInvoiceId = null;
+  for (const ent of (state.entities || [])) ensureEntityShape(ent);
+  state.version = 6;
+}
+
+/* Every field and list a business needs, filled in where missing. One place,
+   used by every way a business comes to exist: unlock (migrateState), Add
+   business, and a merge or sync that brings one in. Until 6 Oct 2026 Add
+   business built its own shorter record with no projects, tasks or time
+   lists, so creating a project in the same session crashed on
+   state.projects.push — Paul Hudson's "Create project does nothing". */
+function ensureEntityShape(ent) {
+  if (!ent) return ent;
+  // Only ever adds what is missing — never replaces something that is there.
+  for (const k of ['clients', 'documents', 'expenses', 'statements', 'savedLineItems', 'banking']) if (!ent[k]) ent[k] = [];
+  if (!ent.goals) ent.goals = { annual: 0, monthly: {} };
+  if (!ent.fxRates) ent.fxRates = {};
+  if (ent.fxFetchedAt === undefined) ent.fxFetchedAt = null;
+  if (typeof ent.nextInv !== 'number') ent.nextInv = 1;
+  if (typeof ent.nextQt !== 'number') ent.nextQt = 1;
+  if (!ent.baseCurrency) ent.baseCurrency = 'ZAR';
+  if (ent.vatPercent === undefined) ent.vatPercent = 15;
+  if (ent.vatCycle === undefined) ent.vatCycle = 'bi-monthly';
+  if (ent.taxYearStartMonth === undefined) ent.taxYearStartMonth = 3; // v6.3: configurable tax year (default March)
+  // v6.4: profit tracking — default a direct-cost (COGS) flag on existing expenses.
+  // Subcontractor spend is treated as a direct project cost; everything else as overhead.
+  for (const e of (ent.expenses || [])) {
+    if (e.directCost === undefined) e.directCost = (e.category === 'Subcontractor');
+  }
+  // v6.5: time tracking — projects, tasks, time entries, running timer, default rate.
+  if (!ent.projects) ent.projects = [];
+  if (!ent.tasks) ent.tasks = [];
+  if (!ent.payeeRules) ent.payeeRules = {};
+  if (!ent.timeEntries) ent.timeEntries = [];
+  if (ent.runningTimer === undefined) ent.runningTimer = null;
+  if (ent.defaultHourlyRate === undefined) ent.defaultHourlyRate = 0;
+  // v6.6: customisable document numbering (prefix + zero-padding width).
+  if (ent.invoicePrefix === undefined) ent.invoicePrefix = 'INV-';
+  if (ent.quotePrefix === undefined) ent.quotePrefix = 'QT-';
+  if (ent.numberDigits === undefined) ent.numberDigits = 4;
+  // v6.9: credit notes get their own sequence + prefix.
+  if (ent.nextCredit === undefined) ent.nextCredit = 1;
+  if (ent.creditPrefix === undefined) ent.creditPrefix = 'CN-';
+  // v6.7: record-level change tracking (sync plumbing) — maps are also
+  // created lazily by trackChanges(), this just keeps shapes predictable.
+  if (!ent.sync || !ent.sync.rev) ent.sync = { rev: {}, tombstones: {} };
+  // v6.8: projects grow budgets/people/dates; documents + expenses gain an
+  // optional projectId. Old free-text projectTitle matches by name when
+  // unambiguous, so existing invoices link up automatically.
+  for (const p of (ent.projects || [])) ensureProjectShape(p);
+  for (const d of (ent.documents || [])) {
+    if (d.projectId === undefined) {
+      const title = (d.projectTitle || '').trim().toLowerCase();
+      const matches = title ? (ent.projects || []).filter((p) => p.name.trim().toLowerCase() === title) : [];
+      d.projectId = matches.length === 1 ? matches[0].id : null;
     }
   }
-  state.version = 6;
+  for (const e of (ent.expenses || [])) { if (e.projectId === undefined) e.projectId = null; }
+  // v6.9: part-invoicing group + label defaults; credit-note allocation field.
+  for (const d of (ent.documents || [])) {
+    if (d.billingGroupId === undefined) d.billingGroupId = null;
+    if (d.portionLabel === undefined) d.portionLabel = (Number(d.depositPct) > 0 ? 'Deposit' : '');
+    if (d.type === 'credit' && d.appliesToInvoiceId === undefined) d.appliesToInvoiceId = null;
+  }
+  return ent;
 }
 
 /* ============================================================
@@ -15181,7 +15208,11 @@ function openCloudEnrolModal(prefill, opts) {
     const v = (document.getElementById('cloud-email').value || '').trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { err().textContent = 'That does not look like an email address.'; return; }
     try {
-      await cloudRequestCode(v);
+      const sent = await cloudRequestCode(v);
+      if (sent && sent.devCode) {   // dev copy only: no email, the code comes back
+        document.getElementById('cloud-code').value = sent.devCode;
+        toast('Dev server: no email sent — the code is filled in for you.');
+      }
       document.getElementById('cloud-code-wrap').style.display = '';
       document.getElementById('cloud-send').style.display = 'none';
       document.getElementById('cloud-verify').style.display = '';
@@ -16035,7 +16066,7 @@ async function addEntityFlow() {
   if (!trimmed) { toast('A name is required'); return; }
   const defaultBase = baseCcy();  // inherit the current business's base as a sensible default
   const id = 'ent-' + Math.random().toString(36).slice(2, 9);
-  state.entities.push({
+  state.entities.push(ensureEntityShape({
     id, name: trimmed,
     company: { name: trimmed, attention: '', address: '', vat: '', email: '', phone: '' },
     logo: null,
@@ -16046,7 +16077,7 @@ async function addEntityFlow() {
     savedLineItems: [],
     clients: [], documents: [], expenses: [], statements: [],
     fxRates: {}, fxFetchedAt: null,
-  });
+  }));
   state.activeEntityId = id;
   await saveState();
   applyBrand();
