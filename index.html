@@ -1835,6 +1835,28 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   /* Section heading rows inside a document's line table */
   .lines tr[data-line-type="heading"] td { background: var(--surface-2); }
   .lines tr[data-line-type="heading"] textarea { font-weight: 600; color: var(--text); }
+
+/* Lock screen secondary actions: quiet full-width buttons rather than a stack
+   of underlined links (v1.43). */
+.lock-actions { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.lock-actions .btn { width: 100%; justify-content: center; font-size: 13px; }
+.lock-actions .lock-reset { color: var(--text-muted); background: none; border-color: transparent; }
+
+/* Empty states (Brief 6): what this place is, why it helps, one action. */
+.empty-state { padding: 36px 24px; text-align: center; }
+.empty-state .es-title { font-weight: 600; font-size: 16px; color: var(--text); margin-bottom: 6px; }
+.empty-state .es-text { color: var(--text-mid); font-size: 13px; line-height: 1.6; max-width: 460px; margin: 0 auto 14px; }
+.empty-state .es-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.empty-state.is-quiet { padding: 24px; }
+.empty-state.is-quiet .es-title { font-weight: 500; font-size: 14px; color: var(--text-mid); margin: 0; }
+td.empty-cell { padding: 0 !important; }
+
+/* The place a setup step or deep link lands on: a brief accent outline. */
+.focus-pulse { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: 10px; animation: focusPulse 2.2s ease-out forwards; }
+@keyframes focusPulse { 0%, 60% { outline-color: var(--accent); } 100% { outline-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .focus-pulse { animation: none; } }
+.welcome-card { margin-bottom: 16px; }
+.welcome-card .es-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; }
 </style>
 </head>
 <body>
@@ -1857,10 +1879,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     <div class="text-sm text-muted" style="margin-top:16px;line-height:1.55;">
       Your data is encrypted at rest with AES-GCM (key derived via PBKDF2, 600k rounds). Only your password or your recovery phrase can open it — we hold no key.
     </div>
-    <div style="margin-top:14px;text-align:center;display:flex;flex-direction:column;gap:6px;">
-      <button type="button" id="lock-earlier" style="display:none;background:none;border:0;color:var(--accent-bright);font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;">Recover an earlier vault on this device</button>
-      <button type="button" id="lock-recovery" style="display:none;background:none;border:0;color:var(--accent-bright);font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;">Forgot password — use recovery phrase</button>
-      <button type="button" id="lock-reset" style="background:none;border:0;color:var(--mid);font-size:12px;text-decoration:underline;cursor:pointer;padding:4px;">Reset vault (erases everything)</button>
+    <div class="lock-actions">
+      <button type="button" class="btn" id="lock-restore" style="display:none;">Restore from backup</button>
+      <button type="button" class="btn" id="lock-recovery" style="display:none;">Forgot password? Use your recovery phrase</button>
+      <button type="button" class="btn" id="lock-earlier" style="display:none;">Recover an earlier vault on this device</button>
+      <button type="button" class="btn btn-ghost lock-reset" id="lock-reset">Reset vault (erases everything)</button>
     </div>
   </div>
 </div>
@@ -1882,7 +1905,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px;height:40px;" id="ob-btn">Continue</button>
     </form>
     <div class="text-sm text-muted" style="margin-top:16px;line-height:1.55;">
-      We store only your name and email — to send you product updates. Your invoices, clients, expenses and all financial data stay encrypted on this device and are never uploaded.
+      We keep your name and email to send you your licence and product updates. Your invoices, clients and expenses are encrypted on this device, and the backup we keep is encrypted before it leaves, so we can't read it.
     </div>
   </div>
 </div>
@@ -2898,6 +2921,9 @@ async function cloudUpload(blobText, counts, opts) {
       'X-Simpl-Expect-Version': String(cloudKnownVersion()),
       'X-Simpl-Device': getDeviceId(),
       'X-Simpl-Counts': JSON.stringify(counts || {}),
+      // The verified licence's expiry, so the server's retention knows a
+      // hand-issued licence is active (it has no record of those).
+      'X-Simpl-Licence-Exp': String((typeof licenceState !== 'undefined' && licenceState && licenceState.expiry) || ''),
     },
     body: bytes,
   });
@@ -2934,6 +2960,18 @@ async function cloudLatest() {
     createdAt: Number(res.headers.get('X-Simpl-Created') || 0),
     counts,
   };
+}
+
+/* Delete the server backup: every copy, from every device (Settings, and the
+   lapse prompt). This device keeps its own data; backup stays off here until
+   it is turned on again. */
+async function cloudDeleteBackup() {
+  if (!cloudEnrolled()) throw new Error('not_enrolled');
+  const res = await cloudFetch('/backup', { method: 'DELETE' });
+  if (res.status === 401) { cloudForget(); throw new Error('unauthorised'); }
+  if (!res.ok) throw new Error('delete_failed');
+  cloudForget();
+  return res.json().catch(() => ({}));
 }
 
 async function cloudList() {
@@ -2982,6 +3020,17 @@ function cloudCounts(s) {
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
    backup, security, feedback, export, terms. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.43.0.0', date: '2026-10-07', items: [
+      { title: 'Restore from backup, right from the lock screen',
+        text: 'On a new device or after clearing your browser, choose Restore from backup, confirm your email with a code, and open it with your password or recovery phrase. Everything comes back.' },
+      { title: 'Delete your backup whenever you like',
+        text: 'Settings, Server backup now has Delete my backup. If you stop using Simpl, we keep your encrypted backup for six months, email you, then delete it.',
+        link: { label: 'Backup settings', to: 'backup' } },
+      { title: 'A clearer start',
+        text: 'New businesses get a short setup list that takes you straight to each field. You can add a client without leaving an invoice, and empty pages now say what they are for.' },
+    ],
+  },
   {
     version: '1.42.0.0', date: '2026-10-06', items: [
       { title: 'Your own terms — and different ones per client',
@@ -3094,6 +3143,68 @@ const CHANGELOG = [
     ],
   },
 ];
+</script>
+<script>/* Copy for first-run guidance, empty states and setup (Brief 6), in one place
+   so it can be read and edited as a whole. Rules: British English, second
+   person, active voice, no exclamation marks, no em dashes; a button says
+   what it does. Everything else in the app still writes its own copy. */
+const COPY = {
+  welcome: {
+    title: 'Welcome to Simpl',
+    text: 'Work through the steps below and you’ll be ready to send your first quote or invoice in about ten minutes.',
+    action: 'Start setup',
+  },
+  setup: {
+    heading: 'Get set up',
+    complete: 'Setup complete. You’re ready to send.',
+    company: 'Add your business details',
+    logo: 'Add your logo, it appears on every PDF',
+    banking: 'Add your banking details, so clients can pay you',
+    backup: 'Turn on backup',
+    client: 'Add your first client',
+    send: 'Send your first quote or invoice',
+  },
+  gate: {
+    title: 'Add your business details first',
+    text: 'They appear on every invoice and quote you send. You only need to do this once.',
+    action: 'Add business details',
+  },
+  empty: {
+    clientPage: {
+      title: 'Nothing for this client yet',
+      text: 'Quotes, invoices, projects and time for this client will all gather here.',
+      action: 'Create an invoice', secondary: 'Create a quote',
+    },
+    projects: {
+      title: 'A project is one job, start to finish',
+      text: 'It keeps the quote, your time, costs and invoices together, so you can see what the job made.',
+      action: 'Create your first project',
+    },
+    expenses: {
+      title: 'Log what your work costs you',
+      text: 'Add an expense by hand, or drop a bank statement into Reconcile and Simpl suggests them for you.',
+      action: 'Add an expense', secondary: 'Go to Reconcile',
+    },
+    filtered: { title: 'Nothing matches these filters', action: 'Clear filters' },
+    unpaid: 'Nothing unpaid.',
+    finances: {
+      title: 'Your numbers will show up here',
+      text: 'Once you’ve invoiced, you’ll see what you earned and what has actually been paid, side by side.',
+      action: 'Create your first invoice',
+    },
+    vat: {
+      title: 'No VAT has been recorded yet',
+      text: 'Invoices and expenses with VAT add up here, period by period, ready for your return.',
+    },
+    vatOff: {
+      title: 'VAT is off for this business',
+      text: 'If you’re VAT registered, set your VAT rate and Simpl works out each period for you.',
+      action: 'Set your VAT rate',
+    },
+    timerFiltered: { title: 'No time in this period', action: 'Clear filters' },
+  },
+  newClientOption: '+ New client…',
+};
 </script>
 <script>
 /* ============================================================
@@ -3227,7 +3338,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.42.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.43.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3796,7 +3907,7 @@ function openPaywallModal(reason) {
   const keeps = [
     'Open, read and search everything',
     'Print and re-send any document',
-    'Export CSV for your accountant',
+    'Export for your accountant',
     'Download a full encrypted backup',
   ];
   const paused = [
@@ -5545,17 +5656,104 @@ document.addEventListener('keydown', (e) => {
    ============================================================ */
 
 /* ----- First-run setup checklist (dashboard) ----- */
+// The buttons inside empty states (Brief 6), wherever they render.
+function bindEmptyStateActions() {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  on('cl-empty-invoice', () => openDocEditor(null, 'invoice', currentClientId));
+  on('cl-empty-quote', () => openDocEditor(null, 'quote', currentClientId));
+  on('exp-clear-filters', () => { expSearch = ''; expCategoryFilter = 'all'; render(); });
+  on('doc-clear-filters', () => { docSearch = ''; docFilter = 'all'; render(); });
+  on('fin-empty-invoice', () => openDocEditor(null, 'invoice'));
+  on('vat-set-rate', () => goToSetting('vat'));
+}
+
+/* One empty state, everywhere (Brief 6): what this place is, why it helps,
+   and the single next action. `quiet` is for "all done" and filtered states,
+   which inform rather than teach. Copy comes from COPY (src/strings.js). */
+function emptyState({ title, text, action, actionId, secondary, secondaryId, quiet }) {
+  return `<div class="empty-state${quiet ? ' is-quiet' : ''}">
+    <div class="es-title">${escapeHtml(title)}</div>
+    ${text ? `<div class="es-text">${escapeHtml(text)}</div>` : ''}
+    ${action || secondary ? `<div class="es-actions">
+      ${action ? `<button class="btn btn-primary btn-sm" id="${actionId}">${escapeHtml(action)}</button>` : ''}
+      ${secondary ? `<button class="btn btn-sm" id="${secondaryId}">${escapeHtml(secondary)}</button>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+
+/* Deep links into Settings: one function shared by the setup checklist, empty
+   states and the business-details gate. Opens the right Settings page,
+   scrolls the section into view, focuses its first input and outlines it
+   briefly. Each target carries data-focus-id. */
+const FOCUS_TARGETS = { company: 'business', vat: 'business', terms: 'business', logo: 'business', banking: 'business', backup: 'account' };
+// Re-applied after every render for a moment: a redraw just after the jump
+// (timers that run after unlock) would otherwise drop the scroll and focus.
+let pendingFocus = null;
+function goToSetting(focusId) {
+  closeModal();
+  settingsPage = FOCUS_TARGETS[focusId] || 'business';
+  pendingFocus = { id: focusId, until: Date.now() + 4500, first: true };
+  setRoute('settings');   // renders, and bindViewEvents → applyPendingFocus
+}
+function applyPendingFocus() {
+  if (!pendingFocus) return;
+  if (Date.now() > pendingFocus.until) { pendingFocus = null; return; }
+  const p = pendingFocus;
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`[data-focus-id="${p.id}"]`);
+    if (!el) { if (p.first) noteQuietError('deep link', new Error('no data-focus-id ' + p.id)); return; }
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Centre a short section; a tall one starts near the top, heading in view.
+    // scrollIntoView, because the app scrolls inside a container, not the window.
+    el.style.scrollMarginTop = '24px';
+    const tall = el.getBoundingClientRect().height > window.innerHeight * 0.8;
+    el.scrollIntoView({ behavior: reduce || !p.first ? 'auto' : 'smooth', block: tall ? 'start' : 'center' });
+    // The first empty field if there is one, so the cursor lands where the work is.
+    const fields = [...el.querySelectorAll('input:not([type=hidden]):not([type=file]), textarea, select')];
+    const first = fields.find((f) => !f.value) || fields[0];
+    if (first) setTimeout(() => first.focus({ preventScroll: true }), reduce || !p.first ? 0 : 350);
+    el.classList.remove('focus-pulse'); void el.offsetWidth; el.classList.add('focus-pulse');
+    setTimeout(() => el.classList.remove('focus-pulse'), 2400);
+    p.first = false;
+  });
+}
+
+/* Setup progress, so we can tell whether the guide works (privacy policy,
+   "What we collect"): once, when a business first has every step done, the
+   date goes to our server against the sign-up email. Nothing else. */
+const SETUP_REPORTED_STORE = 'seed-setup-reported-v1';
+function reportSetupComplete() {
+  try {
+    if (localStorage.getItem(SETUP_REPORTED_STORE)) return;
+    const email = (getOnboarding() || {}).email;
+    if (!email) return;
+    localStorage.setItem(SETUP_REPORTED_STORE, new Date().toISOString());
+    fetch(`${LICENCE_API}/setup`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, completed: true }) }).catch(() => {});
+  } catch (e) {}
+}
+
+function runSetupStep(step) {
+  if (step.focus) return goToSetting(step.focus);
+  if (step.action === 'backup') return openCloudEnrolModal();
+  if (step.action === 'new-client') return openClientModal();
+  if (step.action === 'new-invoice') return openDocEditor(null, 'invoice');
+}
+
 function setupChecklistSteps() {
   const co = state.settings.company || {};
   const banking = state.settings.banking || [];
   // Placeholder banking details like "[Account name]" don't count as filled in.
   const bankDone = banking.some((b) => b.details && b.details.trim() && !b.details.includes('['));
+  // In first-run order, ending with the moment that matters: something sent.
+  // "Business details" means what has to be on a document (name, address, email).
   return [
-    { key: 'company', label: 'Add your company details', done: !!(co.name && co.name.trim()), route: 'settings' },
-    { key: 'logo', label: 'Upload your logo — it appears on PDFs', done: !!state.settings.logo, route: 'settings' },
-    { key: 'banking', label: 'Add your banking details', done: bankDone, route: 'settings' },
-    { key: 'client', label: 'Add your first client', done: (state.clients || []).length > 0, route: 'clients' },
-    { key: 'invoice', label: 'Create your first invoice', done: state.documents.some((d) => d.type === 'invoice'), action: 'new-invoice' },
+    { key: 'company', label: COPY.setup.company, done: !missingCompanyDetails().length, focus: 'company' },
+    { key: 'logo', label: COPY.setup.logo, done: !!state.settings.logo, focus: 'logo' },
+    { key: 'banking', label: COPY.setup.banking, done: bankDone, focus: 'banking' },
+    { key: 'backup', label: COPY.setup.backup, done: cloudEnrolled(), action: 'backup' },
+    { key: 'client', label: COPY.setup.client, done: (state.clients || []).length > 0, action: 'new-client' },
+    { key: 'send', label: COPY.setup.send, done: state.documents.some((d) => (d.type === 'invoice' || d.type === 'quote') && d.status && d.status !== 'draft'), action: 'new-invoice' },
   ];
 }
 
@@ -5563,16 +5761,26 @@ function renderSetupChecklist() {
   if (state.settings.setupDismissed) return '';
   const steps = setupChecklistSteps();
   const remaining = steps.filter((s) => !s.done).length;
-  if (!remaining) return '';   // all done — checklist retires itself
+  if (!remaining) {
+    // All done: a small line to dismiss for good, and the date reported once.
+    reportSetupComplete();
+    return `<div class="card setup-card" style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="text-sm text-mid">${escapeHtml(COPY.setup.complete)}</div>
+      <button class="btn btn-sm btn-ghost" id="setup-dismiss" title="Hide for good">Hide</button>
+    </div>`;
+  }
+  // A brand-new business gets a welcome above the steps.
+  const fresh = !(state.clients || []).length && !(state.documents || []).length;
+  const welcome = fresh ? `<div class="card welcome-card">${emptyState({ title: COPY.welcome.title, text: COPY.welcome.text, action: COPY.welcome.action, actionId: 'welcome-start' })}</div>` : '';
   const rows = steps.map((s) => `
     <button class="setup-step ${s.done ? 'is-done' : ''}" data-setup-step="${s.key}">
       <span class="setup-tick">${s.done ? '✓' : ''}</span>
       <span>${s.label}</span>
     </button>`).join('');
-  return `
+  return welcome + `
     <div class="card setup-card">
       <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-mid);">Get set up · ${steps.length - remaining}/${steps.length}</div>
+        <div style="font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-mid);">${escapeHtml(COPY.setup.heading)} · ${steps.length - remaining}/${steps.length}</div>
         <button class="btn btn-sm btn-ghost" id="setup-dismiss" title="Hide this checklist for this business">Hide</button>
       </div>
       <div class="setup-steps">${rows}</div>
@@ -6143,6 +6351,11 @@ function renderFinances() {
 }
 
 function renderFinancesOverviewParts() {
+  // Before anything has been invoiced or spent, one empty state stands in for
+  // six cards of zeros (Brief 6).
+  const anything = (state.documents || []).some((d) => (d.type === 'invoice' || d.type === 'credit') && d.status !== 'draft')
+    || (state.expenses || []).length;
+  if (!anything) return { actions: '', subtitle: '', body: `<div class="card">${emptyState({ ...COPY.empty.finances, actionId: 'fin-empty-invoice' })}</div>` };
   const ty = taxYearFor(todayISO());
   const today = todayISO();
   const thisMonthYM = ymOf(today);
@@ -6469,6 +6682,17 @@ function vatPeriodDetail(pStart, pEnd, basis) {
 function renderVatViewParts() {
   const reg = (activeEntity() && activeEntity().company && activeEntity().company.vat) || '';
   const periods = vatPeriods(vatPeriodCount).map((p) => ({ ...p, ...vatForPeriod(p.start, p.end, financesBasis) }));
+  // Nothing to report yet: say so plainly, not a table of zeros (Brief 6).
+  const vatOff = vatRate() <= 0;
+  const anyVat = (state.documents || []).some((d) => (d.type === 'invoice' || d.type === 'credit') && d.status !== 'draft' && docHasVat(d))
+    || (state.expenses || []).some((e) => inputVatOf(e) > 0);
+  if (vatOff || !anyVat) {
+    return {
+      actions: '',
+      subtitle: vatOff ? '' : `${vatCycleLabel()} cycle · ${baseCcy()} @ ${vatRate()}%`,
+      body: `<div class="card">${emptyState(vatOff ? { ...COPY.empty.vatOff, actionId: 'vat-set-rate' } : COPY.empty.vat)}</div>`,
+    };
+  }
   const rows = periods.map((p, i) => `
     <tr class="row-clickable" data-vat-idx="${i}">
       <td><strong>${escapeHtml(p.label)}</strong><div class="text-sm text-mid">${fmtDate(p.start)} – ${fmtDate(p.end)}</div>${p.missingFx > 0 ? `<div class="text-sm" style="color:var(--danger);">${p.missingFx} doc${p.missingFx === 1 ? '' : 's'} missing FX rate</div>` : ''}</td>
@@ -7392,7 +7616,9 @@ function renderExpensesView() {
       </td>
     </tr>
   `;
-  }).join('') : `<tr><td colspan="6" class="empty" style="padding:32px 16px;">No expenses recorded. Add one by hand, or drop a bank statement into Reconcile and they'll be suggested automatically.<br/><span style="display:inline-flex;gap:8px;margin-top:12px;"><button class="btn btn-primary btn-sm" id="empty-exp-add">+ Add expense</button><button class="btn btn-sm" id="empty-exp-reconcile">Go to Reconcile</button></span></td></tr>`;
+  }).join('') : `<tr><td colspan="6" class="empty-cell">${(state.expenses || []).length
+    ? emptyState({ ...COPY.empty.filtered, actionId: 'exp-clear-filters', quiet: true })
+    : emptyState({ ...COPY.empty.expenses, actionId: 'empty-exp-add', secondaryId: 'empty-exp-reconcile' })}</td></tr>`;
 
   return `
     <div class="page-head">
@@ -9666,7 +9892,7 @@ function renderProjects() {
     <div class="doc-list">
       <table>
         <thead><tr><th>Project</th><th>Client</th><th>Dates</th><th>Status</th><th class="amount">Budget total</th><th class="amount">Planned margin</th><th class="amount">Invoiced</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="7" class="empty" style="padding:32px 16px;">No projects yet. A project holds a budget (billables + costs), and pulls in its linked invoices, expenses and tracked time so you can see profitability at a glance. Keep it to three lines or build a full film budget — both work.<br/><button class="btn btn-primary btn-sm" id="pj-empty-new" style="margin-top:12px;">+ Create your first project</button></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="7" class="empty-cell">${emptyState({ ...COPY.empty.projects, actionId: 'pj-empty-new' })}</td></tr>`}</tbody>
       </table>
     </div>`;
 }
@@ -10148,7 +10374,11 @@ function filteredDocs() {
 function renderDocTable(docs, opts = {}) {
   if (!docs.length) {
     // Filter/search produced nothing vs. genuinely no documents yet.
-    if (state.documents.length) return '<div class="card empty">No documents match this filter.</div>';
+    if (state.documents.length) {
+      // An empty Unpaid tab is good news, not a filter problem.
+      if (docFilter === 'unpaid' && !docSearch) return `<div class="card">${emptyState({ title: COPY.empty.unpaid, quiet: true })}</div>`;
+      return `<div class="card">${emptyState({ ...COPY.empty.filtered, actionId: 'doc-clear-filters', quiet: true })}</div>`;
+    }
     return `
       <div class="card empty" style="padding:36px 24px;">
         <div style="margin-bottom:6px;">No documents yet.</div>
@@ -10743,7 +10973,7 @@ function renderClientDetail() {
     ${docTable('Credit notes', led.credits)}
     ${projectsCard}
     ${timeCard}
-    ${!led.invoices.length && !led.quotes.length && !led.credits.length ? '<div class="card"><div class="text-sm text-mid">No documents for this client yet.</div></div>' : ''}
+    ${!led.invoices.length && !led.quotes.length && !led.credits.length ? `<div class="card">${emptyState({ ...COPY.empty.clientPage, actionId: 'cl-empty-invoice', secondaryId: 'cl-empty-quote' })}</div>` : ''}
   `;
 }
 
@@ -10792,7 +11022,9 @@ function renderClients() {
   `;
 }
 
-function openClientModal(client) {
+// opts.onSaved(client): called instead of re-rendering, e.g. by the document
+// editor when a client is created from its client list.
+function openClientModal(client, opts) {
   if (!client && !ensureCanCreate()) return;
   const isNew = !client;
   client = client || { id: uid('cl-'), name: '', addr: '', email: '', contact: '', vat: '' };
@@ -10885,7 +11117,8 @@ function openClientModal(client) {
     else state.clients.push(updated);
     await saveState();
     closeModal();
-    render();
+    if (opts && opts.onSaved) opts.onSaved(updated);
+    else render();
     toast(isNew ? 'Client created' : 'Client saved');
   });
 }
@@ -10900,6 +11133,8 @@ function openDocEditor(docId, defaultType, presetClientId) {
   // Creating something NEW is the only gated action (editing/viewing existing
   // documents always works, even on an expired licence).
   if (!docId && !ensureCanCreate()) return;
+  // A document carries the business's details, so they come first (Brief 6).
+  if (!docId && !requireCompanyDetails(`create ${defaultType === 'quote' ? 'a quote' : defaultType === 'credit' ? 'a credit note' : 'an invoice'}`)) return;
   let doc;
   if (docId) {
     const found = state.documents.find((d) => d.id === docId);
@@ -11018,7 +11253,7 @@ function renderDocEditor() {
       <div class="form-grid">
         <div class="field">
           <label>Client</label>
-          <select data-df="clientId">${clientOpts || '<option value="">— add a client first —</option>'}</select>
+          <select data-df="clientId">${clientOpts || '<option value="">— no clients yet —</option>'}<option value="__new__">${escapeHtml(COPY.newClientOption)}</option></select>
         </div>
         <div class="field">
           <label>Project</label>
@@ -11210,6 +11445,22 @@ function bindEditorEvents() {
       const f = el.dataset.df;
       let v = el.type === 'checkbox' ? el.checked : el.value;
       const before = editingDoc[f];
+      // "+ New client…" in the client list: create one here and pick it,
+      // without leaving the document (Brief 6).
+      if (f === 'clientId' && v === '__new__') {
+        el.value = before || '';
+        openClientModal(null, { onSaved: (c) => {
+          editingDoc.clientId = c.id;
+          if (c.currency) {
+            editingDoc.currency = c.currency;
+            const match = state.settings.banking.find((b) => b.currency === c.currency);
+            if (match) editingDoc.bankId = match.id;
+          }
+          applyClientTerms(editingDoc, before);
+          renderDocEditor();
+        } });
+        return;
+      }
       editingDoc[f] = v;
       const printed = document.getElementById('ed-terms-printed');
       if (printed && (f === 'terms' || f === 'date' || f === 'dueDate' || f === 'expiry')) {
@@ -12279,13 +12530,13 @@ function requireCompanyDetails(action) {
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Not now</button>
-          <button class="btn btn-primary" id="fix-company">Go to Company settings</button>
+          <button class="btn btn-primary" id="fix-company">${escapeHtml(COPY.gate.action)}</button>
         </div>
       </div>
     </div>
   `);
   const fix = document.getElementById('fix-company');
-  if (fix) fix.addEventListener('click', () => { closeModal(); setRoute('settings'); });
+  if (fix) fix.addEventListener('click', () => goToSetting('company'));
   return false;
 }
 
@@ -12432,7 +12683,7 @@ function renderSettingsBusiness() {
       <button class="btn btn-sm mt-12" id="entity-add-btn">+ Add business</button>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" data-focus-id="company">
       <h3>Company <span class="text-muted" style="font-size:13px;font-weight:400;">· ${escapeHtml((activeEntity() && activeEntity().name) || '')}</span></h3>
       <div class="form-grid">
         <div class="field"><label>Name</label><input data-cs="name" value="${escapeHtml(co.name)}" /></div>
@@ -12452,7 +12703,7 @@ function renderSettingsBusiness() {
             ${SUPPORTED_CURRENCIES.map((c) => `<option value="${c}" ${c === baseCcy() ? 'selected' : ''}>${c} (${SYM[c] || c})</option>`).join('')}
           </select>
         </div>
-        <div class="field">
+        <div class="field" data-focus-id="vat">
           <label>VAT / sales tax % <span class="text-muted">(0 if not registered)</span></label>
           <input data-cs="vatPercent" type="number" step="any" min="0" value="${vatRate()}" />
         </div>
@@ -12476,7 +12727,7 @@ function renderSettingsBusiness() {
       <div class="text-sm text-mid" style="margin-top:10px;">Base currency is what this business's dashboard and finance reports convert everything into — its new invoices default to it too. VAT applies to invoices in the base currency at the rate above (foreign-currency sales are treated as zero-rated); set 0% if this business isn't VAT/tax registered. Each business can use different values.</div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" data-focus-id="terms">
       <h3>Terms</h3>
       <div class="form-grid">
         <div class="field">
@@ -12495,7 +12746,7 @@ function renderSettingsBusiness() {
       <div class="text-sm text-mid" style="margin-top:10px;">Used on new invoices and quotes. A client can have its own (Clients → edit a client). Write <strong>[payment days]</strong>, <strong>[due date]</strong> or <strong>[expiry date]</strong> and each document fills in its own. Documents you've already created keep the terms they have.</div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" data-focus-id="logo">
       <h3>Logo</h3>
       <div class="row-flex" style="align-items:flex-start;">
         <div class="logo-preview" id="logo-preview">
@@ -12524,7 +12775,7 @@ function renderSettingsBusiness() {
       <div class="text-sm text-mid" style="margin-top:10px;">Next invoice will be numbered <strong>${escapeHtml(docNumber({ type: 'invoice', number: state.settings.nextInv }))}</strong>. Continuing from another tool? Set the prefix and next number to match your existing scheme.</div>
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" data-focus-id="banking">
       <h3>Banking</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">When you change currency on a document, the matching account is auto-selected.</div>
       ${banking.map((b, i) => `
@@ -12647,7 +12898,7 @@ function renderSettingsAccount() {
           <span>Keep "Created with ${escapeHtml(APP_BRAND_NAME)}" on my documents <span class="text-muted">— optional; helps others find the app (and counts toward referral rewards)</span></span>
         </label>
       </div>` : ''}
-      <div class="text-sm text-muted" style="margin-top:10px;">Your licence is verified on your device — no account, and nothing about your invoices is ever sent to us.</div>
+      <div class="text-sm text-muted" style="margin-top:10px;">Your licence is verified on your device, with no account. We never see your invoices: the backup we keep is encrypted on this device first.</div>
     </div>` : ''}
 
     <div class="settings-section">
@@ -12661,7 +12912,7 @@ function renderSettingsAccount() {
       <div class="text-sm" style="color:#b4690e;">Live sync isn't available in this browser — ${syncSupport().why}. Update the browser to use it, or move data with <strong>Merge from backup</strong> below (works everywhere).</div>`}
     </div>
 
-    <div class="settings-section">
+    <div class="settings-section" data-focus-id="backup">
       <h3>Server backup</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">An encrypted copy, kept for you. It is encrypted on this device with a key we never receive, so we cannot open it. Browsers delete stored data: Safari clears it after 7 days without opening the app, and &ldquo;clear cookies and site data&rdquo; wipes it in every browser.</div>
       <div id="cloud-status" class="text-sm text-mid" style="margin-bottom:12px;">Checking&hellip;</div>
@@ -12670,6 +12921,7 @@ function renderSettingsAccount() {
         <button class="btn" id="cloud-now">Back up now</button>
         <button class="btn" id="cloud-restore">Restore from backup</button>
         <button class="btn btn-danger btn-sm" id="cloud-off" title="Stop backing up from this device">Turn off on this device</button>
+        <button class="btn btn-danger btn-sm" id="cloud-delete" title="Delete every copy we hold">Delete my backup</button>
       </div>
     </div>
 
@@ -12687,7 +12939,7 @@ function renderSettingsAccount() {
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
         <div id="storage-status" class="text-sm text-mid">Checking storage…</div>
         <button class="btn btn-sm" id="storage-persist" style="margin-top:8px;display:none;">Make storage persistent</button>
-        <div class="text-sm text-muted" style="margin-top:8px;line-height:1.5;">Your data lives only in this browser. "Persistent" storage stops the browser from auto-clearing it if your disk gets full — but it can't survive you choosing "Clear browsing data" for this site. The real safety net is a backup: download one regularly, especially before clearing anything.</div>
+        <div class="text-sm text-muted" style="margin-top:8px;line-height:1.5;">Your data lives in this browser, encrypted. "Persistent" storage stops the browser clearing it when your disk fills up, but not if you choose "Clear browsing data" for this site. Server backup is what brings it back: on a new device or after clearing, choose Restore from backup on the lock screen.</div>
       </div>
     </div>
   `;
@@ -12706,7 +12958,7 @@ function renderSettingsHelp() {
         <details><summary>What happens if I forget my master password?</summary><div>Use your <strong>recovery phrase</strong> — the 12 words you saved when setting up (Settings → Security if you haven't yet). On the lock screen choose "Forgot password — use recovery phrase", enter the words, and set a new password. Without that phrase there is no way back in: your data is encrypted with a key only you hold, so nobody — including us — can decrypt it, and your backups are sealed with the same password. Set up a phrase now if you haven't.</div></details>
         <details><summary>Why isn't there a "reset my password" email?</summary><div>Because we never hold your key. A reset link only works if the company can decrypt your data on your behalf — which would mean we could read your books, and so could anyone who breached us. The recovery phrase gives you the same safety net without handing anyone else access.</div></details>
         <details><summary>Where is my data stored?</summary><div>On this device, encrypted with a key only you hold. With server backup on (it is by default once you confirm your email), an encrypted copy is also kept on our server — it is sealed on your device before it leaves, so we hold it but can never read it. Beyond that, Simpl only connects to the internet for exchange rates, update checks, your licence, and feedback you choose to send. The personal details we hold are your name, email and licence — never your invoices, clients or figures in a form anyone can read.</div></details>
-        <details><summary>How do backups work?</summary><div>There are two kinds, and both open with your master password <em>or</em> your recovery phrase. <strong>Server backup</strong> (Settings → Account → Server backup) is on by default once you confirm a six-digit code: an encrypted copy is sent within a minute of every change, and you can restore it on any device by confirming your email again. Licensed accounts keep a restore point for each of their last 30 days with backups (7 on trial). <strong>Local backup</strong> (Settings → Account → Local backup) downloads an encrypted file for you to keep — useful as a second copy, or to move to a new device without the internet.</div></details>
+        <details><summary>How do backups work?</summary><div>There are two kinds, and both open with your master password <em>or</em> your recovery phrase. <strong>Server backup</strong> (Settings → Account → Server backup) is on by default once you confirm a six-digit code: an encrypted copy is sent within a minute of every change, and on a new device or after clearing your browser you choose <strong>Restore from backup</strong> on the lock screen, confirm your email with a code, and open it with your password or recovery phrase. Licensed accounts keep a restore point for each of their last 30 days with backups (7 on trial). <strong>Local backup</strong> (Settings → Account → Local backup) downloads an encrypted file for you to keep — useful as a second copy, or to move to a new device without the internet.</div></details>
         <details><summary>How do updates work?</summary><div>Automatically. When a new version is out you'll see an "update available" note — reloading puts you on the latest version with all your data intact.</div></details>
         <details><summary>Can I use it on my phone?</summary><div>Yes — open the app link in Safari (iPhone) or Chrome (Android) and choose "Add to Home Screen" / "Install app". Note that data is per device: use a backup to move it across.</div></details>
         <details><summary>Does it work for my country's VAT and currency?</summary><div>Base currency, VAT rate, VAT cycle and tax-year start are all configurable per business (Settings → Company). Set VAT % to 0 if you're not registered.</div></details>
@@ -12893,6 +13145,9 @@ function bindSettingsEvents() {
   if (cloudNowBtn) cloudNowBtn.style.display = on ? '' : 'none';
   if (cloudRestoreBtn) cloudRestoreBtn.style.display = on ? '' : 'none';
   if (cloudOffBtn) cloudOffBtn.style.display = on ? '' : 'none';
+  const cloudDeleteBtn = host.querySelector('#cloud-delete');
+  if (cloudDeleteBtn) cloudDeleteBtn.style.display = on ? '' : 'none';
+  if (cloudDeleteBtn) cloudDeleteBtn.addEventListener('click', () => confirmDeleteServerBackup());
   if (cloudEnrolBtn) cloudEnrolBtn.addEventListener('click', () => openCloudEnrolModal());
   if (cloudNowBtn) cloudNowBtn.addEventListener('click', (e) => withBusy(e.currentTarget, 'Backing up\u2026', async () => { await runCloudBackup({ silent: false }); }));
   if (cloudRestoreBtn) cloudRestoreBtn.addEventListener('click', () => openCloudRestoreModal());
@@ -13223,6 +13478,8 @@ function closeModal() {
 function escClose(e) { if (e.key === 'Escape') closeModal(); }
 
 function bindViewEvents() {
+  bindEmptyStateActions();
+  applyPendingFocus();
   // Common: row clicks
   document.querySelectorAll('[data-row-id]').forEach((row) => {
     row.addEventListener('click', (e) => {
@@ -13350,9 +13607,10 @@ function bindViewEvents() {
     document.querySelectorAll('[data-setup-step]').forEach((el) => el.addEventListener('click', () => {
       const step = setupChecklistSteps().find((s) => s.key === el.dataset.setupStep);
       if (!step) return;
-      if (step.action === 'new-invoice') openDocEditor(null, 'invoice');
-      else setRoute(step.route);
+      runSetupStep(step);
     }));
+    const ws = document.getElementById('welcome-start');
+    if (ws) ws.addEventListener('click', () => { const next = setupChecklistSteps().find((x) => !x.done); if (next) runSetupStep(next); });
     const sd = document.getElementById('setup-dismiss');
     if (sd) sd.addEventListener('click', async () => {
       state.settings.setupDismissed = true;
@@ -14963,7 +15221,7 @@ function installSnoozed() {
   } catch (e) { return false; }
 }
 function snoozeInstall() {
-  try { localStorage.setItem(INSTALL_SNOOZE_STORE, String(Date.now() + 24 * 60 * 60 * 1000)); } catch (e) {}
+  try { localStorage.setItem(INSTALL_SNOOZE_STORE, String(Date.now() + 30 * 24 * 60 * 60 * 1000)); } catch (e) {}
 }
 
 function installDismissed() {
@@ -15017,9 +15275,13 @@ function refreshInstallUi() {
 
   if (atRisk) {
     // Consequence before instruction: the stakes are the user's whole ledger.
-    if (label) label.textContent = 'Safari deletes stored data after 7 days without opening a site. Install ' + APP_BRAND_NAME + ' and it stops.';
+    // Backed up, a cleared browser means a restore rather than a loss, so this
+    // informs rather than alarms (Brief 4).
+    if (label) label.textContent = cloudEnrolled()
+      ? `Install ${APP_BRAND_NAME} for the smoothest experience. Safari clears site data after seven days without a visit; your data is backed up either way, but installed you won't need to restore it.`
+      : `Safari clears site data after seven days without a visit. Install ${APP_BRAND_NAME}, and turn on backup, so a cleared browser never costs you your records.`;
     if (go) go.textContent = 'Show me how';
-    if (later) { later.textContent = 'Tomorrow'; later.title = 'Remind me tomorrow'; later.classList.add('is-text'); }
+    if (later) { later.textContent = 'Not now'; later.title = 'Not now'; later.classList.add('is-text'); }
   } else {
     if (label) label.textContent = `Add ${APP_BRAND_NAME} to your apps — it opens in its own window and works offline.`;
     if (go) go.textContent = 'Install';
@@ -15060,7 +15322,7 @@ function openIosInstallModal() {
   // "Add to Dock" on macOS inherits it is undocumented, so we don't claim it.
   const footNote = mac
     ? `Apple documents this exemption for iPhone and iPad home-screen apps. On the Mac it is not documented either way, so keep downloading a local backup as well.`
-    : `Installing is the only thing Apple documents as exempt from the 7-day deletion. Your data still lives on this device, so keep downloading a local backup too.`;
+    : `Installing is the only thing Apple documents as exempt from the 7-day deletion. With server backup on, a cleared browser means a restore rather than a loss.`;
 
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
@@ -15468,6 +15730,52 @@ function openCloudConflictModal(server, pendingBlob) {
 
 /* ---- restore ---- */
 
+// Delete every copy we hold, after one clear question. Used by Settings and the lapse prompt.
+/* When a trial or licence ends: once per lapse, the choices someone leaving
+   needs — take their records, or delete what we hold — and what happens if
+   they do nothing (Brief 4; privacy policy, Retention). */
+const LAPSE_OFFER_STORE = 'seed-lapse-offer-v1';
+function maybeOfferLapseChoices() {
+  const st = licenceState && licenceState.state;
+  if (st !== 'expired' && st !== 'trial-expired') return;
+  if (currentRoute !== 'dashboard' || document.querySelector('.modal-overlay')) return;
+  const key = st + ':' + (licenceState.expiry || licenceState.trialEnd || '');
+  try { if (localStorage.getItem(LAPSE_OFFER_STORE) === key) return; localStorage.setItem(LAPSE_OFFER_STORE, key); } catch (e) { return; }
+  const trial = st === 'trial-expired';
+  const backedUp = cloudEnrolled();
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head"><div class="ttl">${trial ? 'Your free trial has ended' : 'Your licence has expired'}</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <p class="text-sm text-mid" style="line-height:1.6;margin:0 0 10px;">Everything you've made stays here: open it, print it and export it whenever you like. To create new invoices and quotes, ${trial ? 'buy a licence' : 'renew'}.</p>
+          <p class="text-sm text-mid" style="line-height:1.6;margin:0 0 10px;">If you're moving on, take your records with you: a backup file you can restore later, or an export for your accountant.</p>
+          ${backedUp ? `<p class="text-sm text-mid" style="line-height:1.6;margin:0;">We keep your encrypted server backup for six months, so you can come back and restore it, then delete it after emailing you. You can delete it now instead.</p>` : ''}
+        </div>
+        <div class="modal-foot" style="flex-wrap:wrap;gap:8px;">
+          ${backedUp ? `<button class="btn btn-danger btn-sm" id="lapse-delete">Delete server backup</button>` : ''}
+          <button class="btn" id="lapse-backup">Download a backup</button>
+          <button class="btn" id="lapse-export">Export for accountant</button>
+          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">${trial ? 'Buy a licence' : 'Renew'}</a>
+        </div>
+      </div>
+    </div>`);
+  document.getElementById('lapse-backup').addEventListener('click', () => { exportBackup(); });
+  document.getElementById('lapse-export').addEventListener('click', () => { closeModal(); openAccountantExportModal(); });
+  const del = document.getElementById('lapse-delete');
+  if (del) del.addEventListener('click', () => confirmDeleteServerBackup());
+}
+
+async function confirmDeleteServerBackup() {
+  if (!confirm('Delete your server backup?\n\nEvery copy we hold is deleted, from every device. Your data on this device is not touched. This cannot be undone.')) return false;
+  try { await cloudDeleteBackup(); }
+  catch (ex) { alert('Could not delete the backup. Check your connection and try again.'); return false; }
+  closeModal();
+  render();
+  toast('Server backup deleted');
+  return true;
+}
+
 async function openCloudRestoreModal() {
   let latest;
   try { latest = await cloudLatest(); }
@@ -15810,6 +16118,10 @@ async function showLockForm(returningUser) {
   const pwdParts = [document.getElementById('lock-pwd'), document.querySelector('label[for="lock-pwd"]')];
   pwdParts.forEach((el) => { if (el) el.style.display = lockMode === 'unreadable' ? 'none' : ''; });
   if (earlierBtn) earlierBtn.style.display = 'none';
+  const restoreBtn = document.getElementById('lock-restore');
+  // A device with no vault is where a backup comes home: a new laptop, a
+  // cleared browser.
+  if (restoreBtn) restoreBtn.style.display = lockMode === 'create' ? '' : 'none';
   if (lockMode === 'unreadable') {
     sub.textContent = VAULT_UNREADABLE_MSG;
     confirmWrap.style.display = 'none';
@@ -15820,12 +16132,12 @@ async function showLockForm(returningUser) {
   // Always offered, never conditional on what storage reports: when storage is
   // failing is exactly when the link is needed, and the screen behind it says
   // what this device can and cannot see.
-  if (earlierBtn) earlierBtn.style.display = 'inline';
+  if (earlierBtn) earlierBtn.style.display = '';
   if (returningUser) {
     sub.textContent = 'Enter your master password to unlock.';
     confirmWrap.style.display = 'none';
     btn.textContent = 'Unlock';
-    if (resetBtn) resetBtn.style.display = 'inline';
+    if (resetBtn) resetBtn.style.display = '';
     // The hint is stored unencrypted precisely so it can be read here.
     const hint = getPwdHint();
     if (hintEl) {
@@ -15836,7 +16148,7 @@ async function showLockForm(returningUser) {
     if (recBtn) {
       let has = false;
       try { const b = await vaultGet(); has = b ? vaultHasRecovery(b) : false; } catch (e) { noteQuietError('lock screen vault check', e); }
-      recBtn.style.display = has ? 'inline' : 'none';
+      recBtn.style.display = has ? '' : 'none';
     }
   } else {
     sub.textContent = 'Set a master password to encrypt your data.';
@@ -15850,6 +16162,108 @@ async function showLockForm(returningUser) {
 }
 
 document.getElementById('lock-recovery').addEventListener('click', () => openRecoveryUnlockModal());
+document.getElementById('lock-restore').addEventListener('click', () => openLockRestoreModal());
+
+/* Restore from backup, from the lock screen of a device with no vault (a new
+   laptop, a cleared browser). Proves the email with a code, fetches the newest
+   backup, and opens it with the password it was made with or the recovery
+   phrase. The restored vault keeps its own key and recovery phrase; opening it
+   with the phrase asks for a new password, like the recovery flow. */
+function openLockRestoreModal() {
+  const ob = getOnboarding() || {};
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head"><div class="ttl">Restore from backup</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div id="lr-step1">
+            <div class="text-sm text-mid" style="margin-bottom:12px;line-height:1.6;">Enter the email you use with Simpl. We'll send a six-digit code, then bring your backup to this device.</div>
+            <div class="field"><label>Email</label><input id="lr-email" type="email" autocomplete="email" value="${escapeHtml(ob.email || '')}" /></div>
+          </div>
+          <div id="lr-step2" style="display:none;">
+            <div class="text-sm text-mid" style="margin-bottom:12px;">We've emailed you a code. It expires in 10 minutes.</div>
+            <div class="field"><label>Six-digit code</label><input id="lr-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" /></div>
+          </div>
+          <div id="lr-step3" style="display:none;">
+            <div class="text-sm text-mid" id="lr-found" style="margin-bottom:12px;line-height:1.6;"></div>
+            <div class="field"><label>The password you used for this backup, or your 12-word recovery phrase</label>
+              <textarea id="lr-cred" rows="2" autocomplete="off" spellcheck="false" style="width:100%;"></textarea></div>
+            <div id="lr-newpwd" style="display:none;">
+              <div class="field mt-12"><label>Choose a new password for this device</label><input id="lr-p1" type="password" autocomplete="new-password" /></div>
+              <div class="field mt-12"><label>Confirm new password</label><input id="lr-p2" type="password" autocomplete="new-password" /></div>
+            </div>
+          </div>
+          <div class="err" id="lr-err"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="lr-go">Send me a code</button>
+        </div>
+      </div>
+    </div>`);
+  const $ = (id) => document.getElementById(id);
+  let step = 1, latest = null;
+  // A recovery phrase means a new password for this device; show those boxes as soon as it looks like one.
+  $('lr-cred').addEventListener('input', () => { $('lr-newpwd').style.display = recoveryPhraseShape($('lr-cred').value).count >= 12 ? '' : 'none'; });
+  $('lr-go').addEventListener('click', (e) => withBusy(e.currentTarget, step === 1 ? 'Sending…' : step === 2 ? 'Checking…' : 'Restoring…', async () => {
+    const err = $('lr-err');
+    err.textContent = '';
+    const email = $('lr-email').value.trim().toLowerCase();
+    if (step === 1) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'That does not look like an email address.'; return; }
+      try {
+        const sent = await cloudRequestCode(email);
+        if (sent && sent.devCode) $('lr-code').value = sent.devCode;   // dev copy only
+      } catch (ex) {
+        err.textContent = ex && ex.message === 'too_soon' ? 'A code was just sent. Check your inbox, or try again in a minute.' : 'Could not send the code. Check your connection and try again.';
+        return;
+      }
+      step = 2; $('lr-step1').style.display = 'none'; $('lr-step2').style.display = ''; $('lr-go').textContent = 'Continue'; $('lr-code').focus();
+      return;
+    }
+    if (step === 2) {
+      try { await cloudVerifyCode(email, $('lr-code').value); }
+      catch (ex) { err.textContent = 'That code did not work. Check it, or go back and send a new one.'; return; }
+      try { latest = await cloudLatest(); } catch (ex) { err.textContent = 'Could not reach your backup. Check your connection and try again.'; return; }
+      if (!latest) { err.textContent = 'There is no backup for this email yet. Create a new vault instead.'; cloudForget(); return; }
+      const when = latest.createdAt ? new Date(latest.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+      const c = latest.counts || {};
+      $('lr-found').innerHTML = `Found your backup from <strong>${escapeHtml(when)}</strong>: ${Number(c.invoices) || 0} invoices, ${Number(c.clients) || 0} clients, ${Number(c.expenses) || 0} expenses.`;
+      step = 3; $('lr-step2').style.display = 'none'; $('lr-step3').style.display = ''; $('lr-go').textContent = 'Restore'; $('lr-cred').focus();
+      return;
+    }
+    // Step 3: open it.
+    const raw = $('lr-cred').value;
+    const isPhrase = recoveryPhraseShape(raw).count >= 12;
+    let opened = null, password = raw;
+    if (isPhrase) {
+      const p1 = $('lr-p1').value, p2 = $('lr-p2').value;
+      if (p1.length < 8) { err.textContent = 'Choose a new password of at least 8 characters.'; return; }
+      if (p1 !== p2) { err.textContent = 'The new passwords do not match.'; return; }
+      opened = await openVaultBlob(latest.text, normaliseRecoveryPhrase(raw));
+      password = p1;
+    } else {
+      opened = await openVaultBlob(latest.text, raw);
+    }
+    if (!opened) { err.textContent = isPhrase ? 'That phrase does not open this backup.' : 'That password does not open this backup. Try your recovery phrase instead.'; return; }
+    state = opened.data;
+    currentDek = opened.rawDek;
+    currentWrappers = opened.wrappers || [];
+    migrateState();
+    installEntityAccessors();
+    if (isPhrase) {
+      currentWrappers = currentWrappers.filter((w) => w.type !== 'password');
+      currentWrappers.unshift(await wrapDek('password', password, currentDek));
+    }
+    currentPassword = password;
+    cloudSet(CLOUD_VERSION_STORE, latest.version);   // this device now holds the newest copy
+    await saveState();
+    closeModal();
+    await enterApp();
+    fetchFxRates();
+    toast('Restored — welcome back');
+  }));
+}
 document.getElementById('lock-earlier').addEventListener('click', () => openEarlierVaultModal());
 
 /* Every vault this device holds: the one in use, any the storage safety net set
@@ -16110,7 +16524,9 @@ async function enterApp() {
   } else {
     setTimeout(maybeOfferRecurring, 600); // offer this month's recurring drafts
   }
-  setTimeout(showBackupReminder, 1200); // gentle, after the app settles
+  // No interrupting "download a backup" reminder any more (Brief 4): server
+  // backup covers it, and Settings shows when a local backup was last made.
+  setTimeout(maybeOfferLapseChoices, 1500);
   // Exact exchange rates for foreign-currency records still on an estimate,
   // including everything from before v1.41 — fetched once, then cached.
   setTimeout(() => { refreshFxHistory().catch((e) => noteQuietError('exchange rates', e)); }, 3000);
