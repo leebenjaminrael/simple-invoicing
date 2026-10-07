@@ -3227,7 +3227,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.42.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.42.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3639,7 +3639,7 @@ function refreshLicenceNotice() {
     textEl.textContent = 'Your licence has expired — your data is safe, but you need to renew to create new documents.';
     linkEl.textContent = 'Renew your licence';
   }
-  linkEl.href = BUY_URL;
+  linkEl.href = buyUrl();
   bar.style.display = 'flex';
 }
 
@@ -3828,8 +3828,8 @@ function openPaywallModal(reason) {
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Carry on in read-only</button>
-          <a class="btn btn-primary" href="${BUY_URL}" target="_blank" rel="noopener" style="text-decoration:none;">
-            ${trial ? 'Buy a licence' : 'Renew'} — $100/year
+          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">
+            ${trial ? 'Buy a licence' : 'Renew'}
           </a>
         </div>
       </div>
@@ -12636,7 +12636,7 @@ function renderSettingsAccount() {
           <button class="btn btn-primary btn-sm" id="lic-apply">Apply licence</button>
           ${licenceState.state === 'licensed'
             ? `<button class="btn btn-sm btn-ghost" id="lic-remove">Remove</button>`
-            : `<a class="btn btn-sm" href="${BUY_URL}" target="_blank" rel="noopener" style="text-decoration:none;">Buy a licence — $100/year</a>`}
+            : `<a class="btn btn-sm" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">Buy a licence</a>`}
         </div>
         <div class="err" id="lic-err"></div>
       </div>
@@ -16772,6 +16772,40 @@ function openFeedbackModal() {
   });
 }
 
+/* Where this person came from (Brief 3). The site's links carry campaign
+   labels — utm_source / utm_medium / utm_campaign — and a referral code
+   (ref) into the app. Most people buy days after the trial starts, from the
+   app, long after the landing page has gone, so the app keeps the FIRST set
+   it saw (plain localStorage: labels, not personal data, needed before the
+   vault exists), sends it with the sign-up, and adds it to the buy link so
+   checkout carries it too. */
+const ATTRIBUTION_STORE = 'simpl-attribution-v1';
+const ATTRIBUTION_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'ref'];
+function attrLabel(v) { return String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40); }
+function captureAttribution() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const seen = {};
+    for (const k of ATTRIBUTION_KEYS) { const v = attrLabel(params.get(k)); if (v) seen[k] = v; params.delete(k); }
+    if (!Object.keys(seen).length) return;
+    if (!localStorage.getItem(ATTRIBUTION_STORE)) localStorage.setItem(ATTRIBUTION_STORE, JSON.stringify({ ...seen, at: new Date().toISOString() }));
+    const q = params.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+  } catch (e) {}
+}
+function attributionParams() {
+  try {
+    const a = JSON.parse(localStorage.getItem(ATTRIBUTION_STORE) || '{}') || {};
+    const out = {};
+    for (const k of ATTRIBUTION_KEYS) { const v = attrLabel(a[k]); if (v) out[k] = v; }
+    return out;
+  } catch (e) { return {}; }
+}
+function buyUrl() {
+  const q = new URLSearchParams(attributionParams()).toString();
+  return q ? BUY_URL + (BUY_URL.includes('?') ? '&' : '?') + q : BUY_URL;
+}
+
 async function sendOnboarding(payload) {
   if (!ONBOARDING_ENDPOINT) return false; // not configured yet → keep as pending
   // Tell the licence Worker too, so the trial email sequence starts counting
@@ -16783,7 +16817,7 @@ async function sendOnboarding(payload) {
     fetch(`${LICENCE_API}/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: payload.name || '', email: payload.email || '' }),
+      body: JSON.stringify({ name: payload.name || '', email: payload.email || '', ...attributionParams() }),
     }).catch(() => {});
   } catch (e) {}
   try {
@@ -16843,6 +16877,7 @@ function showOnboarding() {
 let pendingSyncCode = null;
 
 (async function boot() {
+  captureAttribution();   // before anything rewrites the address bar
   // A #sync= link (from "Copy as link" on the other device) pre-fills the
   // join flow right after unlock. Strip it from the URL immediately.
   if (location.hash && location.hash.startsWith('#sync=')) {
