@@ -3338,7 +3338,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.43.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.43.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3701,6 +3701,25 @@ function trackChanges(s) {
    mode is off it is always {state:'unrestricted'} and every gate below is a
    no-op, so the app behaves exactly as it did pre-v1.18. */
 let licenceState = { state: 'unrestricted', canCreate: true, showBranding: false };
+
+/* A renewal or a referral reward is a newer licence on our server. The app
+   asks for it after unlock — server backup's device token proves the email —
+   so it arrives without the customer pasting anything. Silent unless newer. */
+async function refreshLicenceFromServer() {
+  try {
+    if (!commercialActive() || !cloudEnrolled()) return;
+    const res = await cloudFetch('/licence/latest');
+    if (!res.ok) return;
+    const body = await res.json().catch(() => null);
+    if (!body || !body.licence) return;
+    const payload = await verifyLicence(body.licence);
+    if (!payload || !(payload.exp > ((licenceState && licenceState.expiry) || 0))) return;
+    localStorage.setItem(LICENCE_KEY_STORE, body.licence);
+    await refreshLicenceState();
+    render();
+    toast(`Your licence now runs until ${fmtDate(new Date(payload.exp).toISOString().slice(0, 10))}.`);
+  } catch (e) { noteQuietError('licence refresh', e); }
+}
 
 async function refreshLicenceState() {
   const active = commercialActive();
@@ -4185,6 +4204,10 @@ function committedIncomeZAR() {
   }
   return { total: round2(total), items, missingFx };
 }
+// An email address with an @ and at least one dot after it. Used by every
+// email field so they all accept and refuse the same things.
+function isValidEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim()); }
+
 function clientName(id) {
   const c = state.clients.find((x) => x.id === id);
   return c ? c.name : '—';
@@ -6156,10 +6179,14 @@ function renderWhatsNewCard() {
   </div>`;
 }
 // The full history, by date — Settings → Help & Security.
+// Settings → Help: the latest three changes as accordions (title first, the
+// detail on a tap), everything older folded into one "Earlier changes".
 function renderWhatsNewHistory() {
-  return CHANGELOG.map((rel) => `
-    <div class="text-sm text-muted" style="margin:14px 0 2px;">${fmtDate(rel.date)}</div>
-    ${rel.items.map(whatsNewItemHtml).join('')}`).join('');
+  const all = CHANGELOG.flatMap((rel) => rel.items.map((it) => ({ ...it, date: rel.date })));
+  const row = (it) => `<details><summary>${it.important ? '<span class="wn-flag">Worth knowing</span>' : ''}${escapeHtml(it.title)} <span class="text-muted" style="font-weight:400;">· ${fmtDate(it.date)}</span></summary><div>${escapeHtml(it.text)}${it.link ? `<div style="margin-top:6px;"><button class="wn-link" data-wn-go="${escapeHtml(it.link.to)}">${escapeHtml(it.link.label)} →</button></div>` : ''}</div></details>`;
+  const latest = all.slice(0, 3), older = all.slice(3);
+  return `<div class="faq" style="margin-top:10px;">${latest.map(row).join('')}
+    ${older.length ? `<details><summary>Earlier changes (${older.length})</summary><div class="faq" style="padding-left:12px;">${older.map(row).join('')}</div></details>` : ''}</div>`;
 }
 // Where each "Show me" link lands.
 function whatsNewGo(to) {
@@ -11112,6 +11139,7 @@ function openClientModal(client, opts) {
       termsQuote: get('termsQuote'),
     };
     if (!updated.name) { toast('Name is required'); return; }
+    if (updated.email && !isValidEmail(updated.email)) { toast('That email address doesn’t look right. It needs an @ and a dot, like name@studio.com.'); document.querySelector('[data-cf="email"]').focus(); return; }
     const idx = state.clients.findIndex((c) => c.id === client.id);
     if (idx >= 0) state.clients[idx] = updated;
     else state.clients.push(updated);
@@ -12506,7 +12534,7 @@ const REQUIRED_COMPANY_FIELDS = [
 function missingCompanyDetails() {
   const co = (state && state.settings && state.settings.company) || {};
   return REQUIRED_COMPANY_FIELDS
-    .filter(([key]) => !String(co[key] || '').trim())
+    .filter(([key]) => !String(co[key] || '').trim() || (key === 'email' && !isValidEmail(co[key])))
     .map(([, label]) => label);
 }
 
@@ -12695,7 +12723,7 @@ function renderSettingsBusiness() {
         <div class="field"><label>Business type <span class="text-muted">(for your accountant)</span></label>
           <select data-cs="businessType"><option value="">— not set —</option>${Object.entries(BUSINESS_TYPES).map(([k, v]) => `<option value="${k}" ${co.businessType === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
         <div class="field"><label>Income tax number <span class="text-muted">(optional)</span></label><input data-cs="incomeTaxNo" value="${escapeHtml(co.incomeTaxNo || '')}" /></div>
-        <div class="field"><label>Email</label><input data-cs="email" value="${escapeHtml(co.email || '')}" /></div>
+        <div class="field"><label>Email</label><input data-cs="email" type="email" autocomplete="email" value="${escapeHtml(co.email || '')}" /></div>
         <div class="field"><label>Phone</label><input data-cs="phone" value="${escapeHtml(co.phone || '')}" /></div>
         <div class="field">
           <label>Base currency <span class="text-muted">(this business's home currency)</span></label>
@@ -12801,7 +12829,7 @@ function renderSettingsMoney() {
   return `
     <div class="settings-section">
       <h3>Saved line items</h3>
-      <div class="text-sm text-mid" style="margin-bottom:12px;">Quick-insert these from the line-items section of the editor.</div>
+      <div class="text-sm text-mid" style="margin-bottom:12px;">Lines you use often, like a day rate or a standard service, with their description and price. In any invoice or quote, add one from the line items section with a single click instead of typing it again.</div>
       <div id="saved-items">
         ${saved.map((s, i) => `
           <div class="row-flex" style="margin-bottom:8px;">
@@ -12956,6 +12984,12 @@ function renderSettingsHelp() {
       <h3>Help &amp; FAQ</h3>
       <div class="faq">
         <details><summary>What happens if I forget my master password?</summary><div>Use your <strong>recovery phrase</strong> — the 12 words you saved when setting up (Settings → Security if you haven't yet). On the lock screen choose "Forgot password — use recovery phrase", enter the words, and set a new password. Without that phrase there is no way back in: your data is encrypted with a key only you hold, so nobody — including us — can decrypt it, and your backups are sealed with the same password. Set up a phrase now if you haven't.</div></details>
+        <details><summary>Simpl is asking me to create a new vault. Where is my data?</summary><div>Don't create one yet. On a new device, or after clearing your browser, choose <strong>Restore from backup</strong> on that screen: confirm your email with a code and open it with your password or recovery phrase. On the same device, try <strong>Recover an earlier vault on this device</strong> first. Only create a new vault once neither has found your data.</div></details>
+        <details><summary>What does Lock now do?</summary><div>It closes Simpl and clears your encryption key from memory, so nobody at your computer can open your records. Nothing is deleted: unlock with your master password and everything is there.</div></details>
+        <details><summary>Why am I asked to set up a recovery phrase?</summary><div>Because without one, your password is the only way into your data. Setting one up always <strong>creates a new</strong> 12-word phrase; Simpl never asks you to remember an old one. Write it down, type three of the words back to save it, and keep it somewhere safe. You can do this any time in Settings → Security.</div></details>
+        <details><summary>How do I move to a new computer?</summary><div>Make sure server backup is on (Settings → Server backup). On the new computer open Simpl, choose <strong>Restore from backup</strong>, confirm your email and open it with your password. Without server backup, download a backup file on the old computer and use Restore from backup in Settings on the new one.</div></details>
+        <details><summary>Something didn't work. How do I tell you?</summary><div>When an action fails, Simpl says so and offers <strong>Send details</strong>, which sends us the technical error and nothing from your records. You can also use Send feedback below. Either way it comes straight to me.</div></details>
+        <details><summary>Can different clients have different payment terms?</summary><div>Yes. Set your usual payment days and wording in Settings → Terms, then give any client its own in Clients → edit the client → Terms for this client. New invoices and quotes for them use it, and the due date follows.</div></details>
         <details><summary>Why isn't there a "reset my password" email?</summary><div>Because we never hold your key. A reset link only works if the company can decrypt your data on your behalf — which would mean we could read your books, and so could anyone who breached us. The recovery phrase gives you the same safety net without handing anyone else access.</div></details>
         <details><summary>Where is my data stored?</summary><div>On this device, encrypted with a key only you hold. With server backup on (it is by default once you confirm your email), an encrypted copy is also kept on our server — it is sealed on your device before it leaves, so we hold it but can never read it. Beyond that, Simpl only connects to the internet for exchange rates, update checks, your licence, and feedback you choose to send. The personal details we hold are your name, email and licence — never your invoices, clients or figures in a form anyone can read.</div></details>
         <details><summary>How do backups work?</summary><div>There are two kinds, and both open with your master password <em>or</em> your recovery phrase. <strong>Server backup</strong> (Settings → Account → Server backup) is on by default once you confirm a six-digit code: an encrypted copy is sent within a minute of every change, and on a new device or after clearing your browser you choose <strong>Restore from backup</strong> on the lock screen, confirm your email with a code, and open it with your password or recovery phrase. Licensed accounts keep a restore point for each of their last 30 days with backups (7 on trial). <strong>Local backup</strong> (Settings → Account → Local backup) downloads an encrypted file for you to keep — useful as a second copy, or to move to a new device without the internet.</div></details>
@@ -13027,6 +13061,12 @@ function bindSettingsEvents() {
       if (f === 'taxYearStartMonth') v = Number(v) || 3;
       if (f === 'defaultHourlyRate') v = Math.max(0, Number(v) || 0);
       if (f === 'paymentDays') v = Math.min(365, Math.max(0, Math.round(Number(v) || 0)));
+      if (f === 'email' && String(v).trim() && !isValidEmail(v)) {
+        toast('That email address doesn’t look right. It needs an @ and a dot, like name@studio.com.');
+        el.value = (state.settings.company && state.settings.company.email) || '';
+        el.focus();
+        return;
+      }
       if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
       if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate','paymentDays','termsInvoice','termsQuote'].includes(f)) state.settings[f] = v;
       else {
@@ -15551,7 +15591,7 @@ function openCloudEnrolModal(prefill, opts) {
   } catch (e) {}
 
   // Say "we've emailed you" only when that is about to be true.
-  const autoSend = !!(opts && opts.auto && opts.send !== false && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+  const autoSend = !!(opts && opts.auto && opts.send !== false && isValidEmail(email));
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:440px;">
@@ -15586,7 +15626,7 @@ function openCloudEnrolModal(prefill, opts) {
   const err = () => document.getElementById('cloud-enrol-err');
   document.getElementById('cloud-send').addEventListener('click', (e) => withBusy(e.currentTarget, 'Sending…', async () => {
     const v = (document.getElementById('cloud-email').value || '').trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { err().textContent = 'That does not look like an email address.'; return; }
+    if (!isValidEmail(v)) { err().textContent = 'That does not look like an email address.'; return; }
     try {
       const sent = await cloudRequestCode(v);
       if (sent && sent.devCode) {   // dev copy only: no email, the code comes back
@@ -16210,7 +16250,7 @@ function openLockRestoreModal() {
     err.textContent = '';
     const email = $('lr-email').value.trim().toLowerCase();
     if (step === 1) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'That does not look like an email address.'; return; }
+      if (!isValidEmail(email)) { err.textContent = 'That does not look like an email address.'; return; }
       try {
         const sent = await cloudRequestCode(email);
         if (sent && sent.devCode) $('lr-code').value = sent.devCode;   // dev copy only
@@ -16531,6 +16571,7 @@ async function enterApp() {
   // including everything from before v1.41 — fetched once, then cached.
   setTimeout(() => { refreshFxHistory().catch((e) => noteQuietError('exchange rates', e)); }, 3000);
   maybePromptCloudBackup();
+  setTimeout(refreshLicenceFromServer, 2500);   // renewals and referral rewards arrive by themselves
   // Changes a previous session couldn't send before it closed go now.
   if (cloudEnrolled() && cloudGet(CLOUD_DIRTY_STORE) === '1') setTimeout(() => runCloudBackup({ silent: true }), 5000);
   // Nudge pre-recovery-phrase users — but never stack on top of another modal.
@@ -17170,6 +17211,7 @@ function openFeedbackModal() {
     const email = document.getElementById('fb-email').value.trim();
     const err = document.getElementById('fb-err');
     if (!msg) { err.textContent = 'Please write a message first.'; return; }
+    if (email && !isValidEmail(email)) { err.textContent = 'That email address doesn’t look right. It needs an @ and a dot.'; return; }
     await withBusy(e.currentTarget, 'Sending…', async () => {
       let ok = false;
       try {
@@ -17277,7 +17319,7 @@ function showOnboarding() {
     const name = document.getElementById('ob-name').value.trim();
     const email = document.getElementById('ob-email').value.trim();
     if (!name) { err.textContent = 'Please enter your name.'; return; }
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { err.textContent = 'Please enter a valid email address.'; return; }
+    if (!isValidEmail(email)) { err.textContent = 'Please enter a valid email address.'; return; }
     const btn = document.getElementById('ob-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
     const at = new Date().toISOString();
