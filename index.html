@@ -1828,7 +1828,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   #timer-widget .tw:hover .tw-reveal, #timer-widget.tw-open .tw-reveal { max-width: 320px; opacity: 1; padding-left: 16px; }
   #timer-widget .tw-start-label { font-weight: 600; font-size: 13px; white-space: nowrap; }
   #timer-widget .tw-proj { font-size: 13px; font-weight: 600; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
-  #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 18px; color: var(--accent-bright); font-variant-numeric: tabular-nums; padding-right: 4px; }
+  #timer-widget .tw-time { font-family: 'DM Mono', monospace; font-size: 18px; color: var(--accent-bright); font-variant-numeric: tabular-nums; padding: 0 4px 0 20px; } /* breathing room on the left; the stop button sits 20px clear when open */
   #timer-widget .tw-stop { border: none; cursor: pointer; width: 34px; height: 34px; border-radius: 999px; background: var(--accent-bright); color: #0F0E0D; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
   @media (max-width: 768px) { #timer-widget { right: 12px; bottom: calc(72px + env(safe-area-inset-bottom)); } }
 
@@ -2698,6 +2698,8 @@ const LICENCE_API = 'https://simpl-licence.lee-4e1.workers.dev';
    only Paddle-approved domain, and the one origin that is NOT holding a
    decrypted vault. Paddle.js must never load here. */
 const BUY_URL = 'https://simpl.money/?buy=1';
+// A licensed customer's referral link is REFERRAL_BASE + their code (Brief 7).
+const REFERRAL_BASE = 'https://simpl.money/r/';
 
 /* The <title> and the iOS home-screen label are static markup shared by both
    origins, so they can't be baked per-origin at build time. Set them here
@@ -3018,8 +3020,15 @@ function cloudCounts(s) {
    `important: true` floats an item to the top with a "Worth knowing" tag; keep
    it for changes that alter numbers people rely on. `link.to` must be one of
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
-   backup, security, feedback, export, terms. (Checked by .claude/test-changelog.js.) */
+   backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.44.0.0', date: '2026-10-07', items: [
+      { title: 'Share Simpl, get 3 months free',
+        text: 'Every licensed customer now has their own link. When someone pays for Simpl through it, 3 months are added to your licence, and they get the founding price of $79 a year. It is also on the “Created with Simpl” line of your documents.',
+        link: { label: 'Get your link', to: 'refer' } },
+    ],
+  },
   {
     version: '1.43.0.0', date: '2026-10-07', items: [
       { title: 'Restore from backup, right from the lock screen',
@@ -3338,7 +3347,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.43.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.44.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3741,6 +3750,8 @@ async function refreshLicenceState() {
     } catch (e) { noteQuietError('licence state', e); }
   }
   licenceState = licenceStatusFrom({ active, licencePayload: payload, trialStart });
+  try { myReferralCode = licenceState.state === 'licensed' && licenceState.email ? await referralCodeFor(licenceState.email) : null; }
+  catch (e) { myReferralCode = null; }
   refreshLicenceNotice();
   return licenceState;
 }
@@ -3887,7 +3898,7 @@ function drawBrandFooter(doc, pageW, y) {
     doc.text(label, startX, y);
     doc.addImage(BRAND_MARK_PNG, 'PNG', startX + labelW, y - h + 1.5, w, h);
     // Link covers the words and the mark, so either half is clickable.
-    doc.link(startX, y - h, labelW + w, h + 3, { url: APP_BRAND_URL });
+    doc.link(startX, y - h, labelW + w, h + 3, { url: brandFooterUrl() });
   } catch (e) {
     // Never let branding break a document the user actually needs.
     try {
@@ -3895,6 +3906,49 @@ function drawBrandFooter(doc, pageW, y) {
       doc.text(`Created with ${APP_BRAND_NAME} — ${APP_BRAND_URL.replace(/^https?:\/\//, '')}`, pageW / 2, y, { align: 'center' });
     } catch (e2) { noteQuietError('PDF footer logo', e2); }
   }
+}
+
+/* Every licensed customer's referral code (Brief 7): six characters with no
+   look-alikes, derived from their email. The SAME function is in the Worker
+   (worker/src/index.js); test-referrals.js checks they agree. */
+const REF_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+async function referralCodeFor(email) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('simpl-ref:' + String(email || '').trim().toLowerCase())));
+  let code = '';
+  for (let i = 0; i < 6; i++) code += REF_ALPHABET[d[i] % REF_ALPHABET.length];
+  return code;
+}
+let myReferralCode = null;   // set by refreshLicenceState for a licensed customer
+function myReferralLink() { return myReferralCode ? REFERRAL_BASE + myReferralCode : null; }
+function referralShareText() { return `I use Simpl for my quotes and invoices. Through my link you get the founding price of $79 a year: ${myReferralLink()}`; }
+// Where "Created with Simpl" points: a licensed customer's own referral link,
+// so every document they send can bring them a reward; otherwise the site.
+function brandFooterUrl() { return (licenceState && licenceState.state === 'licensed' && myReferralLink()) || APP_BRAND_URL; }
+
+// Settings → Share Simpl: copy, and (with server backup) the chosen name and
+// how many friends have joined / months earned, from the Worker.
+function bindReferralSection(host) {
+  const copy = host.querySelector('#ref-copy');
+  if (!copy) return;
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(myReferralLink()); toast('Link copied'); }
+    catch (e) { host.querySelector('#ref-link').select(); toast('Select the link and copy it'); }
+  });
+  if (!cloudEnrolled()) return;
+  const nameEl = host.querySelector('#ref-name'), stats = host.querySelector('#ref-stats');
+  const show = (d) => {
+    if (!d || !d.licensed) return;
+    if (nameEl && document.activeElement !== nameEl) nameEl.value = d.chosenName || '';
+    if (nameEl) nameEl.placeholder = d.name || nameEl.placeholder;
+    if (stats) stats.textContent = `${d.joined} friend${d.joined === 1 ? ' has' : 's have'} joined · ${d.monthsEarned} month${d.monthsEarned === 1 ? '' : 's'} earned`;
+  };
+  cloudFetch('/referral/me').then((r) => (r.ok ? r.json() : null)).then(show).catch(() => {});
+  if (nameEl) nameEl.addEventListener('change', async () => {
+    try {
+      const r = await cloudFetch('/referral/me', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nameEl.value.trim() }) });
+      if (r.ok) { show(await r.json()); toast('Saved'); } else toast('Could not save the name. Try again.');
+    } catch (e) { toast('Could not save the name. Check your connection.'); }
+  });
 }
 
 function brandingOnDocuments() {
@@ -5708,7 +5762,7 @@ function emptyState({ title, text, action, actionId, secondary, secondaryId, qui
    states and the business-details gate. Opens the right Settings page,
    scrolls the section into view, focuses its first input and outlines it
    briefly. Each target carries data-focus-id. */
-const FOCUS_TARGETS = { company: 'business', vat: 'business', terms: 'business', logo: 'business', banking: 'business', backup: 'account' };
+const FOCUS_TARGETS = { company: 'business', vat: 'business', terms: 'business', logo: 'business', banking: 'business', backup: 'account', refer: 'account' };
 // Re-applied after every render for a moment: a redraw just after the jump
 // (timers that run after unlock) would otherwise drop the scroll and focus.
 let pendingFocus = null;
@@ -6196,6 +6250,10 @@ function whatsNewGo(to) {
   if (to === 'clients') { currentClientId = null; return setRoute('clients'); }
   if (to === 'feedback') { render(); return openFeedbackModal(); }
   if (to === 'export') { goToFinanceTab('overview'); return openAccountantExportModal(); }
+  if (to === 'refer') {
+    if (myReferralLink()) return goToSetting('refer');
+    settingsPage = 'account'; return setRoute('settings');   // no link until licensed: show the licence
+  }
   if (to === 'backup' || to === 'security' || to === 'terms') {
     settingsPage = to === 'backup' ? 'account' : to === 'terms' ? 'business' : 'help';
     setRoute('settings');
@@ -11898,7 +11956,7 @@ function openDocPreview(docId) {
 
             <div class="footer">
               Registered Office: Attention: ${escapeHtml(co.attention || '')}, ${escapeHtml(co.address || '')}.
-              ${brandingOnDocuments() ? `<br/><span style="display:inline-flex;align-items:center;gap:4px;">Created with <a href="${escapeHtml(APP_BRAND_URL)}" target="_blank" rel="noopener"><img src="${BRAND_MARK_PNG}" alt="${escapeHtml(APP_BRAND_NAME)}" style="height:11px;width:auto;vertical-align:-1px;" /></a></span>` : ''}
+              ${brandingOnDocuments() ? `<br/><span style="display:inline-flex;align-items:center;gap:4px;">Created with <a href="${escapeHtml(brandFooterUrl())}" target="_blank" rel="noopener"><img src="${BRAND_MARK_PNG}" alt="${escapeHtml(APP_BRAND_NAME)}" style="height:11px;width:auto;vertical-align:-1px;" /></a></span>` : ''}
             </div>
           </div>
         </div>
@@ -12929,6 +12987,24 @@ function renderSettingsAccount() {
       <div class="text-sm text-muted" style="margin-top:10px;">Your licence is verified on your device, with no account. We never see your invoices: the backup we keep is encrypted on this device first.</div>
     </div>` : ''}
 
+    ${myReferralLink() ? `
+    <div class="settings-section" data-focus-id="refer">
+      <h3>Share Simpl, get 3 months free</h3>
+      <div class="text-sm text-mid" style="line-height:1.6;">When someone pays for Simpl through your link, you get 3 months added to your licence. They get the founding price of $79 a year.</div>
+      <div class="row-flex" style="margin-top:12px;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input id="ref-link" readonly value="${escapeHtml(myReferralLink())}" style="flex:1;min-width:220px;" />
+        <button class="btn" id="ref-copy">Copy link</button>
+        <a class="btn" target="_blank" rel="noopener" style="text-decoration:none;" href="https://wa.me/?text=${encodeURIComponent(referralShareText())}">WhatsApp</a>
+        <a class="btn" style="text-decoration:none;" href="mailto:?subject=${encodeURIComponent('Simpl, for quotes and invoices')}&body=${encodeURIComponent(referralShareText())}">Email</a>
+      </div>
+      <div class="field" style="margin-top:14px;max-width:380px;">
+        <label>Name people see when they follow your link</label>
+        <input id="ref-name" maxlength="40" placeholder="Your first name, or your business" ${cloudEnrolled() ? '' : 'disabled'} />
+        <div class="text-sm text-muted" style="margin-top:4px;">${cloudEnrolled() ? 'Shown as “Recommended by …” on the Simpl site. Nothing else about you is shown.' : 'Turn on server backup to choose this name. Until then it shows your first name.'}</div>
+      </div>
+      <div class="text-sm text-mid" id="ref-stats" style="margin-top:8px;"></div>
+      <div class="text-sm text-muted" style="margin-top:6px;">Your link is also on the “Created with Simpl” line of your documents.</div>
+    </div>` : ''}
     <div class="settings-section">
       <h3>Device sync</h3>
       <div class="text-sm text-mid" style="margin-bottom:12px;">Sync this device directly with your other one (phone, laptop) over a private encrypted connection — your data goes straight between the two devices and <strong>never touches a server</strong>. Works best with both on the same Wi-Fi. Open this screen on <strong>both</strong> devices: press Start on one, Join on the other, and pass the codes across (AirDrop, message to yourself, or copy-paste).</div>
@@ -13185,6 +13261,7 @@ function bindSettingsEvents() {
   if (cloudNowBtn) cloudNowBtn.style.display = on ? '' : 'none';
   if (cloudRestoreBtn) cloudRestoreBtn.style.display = on ? '' : 'none';
   if (cloudOffBtn) cloudOffBtn.style.display = on ? '' : 'none';
+  bindReferralSection(host);
   const cloudDeleteBtn = host.querySelector('#cloud-delete');
   if (cloudDeleteBtn) cloudDeleteBtn.style.display = on ? '' : 'none';
   if (cloudDeleteBtn) cloudDeleteBtn.addEventListener('click', () => confirmDeleteServerBackup());
