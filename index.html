@@ -1841,6 +1841,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 .lock-actions { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
 .lock-actions .btn { width: 100%; justify-content: center; font-size: 13px; }
 .lock-actions .lock-reset { color: var(--text-muted); background: none; border-color: transparent; }
+/* A username field for password managers only: present in the form, never seen or tabbed to. */
+.pm-username { position: absolute; left: -10000px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 /* Empty states (Brief 6): what this place is, why it helps, one action. */
 .empty-state { padding: 36px 24px; text-align: center; }
@@ -1865,9 +1867,15 @@ td.empty-cell { padding: 0 !important; }
   <div class="lock-card">
     <div class="brand" id="lock-brand">Simpl</div>
     <div class="sub" id="lock-sub">Set a master password to encrypt your data.</div>
-    <form id="lock-form" autocomplete="off">
+    <div id="lock-welcome" style="display:none;">
+      <button type="button" class="btn btn-primary" id="lock-wb-restore" style="width:100%;height:40px;">Restore my data</button>
+      <div class="lock-actions"><button type="button" class="btn" id="lock-wb-new">Start a new vault instead</button></div>
+    </div>
+    <form id="lock-form">
+      <!-- For password managers: the Simpl email, so a saved master password is filed under it and offered here again after a cleared browser. -->
+      <input id="lock-user" class="pm-username" type="email" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" />
       <label for="lock-pwd">Master password</label>
-      <input id="lock-pwd" type="password" autocomplete="new-password" autofocus />
+      <input id="lock-pwd" type="password" name="password" autocomplete="new-password" autofocus />
       <div id="lock-confirm-wrap" style="margin-top:10px;">
         <label for="lock-pwd-2">Confirm password</label>
         <input id="lock-pwd-2" type="password" autocomplete="new-password" />
@@ -1880,7 +1888,7 @@ td.empty-cell { padding: 0 !important; }
       Your data is encrypted at rest with AES-GCM (key derived via PBKDF2, 600k rounds). Only your password or your recovery phrase can open it — we hold no key.
     </div>
     <div class="lock-actions">
-      <button type="button" class="btn" id="lock-restore" style="display:none;">Restore from backup</button>
+      <button type="button" class="btn" id="lock-restore" style="display:none;">Used Simpl before? Restore from backup</button>
       <button type="button" class="btn" id="lock-recovery" style="display:none;">Forgot password? Use your recovery phrase</button>
       <button type="button" class="btn" id="lock-earlier" style="display:none;">Recover an earlier vault on this device</button>
       <button type="button" class="btn btn-ghost lock-reset" id="lock-reset">Reset vault (erases everything)</button>
@@ -1891,19 +1899,18 @@ td.empty-cell { padding: 0 !important; }
 <div id="onboard-screen">
   <div class="lock-card">
     <div class="brand" id="onboard-brand">seed</div>
-    <div class="sub">Welcome — let's get you set up.</div>
+    <div class="sub" id="ob-sub">Welcome — let's get you set up.</div>
     <form id="onboard-form" autocomplete="on">
-      <label for="ob-name">Your name</label>
-      <input id="ob-name" type="text" autocomplete="name" placeholder="Jane Smith" />
-      <label for="ob-email" style="margin-top:12px;">Email</label>
+      <div id="ob-name-wrap">
+        <label for="ob-name">Your name</label>
+        <input id="ob-name" type="text" autocomplete="name" placeholder="Jane Smith" />
+      </div>
+      <label for="ob-email" style="margin-top:12px;" id="ob-email-label">Email</label>
       <input id="ob-email" type="email" autocomplete="email" placeholder="jane@example.com" />
-      <label class="checkbox" style="margin-top:14px;display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
-        <input id="ob-hasother" type="checkbox" style="margin-top:2px;" />
-        <span>I already use this app on another device — help me copy my data across</span>
-      </label>
       <div class="err" id="ob-err"></div>
       <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px;height:40px;" id="ob-btn">Continue</button>
     </form>
+    <div class="lock-actions"><button type="button" class="btn" id="ob-returning">Used Simpl before? Restore your data</button></div>
     <div class="text-sm text-muted" style="margin-top:16px;line-height:1.55;">
       We keep your name and email to send you your licence and product updates. Your invoices, clients and expenses are encrypted on this device, and the backup we keep is encrypted before it leaves, so we can't read it.
     </div>
@@ -3023,6 +3030,16 @@ function cloudCounts(s) {
    backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.0.0', date: '2026-10-09', items: [
+      { title: 'Clearing your browser no longer feels like starting over',
+        text: 'Clearing your browser’s site data removes Simpl from that browser, but not your backup. The first screen now asks if you’ve used Simpl before and takes you straight to your data. Simpl also lets your browser or password manager save your master password, so getting back in is quicker.',
+        link: { label: 'Backup settings', to: 'backup' } },
+      { title: 'Choose when Simpl locks itself',
+        text: 'Simpl locks after 15 minutes without use. You can now pick 5 minutes up to 4 hours, or Never, in Settings, Security. Setting it to never used to be ignored; it now works.',
+        link: { label: 'Security settings', to: 'security' } },
+    ],
+  },
+  {
     version: '1.44.0.0', date: '2026-10-07', items: [
       { title: 'Share Simpl, get 3 months free',
         text: 'Every licensed customer now has their own link. When someone pays for Simpl through it, 3 months are added to your licence, and they get the founding price of $79 a year. It is also on the “Created with Simpl” line of your documents.',
@@ -3213,6 +3230,21 @@ const COPY = {
     timerFiltered: { title: 'No time in this period', action: 'Clear filters' },
   },
   newClientOption: '+ New client…',
+  // Someone back after a cleared browser or on a new computer (Paul, 9 Oct 2026).
+  returning: {
+    link: 'Used Simpl before? Restore your data',
+    back: 'New to Simpl? Set up instead',
+    onboardSub: 'Welcome back. Enter the email you use with Simpl and we’ll bring your data back from your backup.',
+    onboardAction: 'Find my backup',
+    lock: 'Welcome back. Your data isn’t in this browser any more, but your backup is. Restore it to carry on.',
+    noBackup: 'There is no backup for this email. Check it’s the address you use with Simpl. If Simpl is open on another device, close this, start a new vault, and Simpl will help you copy your data across.',
+  },
+  foundBackup: {
+    title: 'We found your backup',
+    text: 'This browser doesn’t have any of it yet, so restoring brings it all back here.',
+    keys: 'You keep the password you just set. The recovery phrase that opens your data is the one you saved for this backup, not one shown in this browser today.',
+    action: 'Restore my data',
+  },
 };
 </script>
 <script>
@@ -3347,7 +3379,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.44.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3560,12 +3592,30 @@ function hasRecoveryWrapper() {
   return (currentWrappers || []).some((w) => w.type === 'recovery');
 }
 
+// How long without a click or key press before Simpl locks, in ms; 0 = never.
+// Unset means the 15-minute default. "0 = never" used to read as 15 here
+// (`minutes || 15`), so turning auto-lock off silently did nothing.
+const AUTO_LOCK_CHOICES = [5, 15, 30, 60, 240, 0];
+function autoLockMs(setting) {
+  if (setting == null || setting === '') return 15 * 60000;
+  const m = Number(setting);
+  if (!Number.isFinite(m) || m < 0) return 15 * 60000;
+  return m * 60000;
+}
+function autoLockNote(m) {
+  return m === 0
+    ? 'Simpl stays open until you lock it. Anyone using this computer while it is open can see your records.'
+    : 'Locking clears your records from memory. You open Simpl again with your master password.';
+}
+function autoLockLabel(m) {
+  if (m === 0) return 'Never';
+  if (m % 60 === 0) return m === 60 ? '1 hour' : `${m / 60} hours`;
+  return `${m} minutes`;
+}
 function resetLockTimer() {
-  if (lockTimer) clearTimeout(lockTimer);
-  const minutes = (state && state.settings && state.settings.autoLockMinutes) || 15;
-  if (minutes > 0) {
-    lockTimer = setTimeout(lockApp, minutes * 60 * 1000);
-  }
+  if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+  const ms = autoLockMs(state && state.settings ? state.settings.autoLockMinutes : null);
+  if (ms > 0) lockTimer = setTimeout(lockApp, ms);
 }
 
 ['mousedown', 'keydown', 'touchstart'].forEach((evt) => {
@@ -4375,12 +4425,16 @@ async function withBusy(btn, busyLabel, fn) {
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = busyLabel;
+  const busyHtml = btn.innerHTML;
   try {
     await new Promise((r) => setTimeout(r, 30));
     await fn();
   } finally {
     btn.disabled = false;
-    btn.innerHTML = orig;
+    // A step that relabelled its own button ("Continue", "Restore") keeps the
+    // new label; putting the old one back told Paul to "Send me a code" when
+    // the button would restore his backup.
+    if (btn.innerHTML === busyHtml) btn.innerHTML = orig;
   }
 }
 
@@ -13085,8 +13139,13 @@ function renderSettingsHelp() {
       <h3>Security</h3>
       <div class="form-grid">
         <div class="field">
-          <label>Auto-lock after (minutes, 0 = never)</label>
-          <input data-cs="autoLockMinutes" type="number" min="0" value="${state.settings.autoLockMinutes}" />
+          <label for="auto-lock">Lock Simpl after</label>
+          ${(() => {
+            const cur = autoLockMs(state.settings.autoLockMinutes) / 60000;
+            const choices = AUTO_LOCK_CHOICES.includes(cur) ? AUTO_LOCK_CHOICES : [...AUTO_LOCK_CHOICES.slice(0, -1), cur, 0].sort((a, b) => (a || Infinity) - (b || Infinity));
+            return `<select id="auto-lock" data-cs="autoLockMinutes">${choices.map((m) => `<option value="${m}"${m === cur ? ' selected' : ''}>${m === 0 ? 'Never' : autoLockLabel(m) + ' without use'}</option>`).join('')}</select>
+          <div class="text-sm text-muted" id="auto-lock-note" style="margin-top:6px;line-height:1.5;">${autoLockNote(cur)}</div>`;
+          })()}
         </div>
         <div class="field">
           <label>Password hint <span class="text-muted">(shown on the lock screen — never put the password itself here)</span></label>
@@ -13153,7 +13212,11 @@ function bindSettingsEvents() {
       }
       await saveState();
       toast('Saved');
-      if (f === 'autoLockMinutes') resetLockTimer();
+      if (f === 'autoLockMinutes') {
+        resetLockTimer();
+        const note = host.querySelector('#auto-lock-note');
+        if (note) note.textContent = autoLockNote(Number(v));
+      }
       if (['invoicePrefix','quotePrefix','numberDigits','nextInv','nextQt'].includes(f)) render(); // refresh the numbering example
       if (f === 'brandName' || f === 'appTitle') applyBrand();
       if (f === 'name') { renderEntitySwitcher(); applyBrand(); }
@@ -13528,17 +13591,18 @@ function openChangePasswordModal() {
           <span class="modal-close" data-close>×</span>
         </div>
         <div class="modal-body">
+          <input class="pm-username" type="email" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" value="${escapeHtml(simplAccountEmail())}" />
           <div class="field">
             <label>Current password</label>
-            <input id="cp-cur" type="password" />
+            <input id="cp-cur" type="password" autocomplete="current-password" />
           </div>
           <div class="field mt-12">
             <label>New password</label>
-            <input id="cp-new" type="password" />
+            <input id="cp-new" type="password" autocomplete="new-password" />
           </div>
           <div class="field mt-12">
             <label>Confirm new password</label>
-            <input id="cp-new2" type="password" />
+            <input id="cp-new2" type="password" autocomplete="new-password" />
           </div>
           <div class="err danger text-sm mt-12" id="cp-err"></div>
         </div>
@@ -13568,6 +13632,7 @@ function openChangePasswordModal() {
     await saveState();
     closeModal();
     toast('Password changed');
+    offerToSavePassword(n1);
   });
 }
 
@@ -15779,10 +15844,26 @@ function maybePromptCloudBackup() {
 
 /* ---- conflict: the server moved on since this device last looked ---- */
 
+// A device with no records meeting a backup that has some is not a conflict:
+// it is someone back after a cleared browser or on a new computer, who made a
+// vault before finding Restore. They are offered their data back, never the
+// chance to replace it with an empty vault.
+function cloudConflictKind(localRecords, serverCounts) {
+  return localRecords === 0 && cloudCountTotal(serverCounts) > 0 ? 'found' : 'conflict';
+}
+// Replacing a backup with a copy holding under half its records (of at least
+// five) is the same disaster the shrink guard stops, so it is asked about with
+// the numbers in front of the person.
+function replaceShrinks(serverCounts, localCounts) {
+  const before = cloudCountTotal(serverCounts);
+  return before >= 5 && cloudCountTotal(localCounts) < before * 0.5;
+}
+
 function openCloudConflictModal(server, pendingBlob) {
   const when = server && server.createdAt ? fmtDate(new Date(server.createdAt).toISOString().slice(0, 10)) : 'unknown';
   const sc = (server && server.counts) || {};
   const lc = cloudCounts(state);
+  if (cloudConflictKind(vaultRecordCount(state), sc) === 'found') return openCloudFoundBackupModal(server);
   const row = (label, a, b) => `<tr><td>${label}</td><td class="mono" style="text-align:right;">${a == null ? '·' : a}</td><td class="mono" style="text-align:right;">${b == null ? '·' : b}</td></tr>`;
 
   showModal(`
@@ -15833,7 +15914,10 @@ function openCloudConflictModal(server, pendingBlob) {
   }));
 
   document.getElementById('cloud-force').addEventListener('click', (e) => withBusy(e.currentTarget, 'Replacing…', async () => {
-    if (!confirm('Replace the backup with this device\'s copy?\n\nWork done on the other device that has not reached this one will be lost.')) return;
+    const question = replaceShrinks(sc, lc)
+      ? `Replace a backup of ${cloudCountTotal(sc)} records with this device's ${cloudCountTotal(lc)}?\n\nThe backup holds far more than this device. Older copies stay on the server for a while, but your newest backup would be this device's.`
+      : 'Replace the backup with this device\'s copy?\n\nWork done on the other device that has not reached this one will be lost.';
+    if (!confirm(question)) return;
     try {
       const list = await cloudList();
       cloudSet(CLOUD_VERSION_STORE, (list.backups[0] && list.backups[0].version) || 0);
@@ -15843,6 +15927,144 @@ function openCloudConflictModal(server, pendingBlob) {
       refreshCloudStatus();
     } catch (ex) { alert('Could not replace the backup: ' + (ex && ex.message)); }
   }));
+}
+
+/* "We found your backup": the conflict above, when this device has nothing
+   yet. The backup comes back with its own key and recovery phrase; this
+   browser keeps the password just set, so its lock screen works as expected. */
+function openCloudFoundBackupModal(server) {
+  const when = server && server.createdAt ? new Date(server.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const sc = (server && server.counts) || {};
+  showModal(`
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" style="max-width:480px;">
+        <div class="modal-head"><div class="ttl">${escapeHtml(COPY.foundBackup.title)}</div><span class="modal-close" data-close>&times;</span></div>
+        <div class="modal-body">
+          <div class="text-sm text-mid" style="margin-bottom:14px;line-height:1.6;">Your backup from <strong>${escapeHtml(when)}</strong> has ${escapeHtml(backupCountsPhrase(sc))}. ${escapeHtml(COPY.foundBackup.text)}</div>
+          <form id="fb-form">${credentialFieldsHtml('fb', { email: cloudEmail() || simplAccountEmail(), pwdLabel: 'The master password you used for that backup' })}</form>
+          <div class="text-sm text-muted" style="margin-top:12px;line-height:1.55;">${escapeHtml(COPY.foundBackup.keys)}</div>
+          <div class="err" id="fb-err"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" data-close>Not now</button>
+          <button class="btn btn-primary" id="fb-go">${escapeHtml(COPY.foundBackup.action)}</button>
+        </div>
+      </div>
+    </div>`);
+  const f = bindCredentialFields('fb');
+  submitOnEnter('fb-form', 'fb-go');
+  document.getElementById('fb-go').addEventListener('click', (e) => withBusy(e.currentTarget, 'Restoring…', async () => {
+    const err = document.getElementById('fb-err');
+    err.textContent = '';
+    const c = readBackupCredential(f, err, false);
+    if (!c) return;
+    let latest;
+    try { latest = await cloudLatest(); } catch (ex) { err.textContent = 'Could not reach your backup. Check your connection and try again.'; return; }
+    if (!latest) { err.textContent = 'There is no backup on the server any more.'; return; }
+    const opened = await openVaultBlob(latest.text, c.cred);
+    if (!opened) { err.textContent = c.isPhrase ? 'That phrase does not open this backup.' : 'That password does not open this backup. Try your recovery phrase instead.'; return; }
+    state = opened.data;
+    if (opened.rawDek) {
+      currentDek = opened.rawDek;
+      currentWrappers = (opened.wrappers || []).filter((w) => w.type !== 'password');
+      currentWrappers.unshift(await wrapDek('password', currentPassword, currentDek));
+    } else {
+      currentDek = null;      // a pre-v3 backup: the next save gives it a key under this browser's password
+      currentWrappers = [];
+    }
+    migrateState();
+    installEntityAccessors();
+    cloudSet(CLOUD_VERSION_STORE, latest.version);   // this device now holds the newest copy
+    await saveState();
+    closeModal();
+    render();
+    fetchFxRates();
+    toast('Restored — welcome back');
+  }));
+  setTimeout(() => { const el = document.getElementById('fb-pwd'); if (el) el.focus(); }, 50);
+}
+
+// "2 quotes, 4 clients, 5 projects and 1 expense", from a backup's counts.
+function backupCountsPhrase(c) {
+  const parts = [['invoices', 'invoice'], ['quotes', 'quote'], ['credits', 'credit note'], ['clients', 'client'], ['projects', 'project'], ['expenses', 'expense']]
+    .map(([k, w]) => [Number(c && c[k]) || 0, w])
+    .filter(([n]) => n > 0)
+    .map(([n, w]) => `${n} ${w}${n === 1 ? '' : 's'}`);
+  if (!parts.length) return 'your records';
+  return parts.length === 1 ? parts[0] : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+}
+
+/* Password or recovery phrase, for opening a backup. The password box is a
+   real current-password field (with the Simpl email as its username), so a
+   password manager can fill it; the phrase sits behind a link. */
+function credentialFieldsHtml(p, o) {
+  return `
+    ${o.email != null ? `<input class="pm-username" type="email" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" value="${escapeHtml(o.email)}" />` : ''}
+    <div id="${p}-pwd-wrap">
+      <div class="field"><label for="${p}-pwd">${escapeHtml(o.pwdLabel)}</label><input id="${p}-pwd" type="password" name="password" autocomplete="current-password" /></div>
+      <button type="button" class="btn btn-ghost btn-sm" id="${p}-to-phrase" style="margin-top:8px;">Use my recovery phrase instead</button>
+    </div>
+    <div id="${p}-phrase-wrap" style="display:none;">
+      <div class="field"><label for="${p}-phrase">Your 12-word recovery phrase</label><textarea id="${p}-phrase" rows="2" autocomplete="off" spellcheck="false" style="width:100%;"></textarea></div>
+      ${o.newPassword ? `
+      <div class="field mt-12"><label for="${p}-p1">Choose a new password for this device</label><input id="${p}-p1" type="password" autocomplete="new-password" /></div>
+      <div class="field mt-12"><label for="${p}-p2">Confirm new password</label><input id="${p}-p2" type="password" autocomplete="new-password" /></div>` : ''}
+      <button type="button" class="btn btn-ghost btn-sm" id="${p}-to-pwd" style="margin-top:8px;">Use my password instead</button>
+    </div>`;
+}
+function bindCredentialFields(p) {
+  const $ = (id) => document.getElementById(`${p}-${id}`);
+  const show = (phrase, prefill) => {
+    $('pwd-wrap').style.display = phrase ? 'none' : '';
+    $('phrase-wrap').style.display = phrase ? '' : 'none';
+    if (prefill != null) { $('phrase').value = prefill; $('pwd').value = ''; }
+    const target = phrase ? (prefill != null && $('p1') ? $('p1') : $('phrase')) : $('pwd');
+    if (target) target.focus();
+  };
+  $('to-phrase').addEventListener('click', () => show(true));
+  $('to-pwd').addEventListener('click', () => show(false));
+  return {
+    phraseMode: () => $('phrase-wrap').style.display !== 'none',
+    showPhrase: (prefill) => show(true, prefill),
+    password: () => $('pwd').value,
+    phrase: () => $('phrase').value,
+    newPasswords: () => [$('p1') ? $('p1').value : '', $('p2') ? $('p2').value : ''],
+  };
+}
+// What the person typed, checked: { cred, isPhrase, newPassword } or null with
+// the reason shown. A phrase typed into the password box moves to the phrase box.
+function readBackupCredential(f, err, wantsNewPassword) {
+  if (f.phraseMode()) {
+    const raw = f.phrase();
+    const shape = recoveryPhraseShape(raw);
+    if (shape.unknown.length) { err.textContent = `Not part of the word list: ${shape.unknown.slice(0, 4).join(', ')}. Check for typos.`; return null; }
+    if (shape.count !== shape.expected) { err.textContent = `Expected ${shape.expected} words, got ${shape.count}.`; return null; }
+    let newPassword = null;
+    if (wantsNewPassword) {
+      const [p1, p2] = f.newPasswords();
+      if (p1.length < 8) { err.textContent = 'Choose a new password of at least 8 characters.'; return null; }
+      if (p1 !== p2) { err.textContent = 'The new passwords do not match.'; return null; }
+      newPassword = p1;
+    }
+    return { cred: normaliseRecoveryPhrase(raw), isPhrase: true, newPassword };
+  }
+  const pwd = f.password();
+  if (!pwd) { err.textContent = 'Enter your master password.'; return null; }
+  const shape = recoveryPhraseShape(pwd);
+  if (shape.count >= shape.expected && !shape.unknown.length) {
+    f.showPhrase(pwd);
+    err.textContent = wantsNewPassword ? 'That looks like your recovery phrase. Choose a new password for this device below.' : 'That looks like your recovery phrase, so it has moved to the phrase box. Press the button again.';
+    return null;
+  }
+  return { cred: pwd, isPhrase: false, newPassword: null };
+}
+// Enter in a field presses the dialog's main button, which sits outside the form.
+function submitOnEnter(formId, btnId) {
+  const form = document.getElementById(formId);
+  if (!form) return;
+  const press = () => { const b = document.getElementById(btnId); if (b) b.click(); };
+  form.addEventListener('submit', (e) => { e.preventDefault(); press(); });
+  form.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); press(); } });
 }
 
 /* ---- restore ---- */
@@ -16117,6 +16339,7 @@ function openRecoveryUnlockModal() {
             <label>Recovery phrase</label>
             <textarea id="ru-phrase" rows="3" autocomplete="off" spellcheck="false" style="width:100%;font-family:'DM Mono',monospace;font-size:13px;"></textarea>
           </div>
+          <input class="pm-username" type="email" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" value="${escapeHtml(simplAccountEmail())}" />
           <div class="field mt-12">
             <label>Choose a new master password</label>
             <input id="ru-pwd" type="password" autocomplete="new-password" />
@@ -16165,6 +16388,7 @@ function openRecoveryUnlockModal() {
       await enterApp();
       fetchFxRates();
       toast('Unlocked — your new password is set');
+      offerToSavePassword(p1);
     });
   });
 }
@@ -16219,6 +16443,11 @@ async function showLockFormForVault() {
   return showLockForm(!!blob);
 }
 
+// "Used Simpl before?" on a browser with no vault: restoring leads, and a new
+// vault is the second choice. A cleared browser looks exactly like a first
+// visit, and the old screen's big button was "Create vault" (Paul, 9 Oct 2026).
+let lockStartFresh = false;     // "Start a new vault instead" was pressed
+let lockAutoRestore = false;    // open the restore, code sent, once, straight after the welcome form
 async function showLockForm(returningUser) {
   lockMode = returningUser === 'unreadable' ? 'unreadable' : returningUser ? 'unlock' : 'create';
   const sub = document.getElementById('lock-sub');
@@ -16236,9 +16465,16 @@ async function showLockForm(returningUser) {
   pwdParts.forEach((el) => { if (el) el.style.display = lockMode === 'unreadable' ? 'none' : ''; });
   if (earlierBtn) earlierBtn.style.display = 'none';
   const restoreBtn = document.getElementById('lock-restore');
+  const welcomeBack = lockMode === 'create' && !!(getOnboarding() || {}).returning && !lockStartFresh;
+  document.getElementById('lock-welcome').style.display = welcomeBack ? '' : 'none';
+  document.getElementById('lock-form').style.display = welcomeBack ? 'none' : '';
+  // The Simpl email files a saved master password; unlock asks the password
+  // manager for it, create offers to save a new one.
+  document.getElementById('lock-user').value = simplAccountEmail();
+  document.getElementById('lock-pwd').setAttribute('autocomplete', lockMode === 'unlock' ? 'current-password' : 'new-password');
   // A device with no vault is where a backup comes home: a new laptop, a
   // cleared browser.
-  if (restoreBtn) restoreBtn.style.display = lockMode === 'create' ? '' : 'none';
+  if (restoreBtn) restoreBtn.style.display = lockMode === 'create' && !welcomeBack ? '' : 'none';
   if (lockMode === 'unreadable') {
     sub.textContent = VAULT_UNREADABLE_MSG;
     confirmWrap.style.display = 'none';
@@ -16268,48 +16504,53 @@ async function showLockForm(returningUser) {
       recBtn.style.display = has ? '' : 'none';
     }
   } else {
-    sub.textContent = 'Set a master password to encrypt your data.';
+    sub.textContent = welcomeBack ? COPY.returning.lock : 'Set a master password to encrypt your data.';
     confirmWrap.style.display = 'block';
     btn.textContent = 'Create vault';
     if (resetBtn) resetBtn.style.display = 'none';
     if (recBtn) recBtn.style.display = 'none';
     if (hintEl) hintEl.style.display = 'none';
   }
+  if (welcomeBack) {
+    if (lockAutoRestore) { lockAutoRestore = false; openLockRestoreModal({ autoSend: true }); }
+    else document.getElementById('lock-wb-restore').focus();
+    return;
+  }
   document.getElementById('lock-pwd').focus();
 }
 
 document.getElementById('lock-recovery').addEventListener('click', () => openRecoveryUnlockModal());
 document.getElementById('lock-restore').addEventListener('click', () => openLockRestoreModal());
+document.getElementById('lock-wb-restore').addEventListener('click', () => openLockRestoreModal({ autoSend: true }));
+document.getElementById('lock-wb-new').addEventListener('click', () => { lockStartFresh = true; showLockForm(false); });
 
 /* Restore from backup, from the lock screen of a device with no vault (a new
    laptop, a cleared browser). Proves the email with a code, fetches the newest
    backup, and opens it with the password it was made with or the recovery
    phrase. The restored vault keeps its own key and recovery phrase; opening it
    with the phrase asks for a new password, like the recovery flow. */
-function openLockRestoreModal() {
+function openLockRestoreModal(opts) {
+  const o = opts || {};
   const ob = getOnboarding() || {};
   showModal(`
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:480px;">
         <div class="modal-head"><div class="ttl">Restore from backup</div><span class="modal-close" data-close>&times;</span></div>
         <div class="modal-body">
-          <div id="lr-step1">
-            <div class="text-sm text-mid" style="margin-bottom:12px;line-height:1.6;">Enter the email you use with Simpl. We'll send a six-digit code, then bring your backup to this device.</div>
-            <div class="field"><label>Email</label><input id="lr-email" type="email" autocomplete="email" value="${escapeHtml(ob.email || '')}" /></div>
-          </div>
-          <div id="lr-step2" style="display:none;">
-            <div class="text-sm text-mid" style="margin-bottom:12px;">We've emailed you a code. It expires in 10 minutes.</div>
-            <div class="field"><label>Six-digit code</label><input id="lr-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" /></div>
-          </div>
-          <div id="lr-step3" style="display:none;">
-            <div class="text-sm text-mid" id="lr-found" style="margin-bottom:12px;line-height:1.6;"></div>
-            <div class="field"><label>The password you used for this backup, or your 12-word recovery phrase</label>
-              <textarea id="lr-cred" rows="2" autocomplete="off" spellcheck="false" style="width:100%;"></textarea></div>
-            <div id="lr-newpwd" style="display:none;">
-              <div class="field mt-12"><label>Choose a new password for this device</label><input id="lr-p1" type="password" autocomplete="new-password" /></div>
-              <div class="field mt-12"><label>Confirm new password</label><input id="lr-p2" type="password" autocomplete="new-password" /></div>
+          <form id="lr-form">
+            <div id="lr-step1">
+              <div class="text-sm text-mid" style="margin-bottom:12px;line-height:1.6;">Enter the email you use with Simpl. We'll send a six-digit code, then bring your backup to this device.</div>
+              <div class="field"><label for="lr-email">Email</label><input id="lr-email" type="email" name="username" autocomplete="username" value="${escapeHtml(ob.email || '')}" /></div>
             </div>
-          </div>
+            <div id="lr-step2" style="display:none;">
+              <div class="text-sm text-mid" style="margin-bottom:12px;">We've emailed you a code. It expires in 10 minutes.</div>
+              <div class="field"><label for="lr-code">Six-digit code</label><input id="lr-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" /></div>
+            </div>
+            <div id="lr-step3" style="display:none;">
+              <div class="text-sm text-mid" id="lr-found" style="margin-bottom:12px;line-height:1.6;"></div>
+              ${credentialFieldsHtml('lr', { pwdLabel: 'The master password you used for this backup', newPassword: true })}
+            </div>
+          </form>
           <div class="err" id="lr-err"></div>
         </div>
         <div class="modal-foot">
@@ -16319,9 +16560,9 @@ function openLockRestoreModal() {
       </div>
     </div>`);
   const $ = (id) => document.getElementById(id);
+  const f = bindCredentialFields('lr');
+  submitOnEnter('lr-form', 'lr-go');
   let step = 1, latest = null;
-  // A recovery phrase means a new password for this device; show those boxes as soon as it looks like one.
-  $('lr-cred').addEventListener('input', () => { $('lr-newpwd').style.display = recoveryPhraseShape($('lr-cred').value).count >= 12 ? '' : 'none'; });
   $('lr-go').addEventListener('click', (e) => withBusy(e.currentTarget, step === 1 ? 'Sending…' : step === 2 ? 'Checking…' : 'Restoring…', async () => {
     const err = $('lr-err');
     err.textContent = '';
@@ -16342,33 +16583,35 @@ function openLockRestoreModal() {
       try { await cloudVerifyCode(email, $('lr-code').value); }
       catch (ex) { err.textContent = 'That code did not work. Check it, or go back and send a new one.'; return; }
       try { latest = await cloudLatest(); } catch (ex) { err.textContent = 'Could not reach your backup. Check your connection and try again.'; return; }
-      if (!latest) { err.textContent = 'There is no backup for this email yet. Create a new vault instead.'; cloudForget(); return; }
+      if (!latest) {
+        cloudForget();
+        if (ob.returning) {
+          // Used Simpl before, but never backed up: the other device is the
+          // only copy, and Device sync is offered once a vault exists here.
+          setOnboarding({ ...(getOnboarding() || {}), wantsSync: true });
+          err.textContent = COPY.returning.noBackup;
+        } else {
+          err.textContent = 'There is no backup for this email yet. Create a new vault instead.';
+        }
+        return;
+      }
       const when = latest.createdAt ? new Date(latest.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '';
-      const c = latest.counts || {};
-      $('lr-found').innerHTML = `Found your backup from <strong>${escapeHtml(when)}</strong>: ${Number(c.invoices) || 0} invoices, ${Number(c.clients) || 0} clients, ${Number(c.expenses) || 0} expenses.`;
-      step = 3; $('lr-step2').style.display = 'none'; $('lr-step3').style.display = ''; $('lr-go').textContent = 'Restore'; $('lr-cred').focus();
+      $('lr-found').innerHTML = `Found your backup from <strong>${escapeHtml(when)}</strong>: ${escapeHtml(backupCountsPhrase(latest.counts || {}))}.`;
+      step = 3; $('lr-step2').style.display = 'none'; $('lr-step3').style.display = ''; $('lr-go').textContent = 'Restore'; $('lr-pwd').focus();
       return;
     }
     // Step 3: open it.
-    const raw = $('lr-cred').value;
-    const isPhrase = recoveryPhraseShape(raw).count >= 12;
-    let opened = null, password = raw;
-    if (isPhrase) {
-      const p1 = $('lr-p1').value, p2 = $('lr-p2').value;
-      if (p1.length < 8) { err.textContent = 'Choose a new password of at least 8 characters.'; return; }
-      if (p1 !== p2) { err.textContent = 'The new passwords do not match.'; return; }
-      opened = await openVaultBlob(latest.text, normaliseRecoveryPhrase(raw));
-      password = p1;
-    } else {
-      opened = await openVaultBlob(latest.text, raw);
-    }
-    if (!opened) { err.textContent = isPhrase ? 'That phrase does not open this backup.' : 'That password does not open this backup. Try your recovery phrase instead.'; return; }
+    const c = readBackupCredential(f, err, true);
+    if (!c) return;
+    const opened = await openVaultBlob(latest.text, c.cred);
+    if (!opened) { err.textContent = c.isPhrase ? 'That phrase does not open this backup.' : 'That password does not open this backup. Try your recovery phrase instead.'; return; }
+    const password = c.isPhrase ? c.newPassword : c.cred;
     state = opened.data;
     currentDek = opened.rawDek;
     currentWrappers = opened.wrappers || [];
     migrateState();
     installEntityAccessors();
-    if (isPhrase) {
+    if (c.isPhrase) {
       currentWrappers = currentWrappers.filter((w) => w.type !== 'password');
       currentWrappers.unshift(await wrapDek('password', password, currentDek));
     }
@@ -16379,7 +16622,11 @@ function openLockRestoreModal() {
     await enterApp();
     fetchFxRates();
     toast('Restored — welcome back');
+    offerToSavePassword(password);
   }));
+  // Straight from "Used Simpl before?": the email was just typed, so the code goes now.
+  if (o.autoSend && isValidEmail($('lr-email').value.trim())) $('lr-go').click();
+  else setTimeout(() => { const el = $('lr-email'); if (el) el.focus(); }, 50);
 }
 document.getElementById('lock-earlier').addEventListener('click', () => openEarlierVaultModal());
 
@@ -16569,6 +16816,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
     await saveState();
     await enterApp();
     fetchFxRates();
+    offerToSavePassword(pwd);
     // New vault → set up recovery straight away, while they're in setup mode.
     setTimeout(() => openRecoverySetupModal(), 350);
   } else {
@@ -16588,6 +16836,7 @@ document.getElementById('lock-form').addEventListener('submit', async (e) => {
       await saveState();                      // performs the v2 → v3 upgrade
       await enterApp();
       fetchFxRates();
+      offerToSavePassword(pwd, { once: true });
     } catch (e) {
       unlockFails++;
       if (unlockFails >= 3) {
@@ -16960,12 +17209,17 @@ function syncSupport() {
 /* A vault that has never been used: no records anywhere and no company name.
    A fresh install syncing with an established device shouldn't "merge" —
    it should become a copy. */
-function vaultIsPristine(s) {
+// Every kind of record a person makes, across every business. cloudCounts is
+// narrower (no time, tasks or statements), so it must not decide "empty".
+function vaultRecordCount(s) {
   const ents = (s && s.entities) || [];
   const arrays = ['clients', 'documents', 'expenses', 'statements', 'projects', 'tasks', 'timeEntries'];
-  const records = ents.reduce((n, e) => n + arrays.reduce((m, k) => m + ((e[k] || []).length), 0), 0);
+  return ents.reduce((n, e) => n + arrays.reduce((m, k) => m + ((e[k] || []).length), 0), 0);
+}
+function vaultIsPristine(s) {
+  const ents = (s && s.entities) || [];
   const named = ents.some((e) => e.company && e.company.name && e.company.name.trim());
-  return records === 0 && !named;
+  return vaultRecordCount(s) === 0 && !named;
 }
 
 function copyText(text, msg) {
@@ -17248,6 +17502,30 @@ function setOnboarding(obj) {
   try { localStorage.setItem(ONBOARD_KEY, JSON.stringify(obj)); } catch (e) {}
 }
 
+/* The master password in the browser's password manager, when the person
+   allows it. Saved passwords survive "Clear browsing data" (they are a
+   separate box, unticked by default), so after a cleared browser the restore
+   and the lock screen fill themselves in. Filed under the Simpl email. Never
+   leaves the device through us: the browser asks, the browser keeps it.
+   PasswordCredential is Chromium only; Safari and Firefox go by the form
+   markup (username field + current-/new-password). */
+const PWD_OFFER_STORE = 'seed-pwd-offered-v1';
+function simplAccountEmail() {
+  const ob = getOnboarding() || {};
+  return (typeof cloudEmail === 'function' && cloudEmail()) || ob.email || '';
+}
+async function offerToSavePassword(password, opts) {
+  try {
+    if (!password || !window.PasswordCredential || !navigator.credentials || !navigator.credentials.store) return;
+    const id = simplAccountEmail();
+    if (!id) return;
+    // An everyday unlock asks once per device; setting or changing a password always asks.
+    if (opts && opts.once && localStorage.getItem(PWD_OFFER_STORE) === id) return;
+    localStorage.setItem(PWD_OFFER_STORE, id);
+    await navigator.credentials.store(new window.PasswordCredential({ id, password }));
+  } catch (e) { /* best effort: declined, unsupported or blocked changes nothing */ }
+}
+
 // POST the lead to the configured endpoint. Returns true on success.
 /* In-app feedback — posts to the same Formspree inbox as sign-ups, tagged
    type:'feedback' so the rows are easy to tell apart. */
@@ -17390,19 +17668,42 @@ function showOnboarding() {
   if (prior && prior.email) document.getElementById('ob-email').value = prior.email;
   const err = document.getElementById('ob-err');
   setTimeout(() => document.getElementById('ob-name').focus(), 50);
+  // "Used Simpl before?": a cleared browser or a new computer. Only the email
+  // is needed, to find the backup.
+  const sub = document.getElementById('ob-sub');
+  const firstSub = sub.textContent;
+  let returning = false;
+  const setReturning = (on) => {
+    returning = on;
+    err.textContent = '';
+    document.getElementById('ob-name-wrap').style.display = on ? 'none' : '';
+    sub.textContent = on ? COPY.returning.onboardSub : firstSub;
+    document.getElementById('ob-btn').textContent = on ? COPY.returning.onboardAction : 'Continue';
+    document.getElementById('ob-returning').textContent = on ? COPY.returning.back : COPY.returning.link;
+    setTimeout(() => document.getElementById(on ? 'ob-email' : 'ob-name').focus(), 30);
+  };
+  document.getElementById('ob-returning').onclick = () => setReturning(!returning);
   document.getElementById('onboard-form').onsubmit = async (e) => {
     e.preventDefault();
     err.textContent = '';
     const name = document.getElementById('ob-name').value.trim();
     const email = document.getElementById('ob-email').value.trim();
-    if (!name) { err.textContent = 'Please enter your name.'; return; }
+    if (!returning && !name) { err.textContent = 'Please enter your name.'; return; }
     if (!isValidEmail(email)) { err.textContent = 'Please enter a valid email address.'; return; }
+    const at = new Date().toISOString();
+    if (returning) {
+      // Already signed up: nothing is sent, so the trial emails don't start again.
+      setOnboarding({ submitted: true, name: (prior && prior.name) || '', email, at, pending: false, returning: true });
+      lockAutoRestore = true;
+      screen.classList.remove('show');
+      if (lock) lock.style.display = 'flex';
+      await showLockFormForVault();
+      return;
+    }
     const btn = document.getElementById('ob-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
-    const at = new Date().toISOString();
-    const wantsSync = !!(document.getElementById('ob-hasother') && document.getElementById('ob-hasother').checked);
     const ok = await sendOnboarding({ name, email, appVersion: APP_VERSION, date: at });
-    setOnboarding({ submitted: true, name, email, at, pending: !ok, wantsSync });
+    setOnboarding({ submitted: true, name, email, at, pending: !ok });
     screen.classList.remove('show');
     if (lock) lock.style.display = 'flex';                // reveal the lock screen now
     await showLockFormForVault();                         // proceed to set-password / unlock
