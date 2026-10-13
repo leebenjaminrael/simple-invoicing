@@ -1867,6 +1867,7 @@ td.empty-cell { padding: 0 !important; }
   <div class="lock-card">
     <div class="brand" id="lock-brand">Simpl</div>
     <div class="sub" id="lock-sub">Set a master password to encrypt your data.</div>
+    <button type="button" class="btn btn-primary" id="lock-passkey" style="display:none;width:100%;height:40px;margin-bottom:14px;">Unlock with your passkey</button>
     <div id="lock-welcome" style="display:none;">
       <button type="button" class="btn btn-primary" id="lock-wb-restore" style="width:100%;height:40px;">Restore my data</button>
       <div class="lock-actions"><button type="button" class="btn" id="lock-wb-new">Start a new vault instead</button></div>
@@ -1900,6 +1901,7 @@ td.empty-cell { padding: 0 !important; }
   <div class="lock-card">
     <div class="brand" id="onboard-brand">seed</div>
     <div class="sub" id="ob-sub">Welcome — let's get you set up.</div>
+    <button type="button" class="btn btn-primary" id="ob-passkey" style="display:none;width:100%;height:40px;margin-bottom:14px;">Sign in with your passkey</button>
     <form id="onboard-form" autocomplete="on">
       <div id="ob-name-wrap">
         <label for="ob-name">Your name</label>
@@ -2439,6 +2441,9 @@ function createSyncSession(role, callbacks) {
        { v:3, kdf, wrappers:[{type,salt,iterations,iv,wrapped}], iv, ct }
                                                      ct = AES-GCM(vault, DEK)
    A v2 vault is upgraded to v3 transparently on the next save.
+   v3 wrappers may also include { type:'passkey', credId, iv, wrapped, ... }
+   (Brief 8): opened by a passkey's PRF secret, skipped by password/phrase
+   attempts, harmless to older versions. See "passkey door" below.
 
    PURE-ish: no DOM, no storage. Node-testable (see .claude/test-vault.js).
    ============================================================ */
@@ -2586,8 +2591,11 @@ async function openVaultBlob(blobStr, credential) {
     } catch (e) { return null; }
   }
 
-  // v3: try each wrapper until one opens.
+  // v3: try each wrapper until one opens. A passkey door is opened by the
+  // passkey's PRF secret (openVaultBlobWithPasskey), never by a typed string:
+  // trying it here would only waste a PBKDF2 run.
   for (const w of (obj.wrappers || [])) {
+    if (w.type === 'passkey') continue;
     const rawDek = await unwrapDek(w, credential);
     if (!rawDek) continue;
     try {
@@ -2606,12 +2614,86 @@ function vaultHasRecovery(blobStr) {
   } catch (e) { return false; }
 }
 
+/* ---------- passkey door (Brief 8) ----------
+   A passkey with the WebAuthn PRF extension gives the browser a secret that
+   only that passkey can produce. HKDF turns it into a key that wraps the same
+   DEK: a third door beside the password and the recovery phrase. The secret
+   never leaves the device; our server only ever checks signatures.
+
+   Wrapper: { type:'passkey', credId, rpId, iv, wrapped, created, label, iterations:1 }
+     rpId — the site the passkey belongs to (simpl.money), so an everyday
+     unlock can ask the browser for it without the server.
+     credId — the credential's base64url id, i.e. which passkey this door is
+     for; it is also HKDF's salt, so one passkey's secret can't open another's
+     door. There is deliberately no `salt` field: older app versions try every
+     wrapper with PBKDF2 and the typed password, and with no salt that attempt
+     throws at once inside unwrapDek's try (iterations:1 caps it if that ever
+     changed). A passkey door costs them nothing and opens nothing.
+
+   PRF input: one constant for every credential, so a browser with no vault can
+   ask for "any Simpl passkey" and get the key in the same touch. The output
+   is still unique per passkey; the input is not a secret. */
+const PASSKEY_PRF_INPUT = vEnc.encode('simpl-vault-passkey-v1');
+const PASSKEY_HKDF_INFO = vEnc.encode('simpl-vault-passkey-v1');
+
+async function vPasskeyKek(prfOutput, credId) {
+  const ikm = await crypto.subtle.importKey('raw', prfOutput, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: vEnc.encode(credId), info: PASSKEY_HKDF_INFO },
+    ikm, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  );
+}
+
+async function wrapDekWithPasskey(credId, prfOutput, rawDek, label, rpId) {
+  if (!credId || !prfOutput || prfOutput.byteLength < 32) throw new Error('passkey_prf_missing');
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const kek = await vPasskeyKek(prfOutput, credId);
+  const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, rawDek);
+  return { type: 'passkey', credId, rpId: rpId || '', iv: vBufToB64(iv), wrapped: vBufToB64(wrapped), created: new Date().toISOString(), label: label || '', iterations: 1 };
+}
+
+async function unwrapDekWithPasskey(wrapper, prfOutput) {
+  try {
+    const kek = await vPasskeyKek(prfOutput, wrapper.credId);
+    const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: vB64ToBuf(wrapper.iv) }, kek, vB64ToBuf(wrapper.wrapped));
+    return new Uint8Array(raw);
+  } catch (e) { return null; }
+}
+
+/* Open a v3 vault with the PRF secret of the passkey `credId`. Same result
+   shape as openVaultBlob, openedWith 'passkey'; null if it doesn't fit. */
+async function openVaultBlobWithPasskey(blobStr, credId, prfOutput) {
+  let obj;
+  try { obj = JSON.parse(blobStr); } catch (e) { return null; }
+  if (!obj || obj.v !== 3) return null;
+  const w = (obj.wrappers || []).find((x) => x.type === 'passkey' && x.credId === credId);
+  if (!w) return null;
+  const rawDek = await unwrapDekWithPasskey(w, prfOutput);
+  if (!rawDek) return null;
+  try {
+    const key = await vDekKey(rawDek);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: vB64ToBuf(obj.iv) }, key, vB64ToBuf(obj.ct));
+    return { data: JSON.parse(vDec.decode(plain)), rawDek, wrappers: obj.wrappers, openedWith: 'passkey', legacy: false };
+  } catch (e) { return null; }
+}
+
+/* The passkey doors on a vault: [{ credId, rpId, label, created }]. */
+function vaultPasskeys(blobStr) {
+  try {
+    const obj = JSON.parse(blobStr);
+    if (!obj || obj.v !== 3) return [];
+    return (obj.wrappers || []).filter((w) => w.type === 'passkey' && w.credId)
+      .map((w) => ({ credId: w.credId, rpId: w.rpId || '', label: w.label || '', created: w.created || '' }));
+  } catch (e) { return []; }
+}
+
 /* Node test hook — harmless in the browser. */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     VAULT_WORDLIST, RECOVERY_WORD_COUNT, VAULT_ITERATIONS,
     generateRecoveryPhrase, normaliseRecoveryPhrase, unknownPhraseWords, recoveryPhraseShape,
     wrapDek, unwrapDek, vNewDekBytes, createVaultBlob, openVaultBlob, vaultHasRecovery,
+    PASSKEY_PRF_INPUT, wrapDekWithPasskey, unwrapDekWithPasskey, openVaultBlobWithPasskey, vaultPasskeys,
   };
 }
 </script>
@@ -2914,6 +2996,30 @@ async function cloudVerifyCode(email, code) {
   return body;
 }
 
+/* ---- passkeys (Brief 8, src/passkey.js) ----
+   Signing in with a passkey gets the same device token a code does. Only the
+   signature goes to the server; the PRF secret stays on the device. */
+async function cloudPasskeyCall(path, method, body, auth) {
+  const headers = { 'Content-Type': 'application/json' };
+  const res = auth
+    ? await cloudFetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined })
+    : await fetch(LICENCE_API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || ('passkey_' + res.status));
+  return out;
+}
+function cloudPasskeyRegisterOptions() { return cloudPasskeyCall('/passkey/register/options', 'POST', {}, true); }
+function cloudPasskeyRegisterVerify(response, label, prf) { return cloudPasskeyCall('/passkey/register/verify', 'POST', { response, label, prf: !!prf }, true); }
+function cloudPasskeyLoginOptions() { return cloudPasskeyCall('/passkey/login/options', 'POST', {}, false); }
+function cloudPasskeyList() { return cloudPasskeyCall('/passkey/list', 'GET', null, true); }
+function cloudPasskeyDelete(credId) { return cloudPasskeyCall('/passkey?id=' + encodeURIComponent(credId), 'DELETE', null, true); }
+async function cloudPasskeyLoginVerify(response) {
+  const body = await cloudPasskeyCall('/passkey/login/verify', 'POST', { response, deviceId: getDeviceId() }, false);
+  cloudSet(CLOUD_TOKEN_STORE, body.token);
+  cloudSet(CLOUD_EMAIL_STORE, body.email);
+  return body;
+}
+
 /* Upload. `expectVersion` is what this device believes the server holds; the
    server refuses a mismatch rather than applying it, so an old device coming
    back to life cannot quietly replace newer work. A conflict is returned, not
@@ -3018,6 +3124,148 @@ function cloudCounts(s) {
   } catch (e) { return {}; }
 }
 </script>
+<script>/* ============================================================
+   PASSKEYS — the browser side (Brief 8)
+
+   Two things a passkey does for Simpl, in one touch:
+     1. signs in to the backup server instead of an emailed code
+        (worker/src/passkey.js checks the signature), and
+     2. opens the vault: the WebAuthn PRF extension returns a secret only that
+        passkey can produce, which src/vault.js turns into a key for the DEK.
+
+   THE PRF SECRET NEVER LEAVES THIS DEVICE. Responses are serialised by hand
+   below with clientExtensionResults emptied, because a browser's own toJSON()
+   can include the PRF output — and that would hand our server a key.
+
+   PASSKEYS_ENABLED stays false in production until Brief 8 ships; the dev
+   build switches it on (dev/env.json). With it off nothing here runs.
+   ============================================================ */
+
+const PASSKEYS_ENABLED = false;
+
+function pkB64u(buf) {
+  const u = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function pkUnb64u(str) {
+  const s = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(s + '==='.slice((s.length + 3) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/* Can this browser use a passkey unlocked by the device itself (Touch ID,
+   Face ID, Windows Hello)? Cached: the answer doesn't change in a session. */
+let passkeySupportCache = null;
+async function passkeySupport() {
+  if (passkeySupportCache) return passkeySupportCache;
+  let out = { ok: false, platform: false };
+  try {
+    if (PASSKEYS_ENABLED && window.PublicKeyCredential && navigator.credentials && window.isSecureContext) {
+      let platform = false;
+      try { platform = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); } catch (e) {}
+      out = { ok: true, platform };
+    }
+  } catch (e) {}
+  passkeySupportCache = out;
+  return out;
+}
+
+/* What the person calls it on this device. */
+function passkeyName() {
+  const ua = navigator.userAgent || '';
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (ios) return 'Face ID';
+  if (/Macintosh|Mac OS X/.test(ua)) return 'Touch ID';
+  if (/Windows/.test(ua)) return 'Windows Hello';
+  if (/Android/.test(ua)) return 'your fingerprint';
+  return 'your passkey';
+}
+
+/* A short name for the passkey list: "Mac · Chrome". */
+function passkeyDeviceLabel() {
+  const ua = navigator.userAgent || '';
+  const device = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+    : /Macintosh|Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'Device';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+  return browser ? `${device} · ${browser}` : device;
+}
+
+/* The response, as the server needs it, with no extension results: the PRF
+   output must never be sent anywhere. */
+function passkeyResponseJSON(cred) {
+  const r = cred.response;
+  const out = {
+    id: cred.id,
+    rawId: pkB64u(cred.rawId),
+    type: cred.type,
+    clientExtensionResults: {},
+    response: { clientDataJSON: pkB64u(r.clientDataJSON) },
+  };
+  if (cred.authenticatorAttachment) out.authenticatorAttachment = cred.authenticatorAttachment;
+  if (r.attestationObject) {
+    out.response.attestationObject = pkB64u(r.attestationObject);
+    try { out.response.transports = r.getTransports ? r.getTransports() : []; } catch (e) { out.response.transports = []; }
+  }
+  if (r.authenticatorData) {
+    out.response.authenticatorData = pkB64u(r.authenticatorData);
+    out.response.signature = pkB64u(r.signature);
+    if (r.userHandle) out.response.userHandle = pkB64u(r.userHandle);
+  }
+  return out;
+}
+
+function passkeyPrfOutput(cred) {
+  try {
+    const ext = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+    const first = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+    return first ? new Uint8Array(first) : null;
+  } catch (e) { return null; }
+}
+
+/* Make a passkey from the server's registration options, asking for the PRF
+   secret at the same time. Some platforms only say PRF is "enabled" at
+   creation and give the secret on the next use; the caller asks again. */
+async function passkeyCreate(options) {
+  const publicKey = {
+    ...options,
+    challenge: pkUnb64u(options.challenge),
+    user: { ...options.user, id: pkUnb64u(options.user.id) },
+    excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: pkUnb64u(c.id) })),
+    extensions: { ...(options.extensions || {}), prf: { eval: { first: PASSKEY_PRF_INPUT } } },
+  };
+  const cred = await navigator.credentials.create({ publicKey });
+  let enabled = false;
+  try { const ext = cred.getClientExtensionResults(); enabled = !!(ext && ext.prf && (ext.prf.enabled || ext.prf.results)); } catch (e) {}
+  return { response: passkeyResponseJSON(cred), credId: pkB64u(cred.rawId), rpId: options.rp && options.rp.id, prfEnabled: enabled, prfOutput: passkeyPrfOutput(cred) };
+}
+
+/* Use a passkey. `options` is the server's (for signing in) or a local one
+   ({ rpId }) for unlocking a vault already on this device, where the
+   signature doesn't matter and only the PRF secret does. `allow` limits it to
+   these credential ids; empty means "any Simpl passkey". */
+async function passkeyGet(options, allow) {
+  const challenge = options.challenge ? pkUnb64u(options.challenge) : crypto.getRandomValues(new Uint8Array(32));
+  const publicKey = {
+    challenge,
+    rpId: options.rpId,
+    timeout: options.timeout || 60000,
+    userVerification: 'required',
+    allowCredentials: (allow || []).map((id) => ({ type: 'public-key', id: pkUnb64u(id) })),
+    extensions: { prf: { eval: { first: PASSKEY_PRF_INPUT } } },
+  };
+  const cred = await navigator.credentials.get({ publicKey });
+  return { response: passkeyResponseJSON(cred), credId: pkB64u(cred.rawId), prfOutput: passkeyPrfOutput(cred) };
+}
+
+/* "The person closed the prompt" is not an error worth a message. */
+function passkeyCancelled(e) {
+  return !!(e && (e.name === 'NotAllowedError' || e.name === 'AbortError'));
+}
+</script>
 <script>/* What's new — the notes shown on the dashboard card and in Settings → Help &
    Security. Newest release first; `version` is the APP_VERSION that shipped it.
 
@@ -3029,6 +3277,12 @@ function cloudCounts(s) {
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
    backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.45.0.1', date: '2026-10-13', items: [
+      { title: 'Charts in your own currency',
+        text: 'If your business keeps its books in dollars, euros or another currency, the revenue chart, its labels and your annual goal now show that currency instead of rand. Imports start in your currency too, your starter bank account is in it, and Canadian dollars are in every currency list. Finances says “Tax year”, and VAT is “payable to SARS” only for businesses in rand.' },
+    ],
+  },
   {
     version: '1.45.0.0', date: '2026-10-09', items: [
       { title: 'Clearing your browser no longer feels like starting over',
@@ -3239,6 +3493,22 @@ const COPY = {
     lock: 'Welcome back. Your data isn’t in this browser any more, but your backup is. Restore it to carry on.',
     noBackup: 'There is no backup for this email. Check it’s the address you use with Simpl. If Simpl is open on another device, close this, start a new vault, and Simpl will help you copy your data across.',
   },
+  // Brief 8. {name} becomes Touch ID, Face ID, Windows Hello or "your passkey".
+  passkey: {
+    offerTitle: 'Unlock with {name}',
+    offerText: 'Open Simpl with {name} instead of typing your password. If you ever clear your browser or get a new computer, the same touch brings your data straight back, no code or password needed. Your master password and recovery phrase still work, and Simpl still can’t see your data.',
+    offerAction: 'Turn on {name}',
+    unlock: 'Unlock with {name}',
+    lockSub: 'Unlock with {name}, or enter your master password.',
+    onboardSub: 'Welcome back. Sign in with {name}, or enter the email you use with Simpl and we’ll send you a code.',
+    signIn: 'Sign in with {name}',
+    on: '{name} is on. Next time, open Simpl with a touch.',
+    signInOnly: 'Your passkey is saved, but this browser can’t unlock Simpl with it yet. It will still sign you in to your backup without an emailed code.',
+    settingsText: 'Open Simpl with {name}, and get your data back after clearing your browser or on a new computer, with one touch.',
+    needsBackup: 'Unlocking with {name} uses your server backup. Turn backup on first.',
+    noBackup: 'That passkey isn’t linked to a Simpl backup any more. Use your email instead.',
+    cantOpen: 'That passkey can’t open this vault. Use your master password.',
+  },
   foundBackup: {
     title: 'We found your backup',
     text: 'This browser doesn’t have any of it yet, so restoring brings it all back here.',
@@ -3379,7 +3649,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.0.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -3567,6 +3837,11 @@ async function vaultDelete() {
 
 let state = null;
 let currentPassword = null;
+// Open = decrypted and holding a way to re-encrypt: the password, or the data
+// key itself. A passkey unlock has the key but never sees the password, so
+// "is there a password in memory?" must not stand for "is the vault open?" —
+// saveState asked exactly that, and would have silently saved nothing.
+function vaultUnlocked() { return !!state && !!(currentPassword || currentDek); }
 // Envelope crypto (see src/vault.js): a random DEK encrypts the vault and is
 // wrapped once per credential (password, recovery phrase). Both live in memory
 // only while unlocked.
@@ -4078,7 +4353,7 @@ function openPaywallModal(reason) {
 let quotaWarned = false; // one nudge per session is enough
 
 async function saveState() {
-  if (!state || !currentPassword) return;
+  if (!vaultUnlocked()) return;
   applyAutoOverdue(state);
   // Change tracking runs after auto-overdue (so status flips are stamped) and
   // is fenced: a tracker bug must never be able to block a save.
@@ -4191,6 +4466,13 @@ function addDays(iso, days) {
 }
 const SYM = { ZAR: 'R', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', CAD: 'C$', KES: 'KSh' };
 const SUPPORTED_CURRENCIES = ['ZAR', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'KES'];
+// <option>s for a currency picker: every supported currency, plus the record's
+// own if it is something older or imported, so it is never silently swapped
+// for the first option. Every currency <select> uses this.
+function currencyOptions(selected) {
+  const list = !selected || SUPPORTED_CURRENCIES.includes(selected) ? SUPPORTED_CURRENCIES : [...SUPPORTED_CURRENCIES, selected];
+  return list.map((c) => `<option value="${escapeHtml(c)}"${c === selected ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+}
 // The app's home/reporting currency — everything converts to this for the dashboard,
 // finances and accountant report. Configurable in Settings; defaults to ZAR.
 function baseCcy() { return (state && state.settings && state.settings.baseCurrency) || 'ZAR'; }
@@ -4248,6 +4530,25 @@ function fmtMoney(n, currency) {
   // 1,234.56 — comma thousands, point before cents
   return sym + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+// Compact money for charts and short labels: R12k, $1.2m, €950. Defaults to
+// the business's own currency. (Until 13 Oct 2026 charts and the annual-goal
+// line said "R" to every business, whatever its currency.)
+function fmtMoneyShort(n, currency) {
+  const ccy = currency || baseCcy();
+  const sym = SYM[ccy] || ccy + ' ';
+  const v = Number(n) || 0;
+  if (Math.abs(v) >= 1e6) return sym + (v / 1e6).toFixed(1) + 'm';
+  if (Math.abs(v) >= 1e3) return sym + Math.round(v / 1e3) + 'k';
+  return sym + Math.round(v);
+}
+// Whole units with grouping, for tooltips: R12,345 / $12,345.
+function fmtMoneyWhole(n, currency) {
+  const ccy = currency || baseCcy();
+  return (SYM[ccy] || ccy + ' ') + Math.round(Number(n) || 0).toLocaleString('en-US');
+}
+// Who VAT is paid to. Simpl has no country setting; a business keeping its
+// books in rand is South African, so SARS. Anyone else gets neutral wording.
+function vatAuthority() { return baseCcy() === 'ZAR' ? 'SARS' : ''; }
 function docNumber(d) {
   // Prefix + padding are per-business settings (fallbacks cover vaults created
   // before v6.6 and the create-vault path, which skips migrateState).
@@ -4829,7 +5130,7 @@ async function fetchFxHistory(base, ccys, from, to) {
 // Finds the exact rates still missing (backfilling records from before v1.41
 // too), re-stamps and saves. Each date is asked for at most once a session.
 async function refreshFxHistory() {
-  if (!state || !currentPassword) return false;
+  if (!vaultUnlocked()) return false;
   if (fxRefreshing) return fxRefreshing;
   // Cleared only by the run that set it: a run with nothing to fetch finishes
   // before the assignment below, and a `finally` inside it would clear the
@@ -4950,7 +5251,7 @@ function migrateState() {
 
   // v6.1: per-business VAT rate (defaults to 15% for existing businesses)
   // v6.2: per-business VAT cycle (defaults to bi-monthly = previous SA behaviour)
-  for (const ent of (state.entities || [])) ensureEntityShape(ent);
+  for (const ent of (state.entities || [])) { ensureEntityShape(ent); alignStarterBanking(ent); }
   state.version = 6;
 }
 
@@ -5024,8 +5325,8 @@ function ensureEntityShape(ent) {
    FINANCE HELPERS
    ============================================================ */
 
-// SA tax year: 1 March - end Feb. Returns { start: ISO, end: ISO, label: '2026/27', months: [ISO,...] }
-// This business's tax-year start month (1-12). Default 3 = March (South Africa).
+// The business's tax year: starts on taxYearStartMonth (Settings; default 3 =
+// March, South Africa). Returns { start: ISO, end: ISO, label: '2026/27', months: [ISO,...] }
 function taxYearStartMonth() {
   const v = state && state.settings ? Number(state.settings.taxYearStartMonth) : NaN;
   return (isNaN(v) || v < 1 || v > 12) ? 3 : v;
@@ -5435,7 +5736,7 @@ function svgBarChart(labels, values, opts = {}) {
     const v = (niceMax / ticks) * i;
     const y = yScale(v);
     gridLines.push(`<line x1="${PAD_L}" y1="${y}" x2="${PAD_L + innerW}" y2="${y}" stroke="${i === 0 ? 'rgba(245,242,236,0.30)' : 'rgba(245,242,236,0.08)'}" stroke-width="${i === 0 ? 1 : 0.5}" />`);
-    gridLines.push(`<text x="${PAD_L - 8}" y="${y + 3}" font-size="10" fill="rgba(245,242,236,0.38)" text-anchor="end" font-family="DM Mono, monospace">${formatChartTick(v)}</text>`);
+    gridLines.push(`<text x="${PAD_L - 8}" y="${y + 3}" font-size="10" fill="rgba(245,242,236,0.38)" text-anchor="end" font-family="DM Mono, monospace">${fmtMoneyShort(v)}</text>`);
   }
 
   const bars = values.map((v, i) => {
@@ -5446,9 +5747,9 @@ function svgBarChart(labels, values, opts = {}) {
     const reachedGoal = goalForMonth && v >= goalForMonth;
     const fill = reachedGoal ? '#C7F659' : 'rgba(245,242,236,0.62)';
     return `<g>
-      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3">${opts.barKeys ? '' : `<title>${labels[i]}: R${Math.round(v).toLocaleString('en-US')}</title>`}</rect>
+      <rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 0)}" fill="${fill}" rx="3">${opts.barKeys ? '' : `<title>${labels[i]}: ${fmtMoneyWhole(v)}</title>`}</rect>
       <text x="${x + barW / 2}" y="${H - PAD_B + 14}" font-size="10" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Sans, sans-serif">${labels[i]}</text>
-      ${v > 0 ? `<text x="${x + barW / 2}" y="${y - 4}" font-size="9" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Mono, monospace">${formatChartTick(v)}</text>` : ''}
+      ${v > 0 ? `<text x="${x + barW / 2}" y="${y - 4}" font-size="9" fill="rgba(245,242,236,0.62)" text-anchor="middle" font-family="DM Mono, monospace">${fmtMoneyShort(v)}</text>` : ''}
     </g>`;
   }).join('');
 
@@ -5480,11 +5781,6 @@ function svgBarChart(labels, values, opts = {}) {
     ${bars}
     ${hits}
   </svg>`;
-}
-function formatChartTick(v) {
-  if (v >= 1e6) return 'R' + (v / 1e6).toFixed(1) + 'm';
-  if (v >= 1e3) return 'R' + Math.round(v / 1e3) + 'k';
-  return 'R' + Math.round(v);
 }
 function niceCeil(v) {
   if (v <= 0) return 1;
@@ -5990,6 +6286,8 @@ function renderDashboard() {
       <div><strong>Backup is off.</strong> Your data exists only on this device, so a cleared browser or a lost device would take it with it.</div>
       <button class="btn btn-sm btn-primary" id="dash-backup-on">Turn on backup</button>
     </div>`}
+
+    ${renderPasskeyOffer()}
 
     <div class="bento dash">
       <!-- Hero: This month so far — LIME -->
@@ -6571,7 +6869,7 @@ function renderFinancesOverviewParts() {
       <button class="btn" id="refresh-fx-fin">Refresh FX</button>
       <button class="btn" id="fin-export-report">Export for accountant</button>
     `,
-    subtitle: `SA tax year ${ty.label} · ${financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis'}`,
+    subtitle: `Tax year ${ty.label} · ${financesBasis === 'cash' ? 'Cash basis' : 'Accrual basis'}`,
     body: `
 
     <!-- Headline bento -->
@@ -6595,7 +6893,7 @@ function renderFinancesOverviewParts() {
               <div style="margin-top:14px;background:rgba(245,242,236,0.10);border-radius:99px;height:6px;overflow:hidden;">
                 <div style="height:100%;background:var(--accent-bright);width:${ytdProgressPct}%;border-radius:99px;"></div>
               </div>
-              <div class="sub" style="margin-top:6px;">${ytdProgressPct.toFixed(0)}% of R${(annualGoal/1000).toFixed(0)}k annual goal</div>
+              <div class="sub" style="margin-top:6px;">${ytdProgressPct.toFixed(0)}% of ${fmtMoneyShort(annualGoal)} annual goal</div>
             ` : ''}
           </div>
         </div>
@@ -6961,7 +7259,7 @@ function openVatPeriodModal(p) {
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
             ${figure('Output VAT', fmtMoney(det.output, baseCcy()))}
             ${figure('Input VAT', fmtMoney(det.input, baseCcy()))}
-            ${figure(det.net >= 0 ? 'Net payable to SARS' : 'Net refund due', fmtMoney(Math.abs(det.net), baseCcy()), '', 'var(--accent-bright)')}
+            ${figure(det.net >= 0 ? (vatAuthority() ? 'Net payable to ' + vatAuthority() : 'Net VAT payable') : 'Net refund due', fmtMoney(Math.abs(det.net), baseCcy()), '', 'var(--accent-bright)')}
           </div>
           <div class="text-sm text-mid" style="margin-bottom:20px;">
             ${financesBasis === 'cash' ? 'Payments (cash) basis: invoices count when paid.' : 'Invoice (accrual) basis: invoices count on their invoice date.'}
@@ -7014,7 +7312,7 @@ function exportVatPeriod(p) {
   row('3. Purchases you paid VAT on (including VAT)', det.vatablePurchases.toFixed(2));
   row('   VAT claimable on those purchases (input VAT)', det.input.toFixed(2));
   row();
-  row('NET PAYABLE TO SARS', det.net.toFixed(2));
+  row(vatAuthority() ? 'NET PAYABLE TO ' + vatAuthority() : 'NET VAT PAYABLE', det.net.toFixed(2));
   row();
   row('INVOICES WITH VAT');
   row('Invoice #', 'Date', 'Client', 'Excl VAT', 'VAT', 'Total');
@@ -7832,7 +8130,7 @@ function openExpenseModal(expense) {
             <div class="field">
               <label>Currency</label>
               <select data-ef="currency">
-                ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === expense.currency ? 'selected' : ''}>${c}</option>`).join('')}
+                ${currencyOptions(expense.currency || baseCcy())}
               </select>
             </div>
             <div class="field full" id="exp-base-field" ${expense.currency === baseCcy() ? 'hidden' : ''}>
@@ -9621,7 +9919,7 @@ function accountantReport(from, to, basis) {
   const notes = [
     cash ? 'Basis: cash (payments). Income counts on the date it was paid; credit notes on their own date; expenses on their date.'
       : 'Basis: accrual (invoice). Income counts on the invoice date; credit notes on their own date; expenses on their date.',
-    `All totals are in ${ccy}. Revenue excludes VAT, which is collected for SARS and shown separately.`,
+    `All totals are in ${ccy}. Revenue excludes VAT, which is collected for ${vatAuthority() || 'the tax authority'} and shown separately.`,
   ];
   const foreign = Object.values(fxUsed).reduce((a, b) => a + b, 0);
   if (foreign) {
@@ -11428,7 +11726,7 @@ function renderDocEditor() {
         <div class="field">
           <label>Currency</label>
           <select data-df="currency">
-            ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === d.currency ? 'selected' : ''}>${c}</option>`).join('')}
+            ${currencyOptions(d.currency || baseCcy())}
           </select>
         </div>
         ${d.type !== 'quote' && d.currency !== baseCcy() ? fxEditorField(d, 'issue') + (d.type === 'invoice' && d.status === 'paid' ? fxEditorField(d, 'paid') : '') : ''}
@@ -12925,7 +13223,7 @@ function renderSettingsBusiness() {
             <div class="field">
               <label>Currency</label>
               <select data-bk="${i}" data-bf="currency">
-                ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === b.currency ? 'selected' : ''}>${c}</option>`).join('')}
+                ${currencyOptions(b.currency)}
               </select>
             </div>
             <div class="field full"><label>Details (shown on invoice/quote)</label><textarea data-bk="${i}" data-bf="details" style="min-height:120px;">${escapeHtml(b.details)}</textarea></div>
@@ -12985,7 +13283,7 @@ function renderSettingsMoney() {
       <h3>Goals</h3>
       <div class="form-grid">
         <div class="field">
-          <label>Annual revenue target (${baseCcy()}, current SA tax year)</label>
+          <label>Annual revenue target (${baseCcy()}, current tax year)</label>
           <input data-goal-annual type="number" step="any" value="${state.settings.goals?.annual || 0}" />
         </div>
       </div>
@@ -13152,6 +13450,7 @@ function renderSettingsHelp() {
           <input id="pwd-hint" value="${escapeHtml(getPwdHint())}" placeholder="e.g. the usual, plus the year" />
         </div>
       </div>
+      ${renderPasskeySettings()}
 
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -13187,6 +13486,7 @@ function bindSettingsEvents() {
   const entAdd = host.querySelector('#entity-add-btn');
   if (entAdd) entAdd.addEventListener('click', () => addEntityFlow());
 
+  bindPasskeySettings(host);
   host.querySelectorAll('[data-cs]').forEach((el) => {
     el.addEventListener('change', async () => {
       const f = el.dataset.cs;
@@ -13210,6 +13510,8 @@ function bindSettingsEvents() {
         // Keep the entity's switcher label in sync with the company name
         if (f === 'name') { const e = activeEntity(); if (e) e.name = v || 'Untitled'; }
       }
+      // A new currency moves the untouched starter bank with it (redrawn below).
+      if (f === 'baseCurrency') alignStarterBanking(activeEntity());
       await saveState();
       toast('Saved');
       if (f === 'autoLockMinutes') {
@@ -13517,7 +13819,7 @@ function openHistoricalModal() {
             <div class="field"><label>Date</label><input id="h-date" type="date" value="${todayISO()}" /></div>
             <div class="field">
               <label>Currency</label>
-              <select id="h-currency">${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option>${c}</option>`).join('')}</select>
+              <select id="h-currency">${currencyOptions(baseCcy())}</select>
             </div>
             <div class="field"><label>Total amount</label><input id="h-total" type="number" step="any" /></div>
             <div class="field">
@@ -13620,7 +13922,11 @@ function openChangePasswordModal() {
     const n2 = document.getElementById('cp-new2').value;
     const err = document.getElementById('cp-err');
     err.textContent = '';
-    if (cur !== currentPassword) { err.textContent = 'Current password is incorrect.'; return; }
+    // After a passkey unlock there is no password in memory: ask the vault's own
+    // password door instead.
+    const pwDoor = (currentWrappers || []).find((w) => w.type === 'password');
+    const curOk = currentPassword != null ? cur === currentPassword : !!(pwDoor && await unwrapDek(pwDoor, cur));
+    if (!curOk) { err.textContent = 'Current password is incorrect.'; return; }
     if (n1.length < 8) { err.textContent = 'New password must be at least 8 characters.'; return; }
     if (n1 !== n2) { err.textContent = 'New passwords do not match.'; return; }
     await ensureDek();
@@ -13778,6 +14084,7 @@ function bindViewEvents() {
 
   if (currentRoute === 'dashboard') {
     document.getElementById('dash-backup-on')?.addEventListener('click', () => openCloudEnrolModal(null, { auto: true }));
+    bindPasskeyOffer();
     document.querySelectorAll('[data-basis]').forEach((el) => el.addEventListener('click', () => { financesBasis = el.dataset.basis; render(); }));
     const fx = document.getElementById('refresh-fx');
     if (fx) fx.addEventListener('click', async () => {
@@ -14106,7 +14413,7 @@ function openColumnMapper(rows, fileName) {
     rows,                    // raw rows including any preamble
     headerIdx,
     fields: { date: null, amountSigned: null, amountUnsigned: null, direction: null, moneyIn: null, moneyOut: null, description: null, reference: null, balance: null, id: null, currency: null },
-    currencyDefault: 'ZAR',
+    currencyDefault: baseCcy(),
     profileName: fileName.replace(/\.(csv|pdf)$/i, ''),
   };
 
@@ -14163,7 +14470,7 @@ function openColumnMapper(rows, fileName) {
               <div class="field">
                 <label>Default currency <span class="text-muted">(if no column)</span></label>
                 <select id="map-currency">
-                  ${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === mapperState.currencyDefault ? 'selected' : ''}>${c}</option>`).join('')}
+                  ${currencyOptions(mapperState.currencyDefault)}
                 </select>
               </div>
               <div class="field">
@@ -14374,7 +14681,7 @@ function openBulkInvoicePreview(rows, fileName) {
     const num = parseInt((row[cols.number] || '').toString().replace(/[^\d]/g, ''), 10);
     const date = parseDateFlexible((row[cols.date] || '').toString().trim());
     const clientName = (row[cols.client] || '').toString().trim();
-    const currency = ((row[cols.currency] || '').toString().trim() || 'ZAR').toUpperCase();
+    const currency = ((row[cols.currency] || '').toString().trim() || baseCcy()).toUpperCase();
     const subtotal = parseFloat(((row[cols.subtotal] || '0') + '').replace(/[, ]/g, '')) || 0;
     const vatPct = cols.vat_pct >= 0 ? (parseFloat(((row[cols.vat_pct] || '0') + '').replace(/[, ]/g, '')) || 0) : 0;
     const totalRaw = cols.total >= 0 ? parseFloat(((row[cols.total] || '0') + '').replace(/[, ]/g, '')) : null;
@@ -14785,15 +15092,16 @@ function extractInvoiceFields(text, fileName) {
   }
 
   // --- Currency ---
-  m = joined.match(/\b(ZAR|USD|EUR|GBP|AUD|KES)\b/i);
+  m = joined.match(new RegExp('\\b(' + SUPPORTED_CURRENCIES.join('|') + ')\\b', 'i'));
   if (m) { result.currency = m[1].toUpperCase(); result.confidence.currency = 0.95; }
   if (!result.currency) {
     if (/R\s*[\d,.]+/.test(joined)) { result.currency = 'ZAR'; result.confidence.currency = 0.6; }
-    else if (/\$\s*[\d,.]+/.test(joined)) { result.currency = 'USD'; result.confidence.currency = 0.6; }
+    // A bare "$" is this business's own dollar when it keeps its books in one.
+    else if (/\$\s*[\d,.]+/.test(joined)) { result.currency = ['AUD', 'CAD'].includes(baseCcy()) ? baseCcy() : 'USD'; result.confidence.currency = 0.6; }
     else if (/£\s*[\d,.]+/.test(joined)) { result.currency = 'GBP'; result.confidence.currency = 0.6; }
     else if (/€\s*[\d,.]+/.test(joined)) { result.currency = 'EUR'; result.confidence.currency = 0.6; }
   }
-  result.currency = result.currency || 'ZAR';
+  result.currency = result.currency || baseCcy();
 
   // --- Total ---
   // Look for "TOTAL [CCY]" or "Amount Due" followed by a number
@@ -14925,7 +15233,7 @@ function renderPdfReviewModal() {
         <td><input data-pdfr="${idx}.number" type="number" value="${it.number ?? ''}" placeholder="—" style="max-width:90px;" /></td>
         <td><input data-pdfr="${idx}.date" type="date" value="${it.date || ''}" /></td>
         <td><input data-pdfr="${idx}.client" value="${escapeHtml(it.client || '')}" placeholder="—" style="min-width:140px;" /></td>
-        <td><select data-pdfr="${idx}.currency">${['ZAR','USD','EUR','GBP','AUD','KES'].map((c) => `<option value="${c}" ${c === (it.currency || 'ZAR') ? 'selected' : ''}>${c}</option>`).join('')}</select></td>
+        <td><select data-pdfr="${idx}.currency">${currencyOptions(it.currency || baseCcy())}</select></td>
         <td><input data-pdfr="${idx}.total" type="number" step="any" value="${it.total ?? ''}" placeholder="—" style="max-width:120px;" /></td>
         <td><select data-pdfr="${idx}.status">${['paid','sent','draft','overdue'].map((s) => `<option value="${s}" ${s === (it.status || 'paid') ? 'selected' : ''}>${s}</option>`).join('')}</select></td>
         <td><input data-pdfr="${idx}.paidDate" type="date" value="${it.paidDate || ''}" /></td>
@@ -15964,7 +16272,10 @@ function openCloudFoundBackupModal(server) {
     const opened = await openVaultBlob(latest.text, c.cred);
     if (!opened) { err.textContent = c.isPhrase ? 'That phrase does not open this backup.' : 'That password does not open this backup. Try your recovery phrase instead.'; return; }
     state = opened.data;
-    if (opened.rawDek) {
+    if (opened.rawDek && !currentPassword) {
+      currentDek = opened.rawDek;                    // no password in memory (passkey): keep the backup's doors as they are
+      currentWrappers = opened.wrappers || [];
+    } else if (opened.rawDek) {
       currentDek = opened.rawDek;
       currentWrappers = (opened.wrappers || []).filter((w) => w.type !== 'password');
       currentWrappers.unshift(await wrapDek('password', currentPassword, currentDek));
@@ -16511,12 +16822,44 @@ async function showLockForm(returningUser) {
     if (recBtn) recBtn.style.display = 'none';
     if (hintEl) hintEl.style.display = 'none';
   }
+  showLockPasskey(welcomeBack);
   if (welcomeBack) {
     if (lockAutoRestore) { lockAutoRestore = false; openLockRestoreModal({ autoSend: true }); }
     else document.getElementById('lock-wb-restore').focus();
     return;
   }
   document.getElementById('lock-pwd').focus();
+}
+
+/* Brief 8: "Unlock with Touch ID" when this vault has a passkey door, and
+   "Sign in with Touch ID" on the welcome-back view. The emailed code becomes
+   the second choice there. */
+async function showLockPasskey(welcomeBack) {
+  const btn = document.getElementById('lock-passkey');
+  const wb = document.getElementById('lock-wb-restore');
+  const pwBtn = document.getElementById('lock-btn');
+  btn.style.display = 'none';
+  wb.className = 'btn btn-primary';
+  wb.textContent = 'Restore my data';
+  pwBtn.className = 'btn btn-primary';
+  if (!PASSKEYS_ENABLED || lockMode === 'unreadable') return;
+  const support = await passkeySupport();
+  if (!support.ok) return;
+  let show = false;
+  if (lockMode === 'unlock') {
+    try { const blob = await vaultGet(); show = !!(blob && vaultPasskeys(blob).length); } catch (e) { show = false; }
+    btn.textContent = pkCopy(COPY.passkey.unlock);
+    if (show) {
+      pwBtn.className = 'btn';                       // one primary button: the passkey
+      document.getElementById('lock-sub').textContent = pkCopy(COPY.passkey.lockSub);
+    }
+  } else if (welcomeBack) {
+    show = true;
+    btn.textContent = pkCopy(COPY.passkey.signIn);
+    wb.className = 'btn';
+    wb.textContent = 'Restore with an emailed code';
+  }
+  btn.style.display = show ? '' : 'none';
 }
 
 document.getElementById('lock-recovery').addEventListener('click', () => openRecoveryUnlockModal());
@@ -16624,10 +16967,212 @@ function openLockRestoreModal(opts) {
     toast('Restored — welcome back');
     offerToSavePassword(password);
   }));
+  // Signed in already (a passkey without PRF): straight to the password step.
+  if (o.latest) {
+    latest = o.latest;
+    const when = latest.createdAt ? new Date(latest.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+    $('lr-found').innerHTML = `Found your backup from <strong>${escapeHtml(when)}</strong>: ${escapeHtml(backupCountsPhrase(latest.counts || {}))}.`;
+    step = 3; $('lr-step1').style.display = 'none'; $('lr-step3').style.display = ''; $('lr-go').textContent = 'Restore';
+    setTimeout(() => $('lr-pwd').focus(), 50);
+    return;
+  }
   // Straight from "Used Simpl before?": the email was just typed, so the code goes now.
   if (o.autoSend && isValidEmail($('lr-email').value.trim())) $('lr-go').click();
   else setTimeout(() => { const el = $('lr-email'); if (el) el.focus(); }, 50);
 }
+/* ============================================================
+   PASSKEYS (Brief 8) — the app's flows. Browser calls: src/passkey.js.
+   Server calls: src/cloud.js. The vault door: src/vault.js. All behind
+   PASSKEYS_ENABLED (off in production until Brief 8 ships).
+
+   A passkey is always an extra way in: the master password and recovery
+   phrase keep working, and removing every passkey returns Simpl to exactly
+   how it was. After a passkey unlock there is no password in memory
+   (currentPassword stays null); vaultUnlocked() covers that.
+   ============================================================ */
+const PASSKEY_OFFER_STORE = 'seed-passkey-offer-v1';
+const pkCopy = (str) => String(str).replace(/\{name\}/g, passkeyName());
+function vaultPasskeyDoors() { return (currentWrappers || []).filter((w) => w.type === 'passkey'); }
+
+// Adopt an opened vault into this session (passkey unlock or sign-in).
+async function enterWithOpenedVault(opened, version) {
+  state = opened.data;
+  currentDek = opened.rawDek;
+  currentWrappers = opened.wrappers || [];
+  currentPassword = null;
+  migrateState();
+  installEntityAccessors();
+  unlockFails = 0;
+  unlockLockedUntil = 0;
+  if (version != null) cloudSet(CLOUD_VERSION_STORE, version);
+  await saveState();
+  await enterApp();
+  fetchFxRates();
+}
+
+/* Turn on: the server registers the passkey (backup must be on), then a vault
+   door is made from its PRF secret. Some platforms only report PRF as enabled
+   at creation, so they're asked once more for the secret (a second touch).
+   Without PRF the passkey still signs in, it just can't unlock. */
+async function setupPasskey() {
+  if (!cloudEnrolled()) { toast(pkCopy(COPY.passkey.needsBackup)); openCloudEnrolModal(); return false; }
+  try {
+    const options = await cloudPasskeyRegisterOptions();
+    const made = await passkeyCreate(options);
+    let prf = made.prfOutput;
+    if (!prf && made.prfEnabled) prf = (await passkeyGet({ rpId: made.rpId }, [made.credId])).prfOutput;
+    const label = passkeyDeviceLabel();
+    await cloudPasskeyRegisterVerify(made.response, label, !!prf);
+    try { localStorage.setItem(PASSKEY_OFFER_STORE, 'done'); } catch (e) {}
+    if (!prf) { render(); alert(COPY.passkey.signInOnly); return true; }
+    await ensureDek();
+    const door = await wrapDekWithPasskey(made.credId, prf, currentDek, label, made.rpId);
+    currentWrappers = (currentWrappers || []).filter((w) => !(w.type === 'passkey' && w.credId === made.credId)).concat([door]);
+    await saveState();          // the backup carries the new door within a minute
+    render();
+    toast(pkCopy(COPY.passkey.on));
+    return true;
+  } catch (e) {
+    if (passkeyCancelled(e)) return false;
+    if (e && e.name === 'InvalidStateError') { alert('This device already has a Simpl passkey. Remove it in Settings, Security, then try again.'); return false; }
+    if (e && e.message === 'unauthorised') { openCloudEnrolModal(); return false; }
+    noteQuietError('passkey setup', e);
+    alert('Could not set up the passkey. Try again in a moment.');
+    return false;
+  }
+}
+
+async function removePasskey(credId) {
+  if (!confirm('Remove this passkey?\n\nIt will no longer unlock Simpl or sign in to your backup. Your master password and recovery phrase still work. You can also delete it from your password manager.')) return;
+  try { await cloudPasskeyDelete(credId); }
+  catch (e) { if (!e || e.message !== 'not_found') { alert('Could not remove it. Check your connection and try again.'); return; } }
+  currentWrappers = (currentWrappers || []).filter((w) => !(w.type === 'passkey' && w.credId === credId));
+  await saveState();
+  render();
+  toast('Passkey removed');
+}
+
+/* The dashboard offer: once, opt-in, never a modal over work. */
+function renderPasskeyOffer() {
+  if (!PASSKEYS_ENABLED || !passkeySupportCache || !passkeySupportCache.platform) return '';
+  if (!cloudEnrolled() || vaultPasskeyDoors().length) return '';
+  try { if (localStorage.getItem(PASSKEY_OFFER_STORE)) return ''; } catch (e) { return ''; }
+  return `<div class="card welcome-card">${emptyState({ title: pkCopy(COPY.passkey.offerTitle), text: pkCopy(COPY.passkey.offerText), action: pkCopy(COPY.passkey.offerAction), actionId: 'pk-offer-on', secondary: 'Not now', secondaryId: 'pk-offer-later' })}</div>`;
+}
+function bindPasskeyOffer() {
+  const on = document.getElementById('pk-offer-on');
+  if (on) on.addEventListener('click', () => withBusy(on, 'Waiting for ' + passkeyName() + '…', setupPasskey));
+  const later = document.getElementById('pk-offer-later');
+  if (later) later.addEventListener('click', () => { try { localStorage.setItem(PASSKEY_OFFER_STORE, 'later'); } catch (e) {} render(); });
+}
+
+/* Settings, Security. The list joins the server's passkeys with this vault's
+   doors: a door means it unlocks; server-only means it signs in only. */
+function renderPasskeySettings() {
+  if (!PASSKEYS_ENABLED || (passkeySupportCache && !passkeySupportCache.ok)) return '';
+  const doors = vaultPasskeyDoors();
+  return `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);" id="pk-settings">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+      <div>
+        <div style="font-weight:600;font-size:13px;">${escapeHtml(pkCopy(COPY.passkey.unlock))}</div>
+        <div class="text-sm text-mid" style="margin-top:3px;max-width:520px;line-height:1.5;">${escapeHtml(pkCopy(cloudEnrolled() ? COPY.passkey.settingsText : COPY.passkey.needsBackup))}</div>
+      </div>
+      <button class="btn btn-sm" id="pk-add">${escapeHtml(cloudEnrolled() ? (doors.length ? 'Add another passkey' : pkCopy(COPY.passkey.offerAction)) : 'Turn on backup')}</button>
+    </div>
+    <div id="pk-list" class="text-sm" style="margin-top:10px;"></div>
+  </div>`;
+}
+function bindPasskeySettings(host) {
+  const add = host.querySelector('#pk-add');
+  if (!add) return;
+  add.addEventListener('click', () => (cloudEnrolled() ? withBusy(add, 'Waiting for ' + passkeyName() + '…', setupPasskey) : openCloudEnrolModal()));
+  fillPasskeyList();
+}
+async function fillPasskeyList() {
+  const doors = vaultPasskeyDoors();
+  let server = [];
+  if (cloudEnrolled()) { try { server = (await cloudPasskeyList()).passkeys || []; } catch (e) { noteQuietError('passkey list', e); } }
+  const host = document.getElementById('pk-list');
+  if (!host) return;
+  const ids = [...new Set([...server.map((x) => x.credentialId), ...doors.map((d) => d.credId)])];
+  host.innerHTML = ids.map((id) => {
+    const sv = server.find((x) => x.credentialId === id);
+    const door = doors.find((w) => w.credId === id);
+    const label = (sv && sv.label) || (door && door.label) || 'Passkey';
+    const used = sv && sv.lastUsedAt ? ` · last used ${fmtDate(new Date(sv.lastUsedAt).toISOString().slice(0, 10))}` : '';
+    const what = (door ? 'Unlocks Simpl and signs in to your backup' : 'Signs in to your backup') + used;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border);">
+      <div><strong>${escapeHtml(label)}</strong><div class="text-muted">${escapeHtml(what)}</div></div>
+      <button class="btn btn-sm btn-ghost" data-pk-remove="${escapeHtml(id)}">Remove</button></div>`;
+  }).join('');
+  host.querySelectorAll('[data-pk-remove]').forEach((b) => b.addEventListener('click', () => removePasskey(b.dataset.pkRemove)));
+}
+
+/* Lock screen, vault on this device: one touch opens it, no server needed. */
+async function unlockWithPasskey() {
+  const err = document.getElementById('lock-err');
+  err.textContent = '';
+  let blob;
+  try { blob = await vaultGet(); } catch (e) { err.textContent = VAULT_UNREADABLE_MSG; return; }
+  if (!blob) return signInWithPasskey(false);
+  const doors = vaultPasskeys(blob);
+  if (!doors.length) return;
+  const rpId = doors[0].rpId || undefined;
+  try {
+    const got = await passkeyGet({ rpId }, doors.filter((d) => (d.rpId || undefined) === rpId).map((d) => d.credId));
+    const opened = got.prfOutput ? await openVaultBlobWithPasskey(blob, got.credId, got.prfOutput) : null;
+    if (!opened) { err.textContent = pkCopy(COPY.passkey.cantOpen); return; }
+    await enterWithOpenedVault(opened, null);
+  } catch (e) {
+    if (passkeyCancelled(e)) return;
+    noteQuietError('passkey unlock', e);
+    err.textContent = pkCopy(COPY.passkey.cantOpen);
+  }
+}
+
+/* A browser with no vault (cleared, or a new computer): the passkey signs in
+   to the backup and, with PRF, opens it in the same touch. Without PRF it
+   goes to the password/phrase step of the restore, skipping the emailed code.
+   Never runs over a vault that's already here. */
+async function signInWithPasskey(fromOnboarding) {
+  const errEl = document.getElementById(fromOnboarding ? 'ob-err' : 'lock-err');
+  errEl.textContent = '';
+  let local = null;
+  try { local = await vaultGet(); } catch (e) { errEl.textContent = VAULT_UNREADABLE_MSG; return; }
+  const toLock = () => {
+    if (!fromOnboarding) return;
+    document.getElementById('onboard-screen').classList.remove('show');
+    document.getElementById('lock-screen').style.display = 'flex';
+  };
+  if (local) { toLock(); await showLockFormForVault(); return unlockWithPasskey(); }
+  try {
+    const options = await cloudPasskeyLoginOptions();
+    const got = await passkeyGet(options, []);
+    let who;
+    try { who = await cloudPasskeyLoginVerify(got.response); }
+    catch (e) { errEl.textContent = e && e.message === 'passkey_unknown' ? COPY.passkey.noBackup : 'Could not sign in with that passkey. Try again, or use your email.'; return; }
+    const ob = getOnboarding() || {};
+    if (!ob.submitted) setOnboarding({ submitted: true, name: ob.name || '', email: who.email, at: new Date().toISOString(), pending: false, returning: true });
+    let latest = null;
+    try { latest = await cloudLatest(); } catch (e) { errEl.textContent = 'Could not reach your backup. Check your connection and try again.'; return; }
+    if (!latest) { errEl.textContent = 'There is no backup for this account yet.'; return; }
+    toLock();
+    const opened = got.prfOutput ? await openVaultBlobWithPasskey(latest.text, got.credId, got.prfOutput) : null;
+    if (!opened) { await showLockFormForVault(); openLockRestoreModal({ latest }); return; }
+    await enterWithOpenedVault(opened, latest.version);
+    toast('Restored — welcome back');
+  } catch (e) {
+    if (passkeyCancelled(e)) return;
+    noteQuietError('passkey sign-in', e);
+    errEl.textContent = 'Could not sign in with a passkey. Use your email instead.';
+  }
+}
+document.getElementById('lock-passkey').addEventListener('click', (e) => {
+  const btn = e.currentTarget;
+  withBusy(btn, 'Waiting for ' + passkeyName() + '…', () => (lockMode === 'unlock' ? unlockWithPasskey() : signInWithPasskey(false)));
+});
+document.getElementById('ob-passkey').addEventListener('click', (e) => withBusy(e.currentTarget, 'Waiting for ' + passkeyName() + '…', () => signInWithPasskey(true)));
+
 document.getElementById('lock-earlier').addEventListener('click', () => openEarlierVaultModal());
 
 /* Every vault this device holds: the one in use, any the storage safety net set
@@ -16898,6 +17443,8 @@ async function enterApp() {
   setTimeout(() => { refreshFxHistory().catch((e) => noteQuietError('exchange rates', e)); }, 3000);
   maybePromptCloudBackup();
   setTimeout(refreshLicenceFromServer, 2500);   // renewals and referral rewards arrive by themselves
+  // Brief 8: once we know this device can use a passkey, the dashboard may offer one.
+  if (PASSKEYS_ENABLED) passkeySupport().then(() => { if (currentRoute === 'dashboard' && renderPasskeyOffer() && !document.getElementById('pk-offer-on')) render(); });
   // Changes a previous session couldn't send before it closed go now.
   if (cloudEnrolled() && cloudGet(CLOUD_DIRTY_STORE) === '1') setTimeout(() => runCloudBackup({ silent: true }), 5000);
   // Nudge pre-recovery-phrase users — but never stack on top of another modal.
@@ -16908,13 +17455,45 @@ async function enterApp() {
   checkForUpdate();                     // unlock is a natural "am I stale?" moment
 }
 
-const BLANK_BANKING = [
-  { id: 'sa', label: 'Local Bank (ZAR)', currency: 'ZAR', details: '' },
-  { id: 'usd', label: 'Wise · USD', currency: 'USD', details: '' },
-  { id: 'eur', label: 'Wise · EUR', currency: 'EUR', details: '' },
-  { id: 'gbp', label: 'Wise · GBP', currency: 'GBP', details: '' },
-  { id: 'aud', label: 'Wise · AUD', currency: 'AUD', details: '' },
-];
+/* The starter banking list: a local bank in the business's own currency, plus
+   Wise accounts for the other common ones. Until 13 Oct 2026 the local bank
+   was "Local Bank (ZAR)" for every business, whatever its currency. */
+const STARTER_WISE = ['USD', 'EUR', 'GBP', 'AUD'];
+const LOCAL_BANK_FIELDS = {
+  ZAR: '[Account name]\n[Account number]\n[Branch code]',
+  USD: '[Account name]\n[Routing number]\n[Account number]',
+  EUR: '[Account name]\n[IBAN]\n[BIC]',
+  GBP: '[Account name]\n[Sort code]\n[Account number]',
+  AUD: '[Account name]\n[BSB code]\n[Account number]',
+  CAD: '[Account name]\n[Transit and institution number]\n[Account number]',
+  KES: '[Account name]\n[Bank and branch]\n[Account number]',
+};
+function starterBanking(base) {
+  const b = base || 'ZAR';
+  return [{ id: 'sa', label: `Local Bank (${b})`, currency: b, details: '' }]
+    .concat(STARTER_WISE.filter((c) => c !== b).map((c) => ({ id: c.toLowerCase(), label: `Wise · ${c}`, currency: c, details: '' })));
+}
+// Still as Simpl made it: nothing typed, or only the [placeholder] lines.
+function bankDetailsUntouched(b) {
+  const t = String((b && b.details) || '').trim();
+  return !t || t.split('\n').every((l) => !l.trim() || /^\[.*\]$/.test(l.trim()));
+}
+/* The starter local bank follows the business's currency while it is still
+   untouched: on unlock (for businesses that changed currency before this
+   existed) and when the currency changes in Settings. Real details and a
+   renamed entry are never touched. An untouched Wise starter in the same
+   currency would then be a duplicate, so it goes. Returns true if it changed. */
+function alignStarterBanking(ent) {
+  if (!ent || !Array.isArray(ent.banking)) return false;
+  const base = ent.baseCurrency || 'ZAR';
+  const local = ent.banking.find((b) => b && b.id === 'sa');
+  if (!local || local.currency === base || !bankDetailsUntouched(local) || !/^Local Bank \(/.test(local.label || '')) return false;
+  local.currency = base;
+  local.label = `Local Bank (${base})`;
+  if (String(local.details || '').trim()) local.details = LOCAL_BANK_FIELDS[base] || '[Account name]\n[Account number]';
+  ent.banking = ent.banking.filter((b) => b === local || !(b && b.currency === base && /^Wise · /.test(b.label || '') && bankDetailsUntouched(b)));
+  return true;
+}
 
 function renderEntitySwitcher() {
   const host = document.getElementById('entity-switcher');
@@ -16972,7 +17551,7 @@ async function addEntityFlow() {
     id, name: trimmed,
     company: { name: trimmed, attention: '', address: '', vat: '', email: '', phone: '' },
     logo: null,
-    banking: JSON.parse(JSON.stringify(BLANK_BANKING)),
+    banking: starterBanking(defaultBase),
     nextInv: 1, nextQt: 1,
     baseCurrency: defaultBase,
     goals: { annual: 0, monthly: {} },
@@ -17076,7 +17655,7 @@ function initPwa() {
   const dismissBtn = document.getElementById('update-dismiss');
   if (reloadBtn) reloadBtn.addEventListener('click', async () => {
     // Safety net: download a backup before reloading to the new version
-    try { if (state && currentPassword) await downloadBackupSilent(); } catch (e) { noteQuietError('backup download', e); }
+    try { if (vaultUnlocked()) await downloadBackupSilent(); } catch (e) { noteQuietError('backup download', e); }
     setTimeout(() => location.reload(), 400);
   });
   if (dismissBtn) dismissBtn.addEventListener('click', () => {
@@ -17440,7 +18019,7 @@ function backupTextFromVaultBlob(vaultBlob) {
 }
 
 async function downloadBackupSilent() {
-  if (!state || !currentPassword) return;
+  if (!vaultUnlocked()) return;
   const blob = new Blob([await backupFileText()], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -17466,7 +18045,7 @@ function backupReminderDue() {
   return (Date.now() - new Date(m.at).getTime()) > BACKUP_REMIND_DAYS * 86400000;
 }
 async function exportBackup() {
-  if (!state || !currentPassword) return;
+  if (!vaultUnlocked()) return;
   const blob = new Blob([await backupFileText()], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -17681,6 +18260,18 @@ function showOnboarding() {
     document.getElementById('ob-btn').textContent = on ? COPY.returning.onboardAction : 'Continue';
     document.getElementById('ob-returning').textContent = on ? COPY.returning.back : COPY.returning.link;
     setTimeout(() => document.getElementById(on ? 'ob-email' : 'ob-name').focus(), 30);
+    // Brief 8: a passkey brings everything back in one touch; the email is the fallback.
+    const pk = document.getElementById('ob-passkey');
+    const ob = document.getElementById('ob-btn');
+    pk.style.display = 'none';
+    ob.className = 'btn btn-primary';
+    if (on && PASSKEYS_ENABLED) passkeySupport().then((sup) => {
+      if (!sup.ok || !returning) return;
+      pk.textContent = pkCopy(COPY.passkey.signIn);
+      pk.style.display = '';
+      ob.className = 'btn';
+      sub.textContent = pkCopy(COPY.passkey.onboardSub);
+    });
   };
   document.getElementById('ob-returning').onclick = () => setReturning(!returning);
   document.getElementById('onboard-form').onsubmit = async (e) => {
