@@ -3278,6 +3278,12 @@ function passkeyCancelled(e) {
    backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.0.2', date: '2026-10-14', items: [
+      { title: 'Imported invoices count the way they should',
+        text: 'Invoices imported from another tool keep their status words, like “Unpaid”, “Settled” or “Void”. Simpl now reads those properly, so a void or cancelled invoice no longer counts as income on the accrual basis, and an unpaid one shows in what you are owed.' },
+    ],
+  },
+  {
     version: '1.45.0.1', date: '2026-10-13', items: [
       { title: 'Charts in your own currency',
         text: 'If your business keeps its books in dollars, euros or another currency, the revenue chart, its labels and your annual goal now show that currency instead of rand. Imports start in your currency too, your starter bank account is in it, and Canadian dollars are in every currency list. Finances says “Tax year”, and VAT is “payable to SARS” only for businesses in rand.' },
@@ -3649,7 +3655,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.0.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.0.2';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -5251,7 +5257,16 @@ function migrateState() {
 
   // v6.1: per-business VAT rate (defaults to 15% for existing businesses)
   // v6.2: per-business VAT cycle (defaults to bi-monthly = previous SA behaviour)
-  for (const ent of (state.entities || [])) { ensureEntityShape(ent); alignStarterBanking(ent); }
+  for (const ent of (state.entities || [])) {
+    ensureEntityShape(ent);
+    alignStarterBanking(ent);
+    // Imported invoices whose status Simpl doesn't know (see normaliseInvoiceStatus).
+    for (const d of ent.documents || []) {
+      if (d.type !== 'invoice' || d.status === 'draft' || INVOICE_ISSUED.includes(d.status)) continue;
+      d.status = normaliseInvoiceStatus(d.status) || 'sent';
+      if (d.status === 'paid' && !d.paidDate) d.paidDate = d.date;
+    }
+  }
   state.version = 6;
 }
 
@@ -5425,9 +5440,32 @@ function recognitionDate(doc, basis) {
     if (doc.status !== 'paid') return null;
     return doc.paidDate || doc.date;
   }
-  // accrual: any non-draft invoice counts on its invoice date
-  if (doc.status === 'draft') return null;
+  // accrual: an issued invoice counts on its invoice date. Only the statuses
+  // an issued invoice can have: anything else (imported history said "Void")
+  // would count here but never in cash or Outstanding.
+  if (doc.status !== 'sent' && doc.status !== 'overdue' && doc.status !== 'paid') return null;   // = INVOICE_ISSUED
   return doc.date;
+}
+
+/* Invoice statuses. Simpl's own are draft, sent, overdue and paid; imported
+   history can say anything. normaliseInvoiceStatus maps the words other tools
+   use onto those four, on import and on unlock (migrateState), because "not a
+   draft" means "issued" all over the app: a stray "Void" counted as income in
+   accrual while cash and Outstanding ignored it (found checking cash vs
+   accrual, 14 Oct 2026). Unknown words become 'sent': still owed, so it shows
+   in Outstanding where it can be seen and fixed. Blank returns ''. */
+const INVOICE_ISSUED = ['sent', 'overdue', 'paid'];
+const INVOICE_STATUS_WORDS = {
+  draft: 'draft', void: 'draft', voided: 'draft', cancelled: 'draft', canceled: 'draft', deleted: 'draft',
+  sent: 'sent', unpaid: 'sent', outstanding: 'sent', open: 'sent', due: 'sent', issued: 'sent', pending: 'sent',
+  'awaiting payment': 'sent', 'part paid': 'sent', 'partly paid': 'sent', 'partially paid': 'sent', partial: 'sent', viewed: 'sent', approved: 'sent', authorised: 'sent', authorized: 'sent',
+  overdue: 'overdue', late: 'overdue', 'past due': 'overdue',
+  paid: 'paid', settled: 'paid', complete: 'paid', completed: 'paid', closed: 'paid', received: 'paid', 'paid in full': 'paid',
+};
+function normaliseInvoiceStatus(raw) {
+  const k = String(raw == null ? '' : raw).trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  if (!k) return '';
+  return INVOICE_STATUS_WORDS[k] || 'sent';
 }
 
 // Issued credit notes allocated to an invoice, in the invoice's own currency
@@ -14686,7 +14724,8 @@ function openBulkInvoicePreview(rows, fileName) {
     const vatPct = cols.vat_pct >= 0 ? (parseFloat(((row[cols.vat_pct] || '0') + '').replace(/[, ]/g, '')) || 0) : 0;
     const totalRaw = cols.total >= 0 ? parseFloat(((row[cols.total] || '0') + '').replace(/[, ]/g, '')) : null;
     const total = totalRaw && totalRaw > 0 ? totalRaw : subtotal * (1 + vatPct / 100);
-    const status = cols.status >= 0 ? ((row[cols.status] || 'paid').toString().trim().toLowerCase() || 'paid') : 'paid';
+    // Blank means paid (it's history); any other word is mapped onto Simpl's four.
+    const status = cols.status >= 0 ? (normaliseInvoiceStatus(row[cols.status]) || 'paid') : 'paid';
     const paidDate = cols.paid_date >= 0 ? parseDateFlexible((row[cols.paid_date] || '').toString().trim()) || null : null;
     const projectTitle = cols.project_title >= 0 ? (row[cols.project_title] || '').toString().trim() : '';
     const description = cols.description >= 0 ? (row[cols.description] || '').toString().trim() : (projectTitle || 'Services');
