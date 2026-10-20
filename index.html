@@ -5,7 +5,7 @@
 <!-- Content-Security-Policy: the app is one inline bundle (needs 'unsafe-inline'),
      so the key protection here is connect-src — even if a script were injected, it
      can only reach these endpoints, not exfiltrate your decrypted vault elsewhere. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://api.frankfurter.dev https://formspree.io https://simpl-licence.lee-4e1.workers.dev; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src data:; img-src 'self' data: blob:; connect-src 'self' https://open.er-api.com https://api.frankfurter.dev https://formspree.io https://simpl.money https://simpl-licence.lee-4e1.workers.dev; worker-src 'self' blob:; child-src blob:; base-uri 'self'; object-src 'none'; form-action 'self'" />
 <meta name="referrer" content="no-referrer" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Invoicing</title>
@@ -1922,7 +1922,7 @@ td.empty-cell { padding: 0 !important; }
 <div id="app">
   <div id="licence-notice" class="licence-notice" style="display:none;">
     <span id="licence-notice-text"></span>
-    <a class="btn btn-primary" id="licence-notice-link" href="#" target="_blank" rel="noopener">Buy a licence</a>
+    <a class="btn btn-primary" id="licence-notice-link" href="#" target="_blank" rel="noopener" data-buy>Buy a licence</a>
   </div>
   <header class="mobile-topbar">
     <button id="menu-btn" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
@@ -2787,6 +2787,19 @@ const LICENCE_API = 'https://simpl-licence.lee-4e1.workers.dev';
    only Paddle-approved domain, and the one origin that is NOT holding a
    decrypted vault. Paddle.js must never load here. */
 const BUY_URL = 'https://simpl.money/?buy=1';
+
+/* In-app checkout (19 Oct 2026). With a hosted checkout link set, Buy goes
+   from the app straight to Paddle's own checkout page (pay.paddle.io: Paddle's
+   domain, not ours, so this origin still never loads Paddle.js) with the price,
+   the founding or friends code and the account email filled in. Paddle sends
+   the buyer back to the app with ?purchased=1, and the app collects the
+   licence from the server. Hosted checkouts can't carry custom data, so the
+   server matches the purchase to its sign-up (channel, referral) by email.
+   Empty: Buy uses the site's checkout (BUY_URL) as before. */
+const HOSTED_CHECKOUT_URL = '';
+const PADDLE_PRICE_ID = 'pri_01kze62ks4a92xg3g1ev6w75a5';
+// The founding offer the site shows (codes, spots left); public numbers.
+const FOUNDING_URL = 'https://simpl.money/config/founding.json';
 // A licensed customer's referral link is REFERRAL_BASE + their code (Brief 7).
 const REFERRAL_BASE = 'https://simpl.money/r/';
 
@@ -3278,6 +3291,13 @@ function passkeyCancelled(e) {
    timer, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.2.0', date: '2026-10-20', items: [
+      { title: 'Hourly rates reach time you’ve already tracked',
+        text: 'Time keeps the rate it was tracked at, so adding a client’s hourly rate later left that time priced at zero. Timer now spots unbilled time with no rate and prices it in one click, changing a rate offers it to the unbilled time still at the old one, and you can set the rate on any entry when you edit it. Billed time never changes.',
+        link: { label: 'Open Timer', to: 'timer' } },
+    ],
+  },
+  {
     version: '1.45.1.0', date: '2026-10-19', items: [
       { title: 'Bill your time with what you did',
         text: 'In Timer, filter to a client and choose Bill to invoice. You can now choose how much detail goes on the invoice: one line per project with each entry’s date, task and description listed under it, one line per project, or one line per entry.',
@@ -3662,7 +3682,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.1.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4052,20 +4072,30 @@ let licenceState = { state: 'unrestricted', canCreate: true, showBranding: false
 /* A renewal or a referral reward is a newer licence on our server. The app
    asks for it after unlock — server backup's device token proves the email —
    so it arrives without the customer pasting anything. Silent unless newer. */
-async function refreshLicenceFromServer() {
+async function refreshLicenceFromServer(opts) {
   try {
-    if (!commercialActive() || !cloudEnrolled()) return;
+    if (!commercialActive() || !cloudEnrolled()) return false;
     const res = await cloudFetch('/licence/latest');
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const body = await res.json().catch(() => null);
-    if (!body || !body.licence) return;
+    if (!body || !body.licence) return false;
     const payload = await verifyLicence(body.licence);
-    if (!payload || !(payload.exp > ((licenceState && licenceState.expiry) || 0))) return;
+    if (!payload || !(payload.exp > ((licenceState && licenceState.expiry) || 0))) return false;
     localStorage.setItem(LICENCE_KEY_STORE, body.licence);
     await refreshLicenceState();
     render();
-    toast(`Your licence now runs until ${fmtDate(new Date(payload.exp).toISOString().slice(0, 10))}.`);
-  } catch (e) { noteQuietError('licence refresh', e); }
+    if (!(opts && opts.quiet)) toast(`Your licence now runs until ${licenceUntil()}.`, 6000);
+    return true;
+  } catch (e) { noteQuietError('licence refresh', e); return false; }
+}
+async function licenceIssuedWithin(ms) {
+  try {
+    const p = await verifyLicence(localStorage.getItem(LICENCE_KEY_STORE));
+    return !!(p && typeof p.iat === 'number' && Date.now() - p.iat < ms);
+  } catch (e) { return false; }
+}
+function licenceUntil() {
+  return licenceState && licenceState.expiry ? fmtDate(new Date(licenceState.expiry).toISOString().slice(0, 10)) : '';
 }
 
 async function refreshLicenceState() {
@@ -4352,7 +4382,7 @@ function openPaywallModal(reason) {
         </div>
         <div class="modal-foot">
           <button class="btn" data-close>Carry on in read-only</button>
-          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">
+          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" data-buy style="text-decoration:none;">
             ${trial ? 'Buy a licence' : 'Renew'}
           </a>
         </div>
@@ -7414,6 +7444,46 @@ function resolveRate(clientId, projectId) {
   if (p && Number(p.rate)) return Number(p.rate);
   return clientHourlyRate(clientId);
 }
+
+/* Time is priced when it's tracked: each entry keeps the rate it started
+   with, so a rate set afterwards never reached it (Paul, 20 Oct 2026: a
+   client's hourly rate added, and every entry still R0.00). After a rate
+   changes, the unbilled time that was at the old rate, or at no rate, is
+   offered the new one. Billed time never changes: it's on an invoice. An
+   entry on a project with its own rate isn't the client's rate to change. */
+function entriesForNewRate(clientIds, oldRate, newRate) {
+  if (!(newRate > 0)) return [];
+  const ids = new Set(clientIds);
+  return (state.timeEntries || []).filter((e) => {
+    if (e.invoiceId || !ids.has(e.clientId)) return false;
+    const p = projectById(e.projectId);
+    if (p && Number(p.rate)) return false;
+    const r = Number(e.rate) || 0;
+    return r !== newRate && (r === 0 || r === oldRate);
+  });
+}
+// Unbilled time tracked before its client (or the business) had a rate.
+function unratedEntries(list) {
+  return list.filter((e) => !e.invoiceId && !(Number(e.rate) > 0) && resolveRate(e.clientId, e.projectId) > 0);
+}
+function offerNewRate(entries, newRate, whose) {
+  if (!entries.length) return;
+  const ccy = baseCcy();
+  const rates = [...new Set(entries.map((e) => Number(e.rate) || 0))].sort((a, b) => a - b);
+  const was = rates.map((r) => fmtMoney(r, ccy)).join(' or ');
+  const n = entries.length;
+  showModal(`<div class="modal-overlay" id="modal-overlay"><div class="modal" style="max-width:460px;">
+    <div class="modal-head"><div class="ttl">Use the new rate for tracked time?</div><span class="modal-close" data-close>&times;</span></div>
+    <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.6;">${n} unbilled time ${n === 1 ? 'entry' : 'entries'} for ${escapeHtml(whose)} ${n === 1 ? 'is' : 'are'} at ${was} an hour. Time keeps the rate it was tracked at, so the new rate only reaches ${n === 1 ? 'it' : 'them'} if you say so. Billed time stays as it is.</div></div>
+    <div class="modal-foot"><button class="btn" data-close>Leave ${n === 1 ? 'it' : 'them'}</button><button class="btn btn-primary" id="rate-apply">Use ${escapeHtml(fmtMoney(newRate, ccy))} an hour</button></div></div></div>`);
+  document.getElementById('rate-apply').addEventListener('click', async () => {
+    for (const e of entries) e.rate = newRate;
+    await saveState();
+    closeModal();
+    render();
+    toast(`${n} ${n === 1 ? 'entry' : 'entries'} now at ${fmtMoney(newRate, ccy)} an hour`);
+  });
+}
 function findOrCreateProject(clientId, name) {
   name = (name || '').trim();
   if (!name) return null;
@@ -7579,6 +7649,8 @@ function openTimeEntryModal(entry) {
   const isNew = !entry;
   const e = entry || { id: uid('te-'), clientId: state.clients[0].id, projectId: null, description: '', durationSec: 3600, start: new Date().toISOString(), billable: true };
   const dateVal = (e.start || new Date().toISOString()).slice(0, 10);
+  // Time tracked before its client had a rate shows the client's rate now.
+  const rateVal = Number(e.rate) > 0 ? Number(e.rate) : resolveRate(e.clientId, e.projectId);
   const html = `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal" style="max-width:460px;">
@@ -7592,8 +7664,9 @@ function openTimeEntryModal(entry) {
           </div>
           <div class="form-grid">
             <div class="field"><label>Hours</label><input id="te-hours" type="number" step="0.25" min="0" value="${(e.durationSec / 3600).toFixed(2)}" /></div>
-            <div class="field"><label class="checkbox" style="margin-top:24px;"><input type="checkbox" id="te-billable" ${e.billable !== false ? 'checked' : ''} /><span>Billable</span></label></div>
+            <div class="field"><label>Rate <span class="text-muted">(an hour)</span></label><input id="te-rate" type="number" step="any" min="0" value="${rateVal || ''}" placeholder="0" /></div>
           </div>
+          <div class="field"><label class="checkbox"><input type="checkbox" id="te-billable" ${e.billable !== false ? 'checked' : ''} /><span>Billable</span></label></div>
           <div class="field full"><label>Note <span class="text-muted">(optional)</span></label><input id="te-desc" value="${escapeHtml(e.description || '')}" /></div>
         </div>
         <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;">
@@ -7603,10 +7676,14 @@ function openTimeEntryModal(entry) {
       </div>
     </div>`;
   showModal(html);
+  // The rate follows the client and project until it's typed over.
+  const rateEl = document.getElementById('te-rate');
+  rateEl.addEventListener('input', () => { rateEl.dataset.touched = '1'; });
   const refreshTeTasks = () => {
     const cid = document.getElementById('te-client').value;
     const pj = findProject(cid, document.getElementById('te-project').value);
     document.getElementById('te-tasklist').innerHTML = pj ? taskDatalist(pj.id) : '';
+    if (!rateEl.dataset.touched) rateEl.value = resolveRate(cid, pj ? pj.id : null) || '';
   };
   document.getElementById('te-client').addEventListener('change', (ev) => {
     document.getElementById('te-projlist').innerHTML = projectDatalist(ev.target.value);
@@ -7628,7 +7705,7 @@ function openTimeEntryModal(entry) {
     const updated = {
       id: e.id, clientId, projectId: proj ? proj.id : null, taskId: task ? task.id : null, description,
       start: date + 'T09:00:00.000Z', end: null, durationSec,
-      rate: (entry && entry.rate) || resolveRate(clientId, proj ? proj.id : null),
+      rate: Math.max(0, Number(rateEl.value) || 0),
       billable, invoiceId: (entry && entry.invoiceId) || null,
     };
     const idx = state.timeEntries.findIndex((x) => x.id === e.id);
@@ -7659,6 +7736,8 @@ function renderTimer() {
   const totalSec = entries.reduce((s, e) => s + (e.durationSec || 0), 0);
   const totalValue = entries.reduce((s, e) => s + (e.durationSec / 3600) * (Number(e.rate) || 0), 0);
   const unbilled = entries.filter((e) => !e.invoiceId);
+  const unrated = unratedEntries(entries);
+  const unratedClients = [...new Set(unrated.map((e) => e.clientId))];
   const f = timeFilters;
   const projForClient = (state.projects || []).filter((p) => !f.clientId || p.clientId === f.clientId);
   const ccy = baseCcy();
@@ -7720,6 +7799,12 @@ function renderTimer() {
       ${(f.from || f.to || f.clientId || f.projectId || f.status !== 'all') ? `<button class="btn btn-sm" id="tm-f-clear">Clear</button>` : ''}
     </div>
 
+    ${unrated.length ? `
+      <div class="card-v2 is-dark" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:16px 20px;margin-bottom:16px;">
+        <div><strong>${unrated.length}</strong> unbilled ${unrated.length === 1 ? 'entry has' : 'entries have'} no rate${unratedClients.length === 1 ? `. ${escapeHtml(clientName(unratedClients[0]))}’s hourly rate is ${fmtMoney(clientHourlyRate(unratedClients[0]), ccy)}.` : ', and the clients now have hourly rates.'}</div>
+        <button class="btn btn-primary" id="tm-rate-fill">${unratedClients.length === 1 ? 'Use that rate' : 'Use each client’s rate'}</button>
+      </div>` : ''}
+
     ${f.clientId && unbilled.length ? `
       <div class="card-v2 is-lime" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;margin-bottom:16px;">
         <div style="color:#0F0E0D;"><strong>${unbilled.length}</strong> unbilled ${unbilled.length === 1 ? 'entry' : 'entries'} · ${fmtHours(unbilled.reduce((s, e) => s + e.durationSec, 0))} hrs · ${fmtMoney(unbilled.reduce((s, e) => s + (e.durationSec / 3600) * (Number(e.rate) || 0), 0), ccy)} for ${escapeHtml(clientName(f.clientId))}</div>
@@ -7763,6 +7848,14 @@ function bindTimerEvents() {
   const expCsv = document.getElementById('tm-export-csv'); if (expCsv) expCsv.addEventListener('click', exportTimeReportCsv);
   const expPdf = document.getElementById('tm-export-pdf'); if (expPdf) expPdf.addEventListener('click', (e) => withBusy(e.currentTarget, 'Building\u2026', exportTimeReportPdf));
   const bill = document.getElementById('tm-bill'); if (bill) bill.addEventListener('click', () => openBillTimeModal(timeFilters.clientId));
+  const fill = document.getElementById('tm-rate-fill');
+  if (fill) fill.addEventListener('click', async () => {
+    const list = unratedEntries(filteredTimeEntries());
+    for (const e of list) e.rate = resolveRate(e.clientId, e.projectId);
+    await saveState();
+    render();
+    toast(`${list.length} ${list.length === 1 ? 'entry' : 'entries'} priced`);
+  });
   document.querySelectorAll('[data-te-edit]').forEach((b) => b.addEventListener('click', () => {
     const e = state.timeEntries.find((x) => x.id === b.dataset.teEdit); if (e) openTimeEntryModal(e);
   }));
@@ -11654,6 +11747,7 @@ function openClientModal(client, opts) {
     };
     if (!updated.name) { toast('Name is required'); return; }
     if (updated.email && !isValidEmail(updated.email)) { toast('That email address doesn’t look right. It needs an @ and a dot, like name@studio.com.'); document.querySelector('[data-cf="email"]').focus(); return; }
+    const oldRate = clientHourlyRate(client.id);
     const idx = state.clients.findIndex((c) => c.id === client.id);
     if (idx >= 0) state.clients[idx] = updated;
     else state.clients.push(updated);
@@ -11662,6 +11756,10 @@ function openClientModal(client, opts) {
     if (opts && opts.onSaved) opts.onSaved(updated);
     else render();
     toast(isNew ? 'Client created' : 'Client saved');
+    if (!isNew && !(opts && opts.onSaved)) {
+      const newRate = clientHourlyRate(client.id);
+      if (newRate !== oldRate) offerNewRate(entriesForNewRate([client.id], oldRate, newRate), newRate, updated.name);
+    }
   });
 }
 
@@ -13429,7 +13527,7 @@ function renderSettingsAccount() {
           <button class="btn btn-primary btn-sm" id="lic-apply">Apply licence</button>
           ${licenceState.state === 'licensed'
             ? `<button class="btn btn-sm btn-ghost" id="lic-remove">Remove</button>`
-            : `<a class="btn btn-sm" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">Buy a licence</a>`}
+            : `<a class="btn btn-sm" href="${buyUrl()}" target="_blank" rel="noopener" data-buy style="text-decoration:none;">Buy a licence</a>`}
         </div>
         <div class="err" id="lic-err"></div>
       </div>
@@ -13607,6 +13705,7 @@ function bindSettingsEvents() {
         return;
       }
       if (f === 'numberDigits') v = Math.min(8, Math.max(1, Number(v) || 4));
+      const oldDefaultRate = Number(state.settings.defaultHourlyRate) || 0;
       if (['nextInv','nextQt','nextCredit','invoicePrefix','quotePrefix','creditPrefix','numberDigits','autoLockMinutes','baseCurrency','vatPercent','vatCycle','taxYearStartMonth','defaultHourlyRate','paymentDays','termsInvoice','termsQuote'].includes(f)) state.settings[f] = v;
       else {
         state.settings.company = state.settings.company || {};
@@ -13618,6 +13717,10 @@ function bindSettingsEvents() {
       if (f === 'baseCurrency') alignStarterBanking(activeEntity());
       await saveState();
       toast('Saved');
+      if (f === 'defaultHourlyRate' && v !== oldDefaultRate) {
+        const unpriced = (state.clients || []).filter((c) => !(Number(c.rate) > 0)).map((c) => c.id);
+        offerNewRate(entriesForNewRate(unpriced, oldDefaultRate, v), v, unpriced.length === 1 ? clientName(unpriced[0]) : 'clients without their own rate');
+      }
       if (f === 'autoLockMinutes') {
         resetLockTimer();
         const note = host.querySelector('#auto-lock-note');
@@ -16511,7 +16614,7 @@ function maybeOfferLapseChoices() {
           ${backedUp ? `<button class="btn btn-danger btn-sm" id="lapse-delete">Delete server backup</button>` : ''}
           <button class="btn" id="lapse-backup">Download a backup</button>
           <button class="btn" id="lapse-export">Export for accountant</button>
-          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" style="text-decoration:none;">${trial ? 'Buy a licence' : 'Renew'}</a>
+          <a class="btn btn-primary" href="${buyUrl()}" target="_blank" rel="noopener" data-buy style="text-decoration:none;">${trial ? 'Buy a licence' : 'Renew'}</a>
         </div>
       </div>
     </div>`);
@@ -17547,7 +17650,10 @@ async function enterApp() {
   // including everything from before v1.41 — fetched once, then cached.
   setTimeout(() => { refreshFxHistory().catch((e) => noteQuietError('exchange rates', e)); }, 3000);
   maybePromptCloudBackup();
-  setTimeout(refreshLicenceFromServer, 2500);   // renewals and referral rewards arrive by themselves
+  // Renewals and referral rewards arrive by themselves; back from checkout,
+  // afterCheckoutReturn does the asking (and says so in its own window).
+  if (returnedFromCheckout) { returnedFromCheckout = false; setTimeout(afterCheckoutReturn, 1200); }
+  else setTimeout(refreshLicenceFromServer, 2500);
   // Brief 8: once we know this device can use a passkey, the dashboard may offer one.
   if (PASSKEYS_ENABLED) passkeySupport().then(() => { if (currentRoute === 'dashboard' && renderPasskeyOffer() && !document.getElementById('pk-offer-on')) render(); });
   // Changes a previous session couldn't send before it closed go now.
@@ -18298,9 +18404,107 @@ function attributionParams() {
     return out;
   } catch (e) { return {}; }
 }
-function buyUrl() {
+// The site's checkout: simpl.money opens it on arrival (?buy=1), with the
+// visitor's labels so the right code and channel go with them.
+function siteBuyUrl() {
   const q = new URLSearchParams(attributionParams()).toString();
   return q ? BUY_URL + (BUY_URL.includes('?') ? '&' : '?') + q : BUY_URL;
+}
+
+/* In-app checkout (see HOSTED_CHECKOUT_URL in licence.js). Same rule as the
+   site for the discount: a referral link gets the friends code; a /go/ link
+   (campaign "founding…") gets the founding code while spots remain; anyone
+   else pays the standard price. If the offer can't be read, the founding code
+   goes anyway: Paddle's usage limit is the backstop. */
+let foundingOffer = null;
+async function loadFoundingOffer() {
+  if (foundingOffer) return foundingOffer;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 3000);
+    const res = await fetch(FOUNDING_URL, { cache: 'no-cache', signal: ctl.signal });
+    clearTimeout(timer);
+    if (res.ok) foundingOffer = JSON.parse(await res.text(), (k, v) => (k === '__proto__' || k === 'constructor' || k === 'prototype') ? undefined : v);
+  } catch (e) { /* offline or blocked: the code rule below copes */ }
+  return foundingOffer;
+}
+function checkoutDiscountCode(offer, attribution) {
+  const a = attribution || {};
+  const friend = (offer && offer.friendCode) || 'FRIENDS21';
+  const founding = (offer && offer.code) || 'FOUNDERS21';
+  if (a.ref) return friend;
+  if (!/^founding/.test(a.utm_campaign || '')) return '';
+  if (!offer) return founding;
+  const left = Math.max(0, (Number(offer.total) || 0) - (Number(offer.taken) || 0));
+  return left > 0 ? founding : '';
+}
+function hostedCheckoutUrl(offer) {
+  const p = new URLSearchParams({ price_id: PADDLE_PRICE_ID });
+  const code = checkoutDiscountCode(offer, attributionParams());
+  if (code) p.set('discount_code', code);
+  const email = simplAccountEmail();
+  if (isValidEmail(email)) p.set('user_email', email);
+  return HOSTED_CHECKOUT_URL + (HOSTED_CHECKOUT_URL.includes('?') ? '&' : '?') + p.toString();
+}
+function buyUrl() { return HOSTED_CHECKOUT_URL ? hostedCheckoutUrl(foundingOffer) : siteBuyUrl(); }
+
+// Every buy button carries data-buy. With hosted checkout, it goes there in
+// this tab (Paddle brings the buyer back here), after reading the offer.
+document.addEventListener('click', (e) => {
+  const el = e.target && e.target.closest ? e.target.closest('[data-buy]') : null;
+  if (!el || !HOSTED_CHECKOUT_URL) return;
+  e.preventDefault();
+  el.setAttribute('aria-busy', 'true');
+  loadFoundingOffer().then((offer) => { location.href = hostedCheckoutUrl(offer); });
+}, true);
+
+/* Back from Paddle (?purchased=1): the licence is issued by the purchase
+   webhook within seconds; with backup on, the app fetches it (and
+   refreshLicenceFromServer says when it arrives). Without backup, the
+   licence email's Activate link is the way in. */
+let returnedFromCheckout = false;
+function noteCheckoutReturn() {
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('purchased') !== '1') return;
+    returnedFromCheckout = true;
+    params.delete('purchased');
+    const q = params.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+  } catch (e) {}
+}
+async function afterCheckoutReturn() {
+  if (!commercialActive()) return;
+  const enrolled = cloudEnrolled();
+  // A window, not a toast: a two-second toast over a dashboard that is still
+  // drawing was easy to miss (Lee's sandbox test, 20 Oct 2026). Never over
+  // another dialog (this month's recurring drafts may be on offer): then toasts.
+  if (document.querySelector('.modal-overlay')) toast(enrolled ? 'Thank you for buying Simpl. Collecting your licence…' : 'Thank you for buying Simpl. Your licence is in your email: press Activate there.', 8000);
+  else showModal(`<div class="modal-overlay" id="modal-overlay"><div class="modal" style="max-width:460px;">
+    <div class="modal-head"><div class="ttl">Thank you for buying Simpl</div><span class="modal-close" data-close>&times;</span></div>
+    <div class="modal-body"><div id="ck-status" class="text-sm text-mid" style="line-height:1.6;">${enrolled
+      ? 'Collecting your licence… This usually takes a few seconds.'
+      : 'Your licence is in your email. Open the email from Simpl and press <strong>Activate</strong>, and it’s applied on this device. Turn on backup and future licences arrive by themselves.'}</div></div>
+    <div class="modal-foot"><button class="btn btn-primary" data-close>OK</button></div></div></div>`);
+  if (!enrolled) return;
+  const say = (html, plain) => {
+    const el = document.getElementById('ck-status');
+    if (el) el.innerHTML = html; else toast(plain, 8000);
+  };
+  const before = licenceState && licenceState.state === 'licensed' ? licenceState.expiry : 0;
+  for (let i = 0; i < 24; i++) {                 // up to two minutes
+    await refreshLicenceFromServer({ quiet: true });
+    // Done when a newer licence arrived, or when the one already here was
+    // issued today: this purchase's licence, collected on an earlier visit.
+    if (licenceState && licenceState.state === 'licensed' && (licenceState.expiry !== before || await licenceIssuedWithin(86400000))) {
+      const until = licenceUntil();
+      say(`You’re all set. Your licence runs until <strong>${escapeHtml(until)}</strong>, and everything is unlocked on this device.`, `Your licence now runs until ${until}.`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  const late = 'Your licence hasn’t arrived yet. It’s in your email too: press Activate there.';
+  say(late, late);
 }
 
 async function sendOnboarding(payload) {
@@ -18410,6 +18614,7 @@ let pendingSyncCode = null;
 
 (async function boot() {
   captureAttribution();   // before anything rewrites the address bar
+  noteCheckoutReturn();   // ?purchased=1 from Paddle's hosted checkout
   // A #sync= link (from "Copy as link" on the other device) pre-fills the
   // join flow right after unlock. Strip it from the URL immediately.
   if (location.hash && location.hash.startsWith('#sync=')) {
