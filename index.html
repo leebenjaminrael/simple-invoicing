@@ -2796,7 +2796,7 @@ const BUY_URL = 'https://simpl.money/?buy=1';
    licence from the server. Hosted checkouts can't carry custom data, so the
    server matches the purchase to its sign-up (channel, referral) by email.
    Empty: Buy uses the site's checkout (BUY_URL) as before. */
-const HOSTED_CHECKOUT_URL = '';
+const HOSTED_CHECKOUT_URL = 'https://pay.paddle.io/hsc_01m5cjbc7p8mgq4vcv420h0q47_z3r5dfj54c04fb0w5hp0hxwb5bb1r0jg';
 const PADDLE_PRICE_ID = 'pri_01kze62ks4a92xg3g1ev6w75a5';
 // The founding offer the site shows (codes, spots left); public numbers.
 const FOUNDING_URL = 'https://simpl.money/config/founding.json';
@@ -3291,6 +3291,12 @@ function passkeyCancelled(e) {
    timer, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.3.0', date: '2026-10-20', items: [
+      { title: 'Buy Simpl from inside the app',
+        text: 'Buy a licence now opens the checkout straight from the app, with your email filled in and any founding or friends discount already applied. When you’ve paid, you come back to Simpl and, with backup on, your licence is applied by itself. Without backup, press Activate in the licence email.' },
+    ],
+  },
+  {
     version: '1.45.2.0', date: '2026-10-20', items: [
       { title: 'Hourly rates reach time you’ve already tracked',
         text: 'Time keeps the rate it was tracked at, so adding a client’s hourly rate later left that time priced at zero. Timer now spots unbilled time with no rate and prices it in one click, changing a rate offers it to the unbilled time still at the old one, and you can set the rate on any entry when you edit it. Billed time never changes.',
@@ -3682,7 +3688,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.2.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.3.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
