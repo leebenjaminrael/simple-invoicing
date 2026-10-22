@@ -1206,6 +1206,17 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .lines td.vat-cell { text-align: center; }
   .lines td.row-actions { text-align: right; }
   .lines td.amount-cell { text-align: right; padding-right: 14px; font-family: 'DM Mono', monospace; color: var(--text); white-space: nowrap; }
+  /* Reordering lines: a grip in the first column; the line being moved lifts,
+     the others slide to open a gap (bindLineDrag). */
+  .lines td.drag-cell { padding: 6px 0 6px 4px; vertical-align: top; }
+  .line-drag { display: flex; align-items: center; justify-content: center; width: 24px; height: 34px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--text-muted); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .line-drag:hover, .line-drag:focus-visible { color: var(--text); background: var(--surface-2); }
+  .lines.is-sorting { overflow: visible; }
+  .lines-sorting { user-select: none; -webkit-user-select: none; }
+  .lines-sorting tr { transition: transform 150ms ease; }
+  .lines-sorting tr.line-dragging { transition: none; position: relative; z-index: 2; background: var(--surface-2); box-shadow: var(--shadow-md); }
+  .lines-sorting tr.line-dragging .line-drag { cursor: grabbing; color: var(--accent-bright); }
+  @media (prefers-reduced-motion: reduce) { .lines-sorting tr { transition: none; } }
 
   /* Line items — stacked cards on mobile.
      The six-column table is unusable at phone width: the description gets ~90px
@@ -1245,7 +1256,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     /* Description and the wide percent field span the card. */
     .lines td.desc-cell,
     .lines td[data-label="Percent"] { grid-column: 1 / -1; }
-    .lines td.desc-cell { padding-right: 28px; }
+    .lines td.desc-cell { padding-right: 64px; }   /* room for the grip and the × */
     .lines td.desc-cell textarea.line-desc { font-size: 15px; }
 
     /* Inputs need a visible edge here — on desktop the table grid does that job,
@@ -1289,6 +1300,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     /* Delete moves to the card corner rather than a column of its own. */
     .lines td.row-actions { position: absolute; top: 6px; right: 6px; padding: 0; }
     .lines .row-del { font-size: 20px; padding: 6px 8px; }
+    .lines td.drag-cell { position: absolute; top: 6px; right: 38px; padding: 0; }
+    .line-drag { width: 30px; height: 32px; }
 
     /* Section headings are a divider, not a card. */
     .lines tr[data-line-type="heading"] { background: var(--surface-2); padding-bottom: 10px; }
@@ -3314,6 +3327,12 @@ function passkeyCancelled(e) {
    timer, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.5.0', date: '2026-10-22', items: [
+      { title: 'Drag line items into order',
+        text: 'In a quote or invoice, drag a line by the dotted handle on its left (beside the × on a phone) to move it up or down. The PDF follows the new order. You can also select the handle and use the up and down arrow keys. Under a note, Simpl now says whether it will print: notes stay private unless you tick “Include notes on PDF”.' },
+    ],
+  },
+  {
     version: '1.45.3.0', date: '2026-10-20', items: [
       { title: 'Buy Simpl from inside the app',
         text: 'Buy a licence now opens the checkout straight from the app, with your email filled in and any founding or friends discount already applied. When you’ve paid, you come back to Simpl and, with backup on, your licence is applied by itself. Without backup, press Activate in the licence email.' },
@@ -3725,7 +3744,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.4.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4820,6 +4839,7 @@ const ICONS = {
   sprout: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px" aria-hidden="true"><path d="M12 21v-8"/><path d="M12 13C12 9.5 9.2 7 5.5 7 5.5 10.5 8 13 12 13z"/><path d="M12 11c0-3 2.4-5.5 6-5.5C18 9 15.5 11 12 11z"/></svg>',
   play: '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" style="vertical-align:-1px" aria-hidden="true"><path d="M7 4.5l13 7.5-13 7.5z"/></svg>',
   stop: '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>',
+  grip: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>',
   chevronDown: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
 };
 
@@ -11897,9 +11917,12 @@ function renderDocEditor() {
     const vatCell = isZAR ? `<td class="vat-cell" data-label="VAT"><label class="checkbox"><input type="checkbox" data-lf="vat" ${l.vat ? 'checked' : ''} /></label></td>` : '';
     const amtCell = `<td class="amount-cell" data-label="Amount">${fmtMoney(calcLine(l, d), d.currency)}</td>`;
     const delCell = `<td class="row-actions"><span class="row-del" data-line-del="${i}">×</span></td>`;
+    // A handle to drag the line up or down (or move it with the arrow keys).
+    const dragCell = `<td class="drag-cell">${d.lines.length > 1 ? `<button type="button" class="line-drag" data-line-drag="${i}" aria-label="Move line ${i + 1}: drag, or press the up and down arrow keys" title="Drag to reorder">${ICONS.grip}</button>` : ''}</td>`;
     if (l.type === 'heading') {
       return `
     <tr data-line-idx="${i}" data-line-type="heading">
+      ${dragCell}
       <td class="desc-cell" colspan="${isZAR ? 4 : 3}"><textarea data-lf="desc" class="line-desc" rows="1" placeholder="Section heading" style="font-weight:600;">${escapeHtml(l.desc || '')}</textarea></td>
       <td class="amount-cell heading-tag text-muted" style="font-size:11px;">heading</td>
       ${delCell}
@@ -11908,14 +11931,14 @@ function renderDocEditor() {
     if (l.type === 'percent') {
       return `
     <tr data-line-idx="${i}" data-line-type="percent">
-      ${descCell}
+      ${dragCell}${descCell}
       <td colspan="2" data-label="Percent"><div style="display:flex;align-items:center;gap:6px;"><input data-lf="percent" class="num-input" type="number" step="any" value="${Number(l.percent) || 0}" style="width:72px;" /><span class="text-sm text-muted">% of subtotal</span></div></td>
       ${vatCell}${amtCell}${delCell}
     </tr>`;
     }
     return `
     <tr data-line-idx="${i}">
-      ${descCell}
+      ${dragCell}${descCell}
       <td data-label="Qty"><input data-lf="qty" class="num-input" type="number" step="any" inputmode="decimal" value="${Number(l.qty) || 0}" /></td>
       <td data-label="Unit price"><input data-lf="price" class="num-input" type="number" step="any" inputmode="decimal" value="${Number(l.price) || 0}" /></td>
       ${vatCell}${amtCell}${delCell}
@@ -12056,6 +12079,7 @@ function renderDocEditor() {
         <table>
           <thead>
             <tr>
+              <th style="width:30px;"></th>
               <th>Description</th>
               <th style="width:90px;">Qty</th>
               <th style="width:120px;">Unit price</th>
@@ -12105,6 +12129,7 @@ function renderDocEditor() {
             <span>Include notes on PDF</span>
           </label>
           <textarea data-df="notes" placeholder="Notes (private unless 'Include notes on PDF' is ticked)">${escapeHtml(d.notes || '')}</textarea>
+          <div class="text-sm text-muted" id="ed-notes-state" style="margin-top:6px;">${notesStateText(d)}</div>
         </div>
         ${d.type === 'invoice' && (d.status === 'paid') ? `
           <div class="field">
@@ -12213,8 +12238,13 @@ function bindEditorEvents() {
         if (v === 'paid') editingDoc.paidDate = todayISO();
         else { editingDoc.paidDate = null; editingDoc.paidTxId = null; }
         renderDocEditor();
-      } else if (f === 'includeNotes') {
-        // re-render not needed; just store
+      }
+      // Whether the note prints, said in words: once there's text the
+      // placeholder that explained it is gone (Lee, 22 Oct 2026: "a note on a
+      // quote isn't on the PDF" — the box was unticked).
+      if (f === 'notes' || f === 'includeNotes') {
+        const ns = document.getElementById('ed-notes-state');
+        if (ns) ns.textContent = notesStateText(editingDoc);
       }
       scheduleAutoSave();
     });
@@ -12277,6 +12307,8 @@ function bindEditorEvents() {
       scheduleAutoSave();
     });
   });
+
+  bindLineDrag(host);
 
   const lineAdd = host.querySelector('#line-add');
   if (lineAdd) lineAdd.addEventListener('click', () => {
@@ -12363,6 +12395,114 @@ function updateTotalsBox() {
 }
 
 // Auto-grow a description textarea to fit its content.
+function notesStateText(d) {
+  if (!(d.notes || '').trim()) return '';
+  return d.includeNotes ? 'This note prints on the PDF, under Notes.' : 'Only you can see this note. Tick “Include notes on PDF” to print it.';
+}
+
+/* Reordering line items (22 Oct 2026). Pointer events, not HTML drag-and-
+   drop, which iOS Safari doesn't support: press the handle, drag, and the
+   other lines open a gap; let go to drop. The handle also answers the up and
+   down arrow keys. The order is simply the order of editingDoc.lines, which
+   the preview and the PDF already follow. */
+function moveLine(from, to) {
+  const lines = editingDoc.lines;
+  if (from === to || from < 0 || to < 0 || from >= lines.length || to >= lines.length) return false;
+  const [line] = lines.splice(from, 1);
+  lines.splice(to, 0, line);
+  return true;
+}
+function afterLineMove(to) {
+  renderDocEditor();
+  scheduleAutoSave();
+  const h = document.querySelector(`[data-line-drag="${to}"]`);
+  if (h) h.focus({ preventScroll: false });
+}
+function scrollParentOf(el) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    const oy = getComputedStyle(n).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+function bindLineDrag(host) {
+  const body = host.querySelector('#lines-body');
+  if (!body) return;
+  body.querySelectorAll('[data-line-drag]').forEach((handle) => {
+    handle.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      const from = +handle.dataset.lineDrag, to = from + (e.key === 'ArrowUp' ? -1 : 1);
+      if (moveLine(from, to)) afterLineMove(to);
+    });
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const rows = [...body.querySelectorAll('tr[data-line-idx]')];
+      const from = +handle.dataset.lineDrag;
+      const row = rows[from];
+      if (!row) return;
+      const scroller = scrollParentOf(body);
+      const scroll0 = scroller.scrollTop;
+      const y0 = e.clientY;
+      const rects = rows.map((r) => r.getBoundingClientRect());
+      // How far the others move to open a gap: the line's height plus the space
+      // between lines (none in the desktop table, a margin between phone cards).
+      const gap = rects[from].height + (rows.length > 1 ? Math.max(0, rects[1].top - rects[0].bottom) : 0);
+      const mids = rects.map((r) => r.top + r.height / 2);
+      let to = from, lastY = y0, raf = 0;
+      try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+      row.classList.add('line-dragging');
+      body.classList.add('lines-sorting');
+      const wrap = body.closest('.lines');
+      if (wrap) wrap.classList.add('is-sorting');   // let the lifted line show past the rounded edge
+      const place = () => {
+        const dy = (lastY - y0) + (scroller.scrollTop - scroll0);
+        row.style.transform = `translateY(${dy}px)`;
+        const centre = mids[from] + dy;
+        to = from;
+        for (let i = 0; i < rows.length; i++) {
+          if (i < from && centre < mids[i]) { to = i; break; }
+        }
+        for (let i = rows.length - 1; i > from; i--) {
+          if (centre > mids[i]) { to = i; break; }
+        }
+        rows.forEach((r, i) => {
+          if (i === from) return;
+          const shift = (from < to && i > from && i <= to) ? -gap : (from > to && i >= to && i < from) ? gap : 0;
+          r.style.transform = shift ? `translateY(${shift}px)` : '';
+        });
+      };
+      // Near the top or bottom edge, scroll so a line can travel past the screen.
+      const edgeScroll = () => {
+        raf = 0;
+        const top = scroller === document.scrollingElement ? 0 : scroller.getBoundingClientRect().top;
+        const bottom = scroller === document.scrollingElement ? window.innerHeight : scroller.getBoundingClientRect().bottom;
+        const step = lastY < top + 48 ? -12 : lastY > bottom - 48 ? 12 : 0;
+        if (!step) return;
+        scroller.scrollTop += step;
+        place();
+        raf = requestAnimationFrame(edgeScroll);
+      };
+      const move = (ev) => { lastY = ev.clientY; place(); if (!raf) raf = requestAnimationFrame(edgeScroll); };
+      const end = () => {
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', end);
+        handle.removeEventListener('pointercancel', end);
+        if (raf) cancelAnimationFrame(raf);
+        rows.forEach((r) => { r.style.transform = ''; });
+        row.classList.remove('line-dragging');
+        body.classList.remove('lines-sorting');
+        if (wrap) wrap.classList.remove('is-sorting');
+        if (moveLine(from, to)) afterLineMove(to);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', end);
+      handle.addEventListener('pointercancel', end);
+    });
+  });
+}
+
 function autoGrow(ta) {
   if (!ta) return;
   ta.style.height = 'auto';
