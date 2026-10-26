@@ -3327,6 +3327,13 @@ function passkeyCancelled(e) {
    timer, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.6.0', date: '2026-10-26', items: [
+      { title: 'Import several bank statements at once',
+        text: 'In Reconcile, choose or drop several statements together. They open one after another (“Statement 2 of 3”), and each is reconciled on its own as before. Apply moves on to the next, “Skip this one” leaves a statement for later, and Stop closes the rest. Anything already imported from an earlier statement shows as already imported, so overlapping statements don’t double up.',
+        link: { label: 'Open Reconcile', to: 'reconcile' } },
+    ],
+  },
+  {
     version: '1.45.5.0', date: '2026-10-22', items: [
       { title: 'Drag line items into order',
         text: 'In a quote or invoice, drag a line by the dotted handle on its left (beside the × on a phone) to move it up or down. The PDF follows the new order. You can also select the handle and use the up and down arrow keys. Under a note, Simpl now says whether it will print: notes stay private unless you tick “Include notes on PDF”.' },
@@ -3744,7 +3751,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.5.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4552,6 +4559,8 @@ function lockApp() {
   currentWrappers = [];
   editingDoc = null;
   reconcileSession = null;
+  statementQueue = { files: [], total: 0 };
+  modalOnClose = null;
   pdfReviewState = null;
   if (lockTimer) clearTimeout(lockTimer);
   closeModal();
@@ -8569,6 +8578,14 @@ function openExpenseModal(expense) {
 
 // Working state for the current import session (not persisted)
 let reconcileSession = null;
+/* Several statements at once (Lee, 26 Oct 2026): choose or drop them together
+   and they open one after another, each reconciled on its own (its own
+   account, currency and period), in file-name order. The queue moves on when
+   a statement is applied, skipped, or can't be read (once that has been
+   said). One at a time on purpose: a statement that overlaps one just applied
+   then sees those transactions as already imported. */
+let statementQueue = { files: [], total: 0 };
+function queuePosition() { return statementQueue.total - statementQueue.files.length; }
 // Shape: { fileName, source, account, periodStart, periodEnd, transactions: [], matches: [] }
 // Each match: { txId, kind, action, status, ... }
 //   kind: 'credit' | 'debit'
@@ -8585,10 +8602,10 @@ function renderReconcileParts() {
       body: `
 
       <div class="card-v2 is-lime" id="rec-drop" style="padding:48px 40px;text-align:center;cursor:pointer;border:2px dashed rgba(15,14,13,0.18);">
-        <div style="font-family:'DM Serif Display',serif;font-size:28px;margin-bottom:10px;color:#0F0E0D;">Drop a bank statement here</div>
-        <div class="text-sm" style="margin-bottom:18px;color:rgba(15,14,13,0.62);">CSV or PDF · or click to choose.<br>Download a statement from your online banking — most banks offer CSV or PDF.<br>Unknown layout? You'll map the columns once and it's remembered for next time.</div>
-        <button class="btn" id="rec-pick" style="background:#0F0E0D;color:var(--c-lime);border-color:#0F0E0D;">Choose file</button>
-        <input type="file" id="rec-file" accept=".csv,.pdf" style="display:none;" />
+        <div style="font-family:'DM Serif Display',serif;font-size:28px;margin-bottom:10px;color:#0F0E0D;">Drop bank statements here</div>
+        <div class="text-sm" style="margin-bottom:18px;color:rgba(15,14,13,0.62);">CSV or PDF · one or several at once · or click to choose.<br>Download a statement from your online banking — most banks offer CSV or PDF.<br>Unknown layout? You'll map the columns once and it's remembered for next time.</div>
+        <button class="btn" id="rec-pick" style="background:#0F0E0D;color:var(--c-lime);border-color:#0F0E0D;">Choose files</button>
+        <input type="file" id="rec-file" accept=".csv,.pdf" multiple style="display:none;" />
         <div class="text-sm" style="margin-top:20px;color:rgba(15,14,13,0.55);">CSV is the most reliable. PDF works for digital (text) statements — scanned or photographed statements aren't supported.</div>
       </div>
 
@@ -8636,11 +8653,15 @@ function renderReconcileParts() {
   const toApply = s.matches.filter((m) => m.status !== 'imported' && m.action !== 'skip' && m.action !== 'unmatched').length;
 
   return {
-    actions: `
+    actions: statementQueue.files.length ? `
+      <button class="btn btn-ghost" id="rec-cancel-all" title="Close this statement and the ${statementQueue.files.length} still to come">Stop</button>
+      <button class="btn btn-ghost" id="rec-cancel" title="Close this statement without applying it and open the next">Skip this one</button>
+      <button class="btn btn-primary" id="rec-apply">Apply ${toApply} action${toApply === 1 ? '' : 's'}</button>
+    ` : `
       <button class="btn btn-ghost" id="rec-cancel">Cancel</button>
       <button class="btn btn-primary" id="rec-apply">Apply ${toApply} action${toApply === 1 ? '' : 's'}</button>
     `,
-    subtitle: `${escapeHtml(s.fileName)} · ${s.transactions.length} transactions · ${escapeHtml(s.currency || '')} · ${fmtDate(s.periodStart)} – ${fmtDate(s.periodEnd)}`,
+    subtitle: `${statementQueue.total > 1 ? `Statement ${queuePosition()} of ${statementQueue.total} · ` : ''}${escapeHtml(s.fileName)} · ${s.transactions.length} transactions · ${escapeHtml(s.currency || '')} · ${fmtDate(s.periodStart)} – ${fmtDate(s.periodEnd)}`,
     body: `
 
     <div class="card-v2 is-dark" style="margin-bottom:24px;padding:24px 28px;">
@@ -10022,6 +10043,7 @@ async function applyReconcile() {
   reconcileSession = null;
   render();
   toast(`Applied: ${invoicesPaid} paid · ${expensesCreated} expenses · ${transfersLogged} transfers`);
+  nextStatement();
 }
 
 /* ----- Accountant export -----
@@ -14369,7 +14391,12 @@ function openChangePasswordModal() {
    MODAL HELPERS + EVENT BINDING
    ============================================================ */
 
+/* Something to do once when the open dialog closes, however it closes
+   (button, ×, Escape, the backdrop). A new dialog drops the old one's. Set it
+   after showModal; clear it before a closeModal that isn't a "close". */
+let modalOnClose = null;
 function showModal(html) {
+  modalOnClose = null;
   const mh = document.getElementById('modal-host');
   mh.innerHTML = html;
   document.querySelectorAll('[data-close]').forEach((el) => el.addEventListener('click', closeModal));
@@ -14385,6 +14412,9 @@ function closeModal() {
   if (activeSyncSession) { try { activeSyncSession.destroy(); } catch (e) {} activeSyncSession = null; }
   document.getElementById('modal-host').innerHTML = '';
   document.removeEventListener('keydown', escClose);
+  const after = modalOnClose;
+  modalOnClose = null;
+  if (after) after();
 }
 function escClose(e) { if (e.key === 'Escape') closeModal(); }
 
@@ -14639,14 +14669,13 @@ function bindReconcileEvents() {
     drop.addEventListener('drop', async (e) => {
       e.preventDefault();
       drop.style.borderColor = 'var(--border)';
-      const file = e.dataTransfer.files[0];
-      if (file) await handleStatementFile(file);
+      if (e.dataTransfer.files.length) await queueStatements(e.dataTransfer.files);
     });
   }
   if (pick) pick.addEventListener('click', (e) => { e.stopPropagation(); fileEl.click(); });
   if (fileEl) fileEl.addEventListener('change', async () => {
-    const f = fileEl.files[0];
-    if (f) await handleStatementFile(f);
+    if (fileEl.files.length) await queueStatements(fileEl.files);
+    fileEl.value = '';   // choosing the same files again still counts as a change
   });
 
   document.querySelectorAll('[data-rec-archive-del]').forEach((b) => b.addEventListener('click', async () => {
@@ -14662,7 +14691,15 @@ function bindReconcileEvents() {
 
   // Active session controls
   const cancel = document.getElementById('rec-cancel');
-  if (cancel) cancel.addEventListener('click', () => { reconcileSession = null; render(); });
+  if (cancel) cancel.addEventListener('click', () => { reconcileSession = null; render(); nextStatement(); });
+  const cancelAll = document.getElementById('rec-cancel-all');
+  if (cancelAll) cancelAll.addEventListener('click', () => {
+    const left = statementQueue.files.length;
+    statementQueue = { files: [], total: 0 };
+    reconcileSession = null;
+    render();
+    toast(`Stopped. ${left} statement${left === 1 ? '' : 's'} not opened`);
+  });
   const apply = document.getElementById('rec-apply');
   if (apply) apply.addEventListener('click', async () => {
     if (!confirm('Apply all confirmed actions? Invoices will be marked paid and expenses created.')) return;
@@ -14753,13 +14790,43 @@ function bindReconcileEvents() {
   updateRecBulkBar();
 }
 
+function isStatementFile(file) {
+  const name = (file.name || '').toLowerCase();
+  return name.endsWith('.pdf') || name.endsWith('.csv') || file.type === 'application/pdf' || file.type === 'text/csv';
+}
+async function queueStatements(fileList) {
+  const all = [...fileList];
+  const files = all.filter(isStatementFile).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!files.length) { alert('Please drop a .csv or .pdf bank statement.'); return; }
+  const skipped = all.length - files.length;
+  if (skipped) toast(`${skipped} file${skipped === 1 ? '' : 's'} left out: only CSV and PDF statements can be imported`, 5000);
+  statementQueue = { files: files.slice(1), total: files.length };
+  await openQueuedStatement(files[0]);
+}
+// Open the next statement in the queue, if any. Called when one is applied,
+// skipped, or turned out to be unreadable.
+async function nextStatement() {
+  if (!statementQueue.files.length || !vaultUnlocked()) { statementQueue = { files: [], total: 0 }; return; }
+  const file = statementQueue.files.shift();
+  toast(`Next: statement ${queuePosition()} of ${statementQueue.total}, ${file.name}`);
+  await openQueuedStatement(file);
+}
+async function openQueuedStatement(file) {
+  const how = await handleStatementFile(file);
+  if (how === 'failed') await nextStatement();
+  // 'dialog': the mapper or the PDF help is open; its closing moves on.
+  else if (how === 'dialog' && statementQueue.files.length) modalOnClose = () => nextStatement();
+}
+
+// Returns how it ended: 'session' (open for reconciling), 'dialog' (the
+// column mapper or the PDF help is showing) or 'failed' (already said why).
 async function handleStatementFile(file) {
   const name = (file.name || '').toLowerCase();
   const isPdf = name.endsWith('.pdf') || file.type === 'application/pdf';
   const isCsv = name.endsWith('.csv') || file.type === 'text/csv';
   if (!isPdf && !isCsv) {
     alert('Please drop a .csv or .pdf bank statement.');
-    return;
+    return 'failed';
   }
   try {
     let parsed;
@@ -14770,20 +14837,23 @@ async function handleStatementFile(file) {
       parsed = parseStatementCsv(text, file.name);
     }
     finishStatementParse(parsed);
+    return 'session';
   } catch (e) {
+    const which = statementQueue.total > 1 ? ` (${file.name})` : '';
     if (e && e.unknownFormat) {
       // A PDF has no real columns to map — pdf.js gives text positions, so the
       // mapper shows invented headers like "Date Description" and truncated
       // samples, and there is no sane answer to give it. Explain instead.
-      if (isPdf) { openPdfImportHelp(file.name, e.rows); return; }
+      if (isPdf) { openPdfImportHelp(file.name, e.rows); return 'dialog'; }
       openColumnMapper(e.rows, e.fileName);
-      return;
+      return 'dialog';
     }
     if (e && e.noText) {
-      alert('This PDF has no readable text — it looks scanned or photographed. Please use the CSV export from your bank, or a digital (text) PDF statement.');
-      return;
+      alert('This PDF has no readable text' + which + ' — it looks scanned or photographed. Please use the CSV export from your bank, or a digital (text) PDF statement.');
+      return 'failed';
     }
-    alert('Could not read statement: ' + e.message);
+    alert('Could not read statement' + which + ': ' + e.message);
+    return 'failed';
   }
 }
 
@@ -14814,7 +14884,11 @@ function openPdfImportHelp(fileName, rows) {
     </div>
   `);
   const m = document.getElementById('pdf-help-map');
-  if (m) m.addEventListener('click', () => { closeModal(); openColumnMapper(rows, fileName); });
+  if (m) m.addEventListener('click', () => {
+    const after = modalOnClose; modalOnClose = null;   // not finished with this file yet
+    closeModal(); openColumnMapper(rows, fileName);
+    modalOnClose = after;
+  });
 }
 
 function finishStatementParse(parsed) {
@@ -14968,6 +15042,7 @@ function openColumnMapper(rows, fileName) {
       if (idx >= 0) state.settings.bankProfiles[idx] = profile;
       else state.settings.bankProfiles.push(profile);
       await saveState();
+      const after = modalOnClose; modalOnClose = null;   // the statement opens next, not the queue
       closeModal();
       // Parse with the new profile
       const dataRows = mapperState.rows.slice(mapperState.headerIdx);
@@ -14977,6 +15052,7 @@ function openColumnMapper(rows, fileName) {
         toast('Profile saved');
       } catch (e) {
         alert('Parsing failed: ' + e.message);
+        if (after) after();
       }
     });
   }
