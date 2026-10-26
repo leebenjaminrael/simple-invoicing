@@ -3324,8 +3324,15 @@ function passkeyCancelled(e) {
    `important: true` floats an item to the top with a "Worth knowing" tag; keep
    it for changes that alter numbers people rely on. `link.to` must be one of
    the destinations whatsNewGo() knows: finances, reconcile, vat, clients,
-   timer, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
+   timer, documents, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
+  {
+    version: '1.45.6.1', date: '2026-10-26', items: [
+      { title: 'Past invoices import with the right amount', important: true,
+        text: 'Importing past invoices from PDF could take the wrong number as the total: on some layouts, the bank account number in the payment details. It now reads totals written like “Total: R3,789.00” or “Amount Due (ZAR)”, reads dates like “April 24, 2026”, and asks before importing any amount over a million. If you imported past invoices and one shows an impossible amount, delete those invoices and import the PDFs again.',
+        link: { label: 'Open Documents', to: 'documents' } },
+    ],
+  },
   {
     version: '1.45.6.0', date: '2026-10-26', items: [
       { title: 'Import several bank statements at once',
@@ -3751,7 +3758,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.6.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.6.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -6776,6 +6783,7 @@ function whatsNewGo(to) {
   closeModal();
   if (to === 'finances' || to === 'reconcile' || to === 'vat') return goToFinanceTab(to === 'finances' ? 'overview' : to);
   if (to === 'clients') { currentClientId = null; return setRoute('clients'); }
+  if (to === 'documents') return setRoute('documents');
   if (to === 'timer') return setRoute('timer');
   if (to === 'feedback') { render(); return openFeedbackModal(); }
   if (to === 'export') { goToFinanceTab('overview'); return openAccountantExportModal(); }
@@ -9703,14 +9711,14 @@ function parseDateFlexible(s) {
     return `${yr}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
   }
   // "1 May 2026" / "1-May-2026"
-  m = s.match(/^(\d{1,2})[\s-]+([A-Za-z]+)[\s-]+(\d{2,4})/);
+  m = s.match(/^(\d{1,2})[\s-]+([A-Za-z]+),?[\s-]+(\d{2,4})/);
   if (m) {
     const mn = months[m[2].slice(0, 3).toLowerCase()];
     const yr = m[3].length === 2 ? '20' + m[3] : m[3];
     if (mn) return `${yr}-${mn}-${m[1].padStart(2, '0')}`;
   }
   // "May 1 2026" / "May 01 2026"
-  m = s.match(/^([A-Za-z]+)[\s-]+(\d{1,2})[\s-]+(\d{2,4})/);
+  m = s.match(/^([A-Za-z]+)[\s-]+(\d{1,2}),?[\s-]+(\d{2,4})/);
   if (m) {
     const mn = months[m[1].slice(0, 3).toLowerCase()];
     const yr = m[3].length === 2 ? '20' + m[3] : m[3];
@@ -15549,8 +15557,8 @@ function extractInvoiceFields(text, fileName) {
   // Require 4-digit year (1900-2099 plausible) to avoid picking up day-of-month digits as years.
   // Match either: "DD MMM YYYY", "MMM DD YYYY", "YYYY-MM-DD", "DD/MM/YYYY".
   const dateAlts = [
-    '(\\d{1,2})\\s+([A-Za-z]{3,9})\\s+((?:19|20)\\d{2})',        // 06 Mar 2026
-    '([A-Za-z]{3,9})\\s+(\\d{1,2})\\s+((?:19|20)\\d{2})',         // Mar 06 2026
+    '(\\d{1,2})\\s+([A-Za-z]{3,9}),?\\s+((?:19|20)\\d{2})',      // 06 Mar 2026, 6 March, 2026
+    '([A-Za-z]{3,9})\\s+(\\d{1,2}),?\\s+((?:19|20)\\d{2})',       // Mar 06 2026, April 24, 2026
     '((?:19|20)\\d{2})[\\-/](\\d{1,2})[\\-/](\\d{1,2})',          // 2026-03-06
     '(\\d{1,2})[\\-/](\\d{1,2})[\\-/]((?:19|20)\\d{2})',           // 06/03/2026
   ];
@@ -15604,26 +15612,59 @@ function extractInvoiceFields(text, fileName) {
   }
   result.currency = result.currency || baseCcy();
 
-  // --- Total ---
-  // Look for "TOTAL [CCY]" or "Amount Due" followed by a number
-  const numRe = /([\d,]+(?:\.\d{1,2})?)/;
-  m = joined.match(new RegExp(`(?:total\\s*${result.currency}|amount\\s*due\\s*${result.currency}|total\\s+due|grand\\s*total)\\s*[:.]?\\s*${numRe.source}`, 'i'));
-  if (m) { result.total = parseFloat(m[1].replace(/,/g, '')); result.confidence.total = 0.9; }
-  if (!result.total) {
-    m = joined.match(new RegExp(`total\\s*[:.]?\\s*${numRe.source}`, 'i'));
-    if (m) { result.total = parseFloat(m[1].replace(/,/g, '')); result.confidence.total = 0.75; }
+  // --- Total, subtotal, VAT ---
+  // An amount is read from beside its label, allowing what invoices put in
+  // between: "Total: R3,789.00", "Amount Due (ZAR): R3,789.00", "TOTAL ZAR
+  // 3 789.00". Bianca, 26 Oct 2026: none of those matched, and the old last
+  // resort, "the largest number on the page", was her bank account number
+  // (R62,723,272,316 on every invoice). The last resort now only considers
+  // what looks like money, and never a line about an account, branch, phone
+  // or registration number.
+  const money = String.raw`(\d{1,3}(?:[,\s]\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)`;
+  // Between a label and its amount: "(ZAR)", "incl VAT", ":", a currency code
+  // and/or symbol ("ZAR R9,200.00", "US$ 2,400.00").
+  const between = String.raw`\s*(?:\(\s*[A-Z]{3}\s*\))?\s*(?:incl\.?\s*(?:vat|tax)\s*)?[:.]?\s*(?:[A-Z]{3}\s*)?(?:US\$|[R$£€])?\s*`;
+  const toNum = (v) => parseFloat(String(v).replace(/[,\s]/g, ''));
+  // Every "<label> <amount>" in the text, in order: [{ value, index }].
+  const labelled = (label) => [...joined.matchAll(new RegExp(String.raw`\b(?:${label})(?![A-Za-z])` + between + money, 'gi'))]
+    .map((mm) => ({ value: toNum(mm[1]), index: mm.index, text: mm[0] }))
+    .filter((x) => !isNaN(x.value) && x.value > 0);
+  const notSub = (x) => !/sub[\s-]*$/i.test(joined.slice(Math.max(0, x.index - 5), x.index));
+  const notPart = (x) => !/^total\s*(?:excl|ex\b|before|vat|tax)/i.test(x.text);
+  const grand = labelled(String.raw`grand\s*total`);
+  const totals = labelled(String.raw`total(?:\s*due)?`).filter(notSub).filter(notPart);
+  const dues = labelled(String.raw`amount\s*(?:due|payable)|balance\s*due`);
+  const pick = grand.length ? grand[grand.length - 1] : totals.length ? totals[totals.length - 1] : dues.length ? dues[0] : null;
+  if (pick) {
+    result.total = pick.value;
+    // A different "Amount Due" (a deposit, or part already paid): flag the row
+    // for a look rather than guess which one the books should carry.
+    result.confidence.total = dues.some((d) => Math.abs(d.value - pick.value) > 0.005) ? 0.6 : 0.9;
   }
   if (!result.total) {
-    // Fallback: largest currency-looking number
-    const nums = [...joined.matchAll(/([\d,]{3,}(?:\.\d{1,2})?)/g)].map((mm) => parseFloat(mm[1].replace(/,/g, ''))).filter((n) => !isNaN(n) && n > 0);
+    // Last resort: the largest amount that looks like money (a currency
+    // sign or code before it, or two decimals), skipping long bare digit
+    // runs and lines about accounts and numbers that aren't money.
+    const notMoneyLine = /\b(acc(?:oun)?t|a\/c|branch|iban|swift|bic|sort\s*code|routing|mobile|cell|phone|tel|fax|reg(?:istration)?|vat\s*(?:no|number|reg)|tax\s*(?:no|number|id)|company\s*no|id\s*no)\b/i;
+    const nums = [];
+    for (const ln of lines) {
+      if (notMoneyLine.test(ln)) continue;
+      for (const mm of ln.matchAll(new RegExp(String.raw`(?:([A-Z]{3}|US\$|[R$£€])\s*)?` + money, 'g'))) {
+        const raw = mm[2];
+        const hasMark = !!mm[1] || /\.\d{2}$/.test(raw);
+        if (!hasMark || /^\d{7,}$/.test(raw.replace(/\.\d+$/, ''))) continue;
+        const v = toNum(raw);
+        if (!isNaN(v) && v > 0) nums.push(v);
+      }
+    }
     if (nums.length) { result.total = Math.max(...nums); result.confidence.total = 0.5; }
   }
-  // Subtotal
-  m = joined.match(new RegExp(`subtotal\\s*[:.]?\\s*${numRe.source}`, 'i'));
-  if (m) result.subtotal = parseFloat(m[1].replace(/,/g, ''));
-  // VAT
-  m = joined.match(new RegExp(`(?:vat|tax)\\s*(?:15)?%?\\s*[:.]?\\s*${numRe.source}`, 'i'));
-  if (m) result.vat = parseFloat(m[1].replace(/,/g, ''));
+  const subs = labelled(String.raw`sub[\s-]*total|total\s*(?:excl\.?|ex\.?|before)\s*(?:vat|tax)`);
+  if (subs.length) result.subtotal = subs[subs.length - 1].value;
+  // VAT: never a VAT or tax number ("VAT No: 4123456789").
+  const vats = labelled(String.raw`(?:total\s*)?(?:vat|tax)(?:\s*@?\s*\d{1,2}(?:\.\d+)?\s*%)?(?!\s*@?\s*\d{1,2}(?:\.\d+)?\s*%)`)
+    .filter((x) => !/^(?:total\s*)?(?:vat|tax)\s*(?:no|number|reg|id)/i.test(x.text) && !/^\d{7,}$/.test(String(x.value)));
+  if (vats.length) result.vat = vats[vats.length - 1].value;
 
   // --- Client ---
   // Build a set of tokens from the company's own info — we filter these out.
@@ -15822,6 +15863,10 @@ async function applyPdfReview() {
     alert('Nothing to import — every row has a missing required field.\n\n' + errors.join('\n'));
     return;
   }
+  // A million or more on one invoice is almost always a misread number (a bank
+  // account or phone number), so it is never imported without a second look.
+  const huge = plan.filter((it) => Number(it.total) >= 1000000);
+  if (huge.length && !confirm(`${huge.length === 1 ? 'This amount looks' : 'These amounts look'} too large to be right:\n\n${huge.map((it) => `${it.fileName}: ${fmtMoney(Number(it.total), it.currency || baseCcy())}`).join('\n')}\n\nOften it's a bank account or phone number read by mistake. Import anyway?`)) return;
   // Create missing clients
   const newClientNames = [...new Set(plan
     .filter((p) => !state.clients.find((c) => c.name.toLowerCase() === p.client.toLowerCase()))
