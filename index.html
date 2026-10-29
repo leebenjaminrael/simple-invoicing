@@ -1193,6 +1193,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   .deposit-options { display: flex; gap: 6px; flex-wrap: wrap; }
   .deposit-options .opt { padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--text-mid); background: var(--surface); }
   .deposit-options .opt.active { background: var(--accent-bright); color: var(--bg); border-color: var(--accent-bright); }
+  .deposit-custom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; }
+  .deposit-custom input { width: 96px; text-align: right; font-family: 'DM Mono', monospace; }
 
   /* Line items */
   .lines { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface); }
@@ -3327,6 +3329,12 @@ function passkeyCancelled(e) {
    timer, documents, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.7.0', date: '2026-10-29', items: [
+      { title: 'Part invoices at any percentage',
+        text: 'Beside Full, 25%, 50%, 75% and 100%, a part invoice now has Custom: type any percentage, such as a 40% deposit, and Simpl shows what that comes to. Invoice balance then bills the remaining 60% by itself, and a job can never be invoiced past 100% in total.' },
+    ],
+  },
+  {
     version: '1.45.6.1', date: '2026-10-26', items: [
       { title: 'Past invoices import with the right amount', important: true,
         text: 'Importing past invoices from PDF could take the wrong number as the total: on some layouts, the bank account number in the payment details. It now reads totals written like “Total: R3,789.00” or “Amount Due (ZAR)”, reads dates like “April 24, 2026”, and asks before importing any amount over a million. If you imported past invoices and one shows an impossible amount, delete those invoices and import the PDFs again.',
@@ -3758,7 +3766,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.6.1';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.7.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4726,6 +4734,15 @@ function groupBilledPct(d) {
 }
 function groupRemainingPct(d) {
   return Math.max(0, Math.round((100 - groupBilledPct(d)) * 100) / 100);
+}
+// How much of the job this invoice may bill: 100% less what the other
+// invoices in its billing group bill (a lone invoice: all of it).
+function depositRoom(d) {
+  const others = billingGroupMembers(d).filter((m) => m.id !== d.id).reduce((sum, m) => sum + portionPctOf(m), 0);
+  return Math.max(0, Math.round((100 - others) * 100) / 100);
+}
+function depositIsCustom(d) {
+  return depositCustomFor === d.id || (Number(d.depositPct) > 0 && !DEPOSIT_PRESETS.includes(Number(d.depositPct)));
 }
 // Whether a "bill the balance" action makes sense for this invoice.
 function canInvoiceBalance(d) {
@@ -11888,8 +11905,13 @@ function openClientModal(client, opts) {
    ============================================================ */
 
 let editingDoc = null; // working copy
+// The editor's "Custom" part-invoice box is open for this document (also
+// shown whenever the percentage isn't one of the preset buttons).
+let depositCustomFor = null;
+const DEPOSIT_PRESETS = [0, 25, 50, 75, 100];
 
 function openDocEditor(docId, defaultType, presetClientId) {
+  depositCustomFor = null;
   // Creating something NEW is the only gated action (editing/viewing existing
   // documents always works, even on an expired licence).
   if (!docId && !ensureCanCreate()) return;
@@ -12132,8 +12154,15 @@ function renderDocEditor() {
       <div style="margin-top:18px;">
         <label>Part invoice <span class="text-muted">(bill a % of the total — the rest can be invoiced later)</span></label>
         <div class="deposit-options">
-          ${[0,25,50,75,100].map((p) => `<div class="opt ${d.depositPct === p ? 'active' : ''}" data-deposit="${p}">${p === 0 ? 'Full' : p + '%'}</div>`).join('')}
+          ${DEPOSIT_PRESETS.map((p) => `<div class="opt ${!depositIsCustom(d) && Number(d.depositPct || 0) === p ? 'active' : ''}" data-deposit="${p}">${p === 0 ? 'Full' : p + '%'}</div>`).join('')}
+          <div class="opt ${depositIsCustom(d) ? 'active' : ''}" data-deposit-custom>${depositIsCustom(d) && Number(d.depositPct) > 0 ? 'Custom ' + Number(d.depositPct) + '%' : 'Custom'}</div>
         </div>
+        ${depositIsCustom(d) ? `
+        <div class="deposit-custom">
+          <input id="ed-deposit-pct" type="number" inputmode="decimal" min="0" max="${depositRoom(d)}" step="any" value="${Number(d.depositPct) > 0 ? Number(d.depositPct) : ''}" placeholder="e.g. 40" aria-label="Percentage of the total to bill on this invoice" />
+          <span>% of the total</span>
+          <span class="text-muted" id="ed-deposit-amt">${Number(d.depositPct) > 0 ? '= ' + fmtMoney(t.deposit, d.currency) : ''}</span>
+        </div>` : ''}
         ${d.billingGroupId ? `<div class="text-sm text-muted" style="margin-top:8px;">Part of a billing group — ${Math.round(groupBilledPct(d))}% of this job is invoiced across ${billingGroupMembers(d).length} document${billingGroupMembers(d).length === 1 ? '' : 's'}${groupRemainingPct(d) > 0 ? `, ${groupRemainingPct(d)}% still to invoice` : ' (fully invoiced)'}.</div>` : ''}
       </div>` : ''}
 
@@ -12361,11 +12390,46 @@ function bindEditorEvents() {
 
   host.querySelectorAll('[data-deposit]').forEach((el) => {
     el.addEventListener('click', () => {
-      editingDoc.depositPct = +el.dataset.deposit;
+      let p = +el.dataset.deposit;
+      const room = depositRoom(editingDoc);
+      // "Full" on a job that's already part-invoiced means the rest of it.
+      if (p === 0 && room < 100) { p = room; toast(`This invoice bills the remaining ${room}%`); }
+      else if (p > room) { toast(`Only ${room}% of this job is left to invoice`); p = room; }
+      depositCustomFor = null;
+      editingDoc.depositPct = p;
       renderDocEditor();
       scheduleAutoSave();
     });
   });
+  // Custom: any percentage (a 40% deposit leaves 60% for the balance invoice).
+  const customOpt = host.querySelector('[data-deposit-custom]');
+  if (customOpt) customOpt.addEventListener('click', () => {
+    depositCustomFor = editingDoc.id;
+    renderDocEditor();
+    const inp = document.getElementById('ed-deposit-pct');
+    if (inp) { inp.focus(); inp.select(); }
+  });
+  const pctIn = host.querySelector('#ed-deposit-pct');
+  if (pctIn) {
+    const amt = host.querySelector('#ed-deposit-amt');
+    pctIn.addEventListener('input', () => {
+      const v = parseFloat(pctIn.value);
+      if (!(v > 0 && v <= 100)) return;   // mid-typing, or nothing yet
+      editingDoc.depositPct = Math.round(v * 100) / 100;
+      updateTotalsBox();
+      if (amt) amt.textContent = '= ' + fmtMoney(calcTotals(editingDoc).deposit, editingDoc.currency);
+      scheduleAutoSave();
+    });
+    pctIn.addEventListener('change', () => {
+      let v = parseFloat(pctIn.value);
+      const room = depositRoom(editingDoc);
+      if (!(v > 0)) v = 0;   // cleared: bill the full amount
+      if (v > room) { toast(`Only ${room}% of this job is left to invoice`); v = room; }
+      editingDoc.depositPct = Math.round(v * 100) / 100;
+      renderDocEditor();
+      scheduleAutoSave();
+    });
+  }
 
   const savedToggle = host.querySelector('#line-saved-toggle');
   if (savedToggle) {
