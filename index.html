@@ -1897,6 +1897,10 @@ td.empty-cell { padding: 0 !important; }
 @media (prefers-reduced-motion: reduce) { .focus-pulse { animation: none; } }
 .welcome-card { margin-bottom: 16px; }
 .welcome-card .es-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; }
+
+  /* Sortable headings in the documents list (# and Date). */
+  .th-sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+  .th-sort:hover, .th-sort.on { color: var(--text); }
 </style>
 </head>
 <body>
@@ -3329,6 +3333,15 @@ function passkeyCancelled(e) {
    timer, documents, backup, security, feedback, export, terms, refer. (Checked by .claude/test-changelog.js.) */
 const CHANGELOG = [
   {
+    version: '1.45.8.0', date: '2026-10-30', items: [
+      { title: 'Invoice numbers stay in sequence',
+        text: 'Switching a saved invoice to a quote or credit note, or deleting your newest invoice, no longer leaves a number unused: the next invoice takes it. Deleting an invoice that has been sent or paid now asks first, since its number will be missing from your records. And if Simpl is open in two windows or tabs, one can no longer save over the other: the out-of-date window asks you to reload.',
+        link: { label: 'Open Documents', to: 'documents' } },
+      { title: 'Sort documents by number',
+        text: 'In Documents, click the # heading to list by number, or Date to list by date. Documents on the same date are now in number order too.' },
+    ],
+  },
+  {
     version: '1.45.7.0', date: '2026-10-29', items: [
       { title: 'Part invoices at any percentage',
         text: 'Beside Full, 25%, 50%, 75% and 100%, a part invoice now has Custom: type any percentage, such as a 40% deposit, and Simpl shows what that comes to. Invoice balance then bills the remaining 60% by itself, and a job can never be invoiced past 100% in total.' },
@@ -3766,7 +3779,7 @@ const FNB_ACCOUNT_REF = ''; // optionally set per-user later
 
 
 const STORAGE_KEY = 'seed-encrypted-v1';
-const APP_VERSION = '1.45.7.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
+const APP_VERSION = '1.45.8.0';       // MAJOR.MINOR.PATCH.BUILD — build=tiny tweak, patch=small feature, minor=notable feature, major=big/breaking. Bump version.json to match.
 const VERSION_URL = './version.json'; // checked on load to notify of updates
 
 /* ============================================================
@@ -4506,8 +4519,42 @@ function openPaywallModal(reason) {
 
 let quotaWarned = false; // one nudge per session is enough
 
+/* Simpl open in two windows (two tabs, or the installed app and a tab): each
+   keeps its own copy in memory and saves the whole vault, so the window that
+   saves second puts back what it had and the other's newest work is gone,
+   invoices included (one way Tracy's numbers could have gone missing, 30 Oct
+   2026). Every save tells the other windows; one that hears of a save with
+   different data stops saving and backing up and asks to reload, so an
+   out-of-date copy can never be written over a newer one. */
+const WINDOW_ID = Math.random().toString(36).slice(2);
+const VAULT_WRITE_KEY = 'seed-vault-write-v1';
+let staleWindow = false;
+function announceVaultWrite(fp) {
+  try { localStorage.setItem(VAULT_WRITE_KEY, JSON.stringify({ win: WINDOW_ID, at: Date.now(), fp })); } catch (e) {}
+}
+window.addEventListener('storage', (e) => {
+  if (e.key !== VAULT_WRITE_KEY || !e.newValue || staleWindow || !vaultUnlocked()) return;
+  let w = null;
+  try { w = JSON.parse(e.newValue); } catch (err) { return; }
+  if (!w || w.win === WINDOW_ID) return;
+  // The other window saved exactly what this one holds: nothing is out of date.
+  try { if (w.fp && w.fp === cloudFingerprint(state)) return; } catch (err) {}
+  staleWindow = true;
+  try { clearTimeout(cloudTimer); cloudTimer = null; } catch (err) {}
+  showStaleWindowNotice();
+});
+function showStaleWindowNotice() {
+  showModal(`<div class="modal-overlay" id="modal-overlay"><div class="modal" style="max-width:460px;">
+    <div class="modal-head"><div class="ttl">Simpl is open in another window</div></div>
+    <div class="modal-body"><div class="text-sm text-mid" style="line-height:1.6;">Changes were just saved in another Simpl window or tab. So that nothing gets overwritten, this one has stopped saving. Reload it to carry on with the latest, or close it and use the other one.</div></div>
+    <div class="modal-foot"><button class="btn btn-primary" id="stale-reload">Reload</button></div></div></div>`);
+  const r = document.getElementById('stale-reload');
+  if (r) r.addEventListener('click', () => location.reload());
+}
+
 async function saveState() {
   if (!vaultUnlocked()) return;
+  if (staleWindow) { showStaleWindowNotice(); return; }   // never write an out-of-date copy
   applyAutoOverdue(state);
   // Change tracking runs after auto-overdue (so status flips are stamped) and
   // is fenced: a tracker bug must never be able to block a save.
@@ -4532,6 +4579,7 @@ async function saveState() {
     alert('Could not save — this browser\'s storage for the app is full, so your latest change was NOT saved.\n\nFree up space by deleting old imported statements (Reconcile → imported statements), then try again. Download a backup first to be safe.');
     return;
   }
+  try { announceVaultWrite(fp || cloudFingerprint(state)); } catch (e) {}
   try { scheduleCloudBackup(blob, fp, counts); } catch (e) { noteQuietError('backup scheduling', e); }
   // The ~5 MB wall only exists on the localStorage fallback path; IndexedDB
   // is effectively unlimited.
@@ -4740,6 +4788,27 @@ function groupRemainingPct(d) {
 function depositRoom(d) {
   const others = billingGroupMembers(d).filter((m) => m.id !== d.id).reduce((sum, m) => sum + portionPctOf(m), 0);
   return Math.max(0, Math.round((100 - others) * 100) / 100);
+}
+/* Document numbers. The counters (nextInv / nextQt / nextCredit) only move
+   forward when a numbered document is kept. Tracy, 30 Oct 2026: invoices
+   1074, 1077 and 1082 "used" but nowhere to be found. Two ways that happened
+   are closed here: a saved invoice switched to a quote or credit note kept
+   the invoice counter moved on (and never moved the quote counter, so the
+   next quote got the same number), and deleting gave nothing back. */
+const NEXT_KEY = { invoice: 'nextInv', quote: 'nextQt', credit: 'nextCredit' };
+// The newest number of its type, now unused (deleted, or switched type), goes
+// back to the counter so the sequence has no hole. An older one stays a gap:
+// renumbering would break what was already sent.
+function releaseDocNumber(type, number) {
+  const k = NEXT_KEY[type];
+  if (!k || Number(state.settings[k]) !== Number(number) + 1) return false;
+  if (state.documents.some((x) => x.type === type && Number(x.number) === Number(number))) return false;
+  state.settings[k] = Number(number);
+  return true;
+}
+function claimDocNumber(type, number) {
+  const k = NEXT_KEY[type];
+  if (k && !(Number(state.settings[k]) > Number(number))) state.settings[k] = Number(number) + 1;
 }
 function depositIsCustom(d) {
   return depositCustomFor === d.id || (Number(d.depositPct) > 0 && !DEPOSIT_PRESETS.includes(Number(d.depositPct)));
@@ -11095,6 +11164,17 @@ function bindProjectsEvents() {
 
 let docFilter = 'all';
 let docSearch = '';
+// Documents list order: 'date' (newest first) or 'number' (highest first),
+// chosen by clicking the # or Date heading and remembered on this device.
+const DOC_SORT_STORE = 'seed-doc-sort-v1';
+let docSort = (() => { try { return localStorage.getItem(DOC_SORT_STORE) === 'number' ? 'number' : 'date'; } catch (e) { return 'date'; } })();
+const DOC_TYPE_ORDER = { invoice: 0, credit: 1, quote: 2 };
+function compareDocs(a, b) {
+  const byNumber = (DOC_TYPE_ORDER[a.type] ?? 9) - (DOC_TYPE_ORDER[b.type] ?? 9) || (Number(b.number) || 0) - (Number(a.number) || 0);
+  if (docSort === 'number') return byNumber;
+  // Newest date first; the same date in number order, not however they were saved.
+  return (b.date || '').localeCompare(a.date || '') || byNumber;
+}
 
 function renderDocuments() {
   return `
@@ -11138,7 +11218,7 @@ function filteredDocs() {
       return num.includes(q) || cn.includes(q) || pt.includes(q);
     });
   }
-  docs.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  docs.sort(compareDocs);
   return docs;
 }
 
@@ -11211,10 +11291,10 @@ function renderDocTable(docs, opts = {}) {
       <table>
         <thead>
           <tr>
-            <th class="num">#</th>
+            <th class="num">${opts.compact ? '#' : `<button type="button" class="th-sort${docSort === 'number' ? ' on' : ''}" data-doc-sort="number" title="Sort by number">#${docSort === 'number' ? ' ↓' : ''}</button>`}</th>
             <th>Client</th>
             <th>Project</th>
-            <th>Date</th>
+            <th>${opts.compact ? 'Date' : `<button type="button" class="th-sort${docSort === 'date' ? ' on' : ''}" data-doc-sort="date" title="Sort by date">Date${docSort === 'date' ? ' ↓' : ''}</button>`}</th>
             <th class="amount">Amount</th>
             <th>Status</th>
             <th></th>
@@ -12213,6 +12293,12 @@ function bindEditorEvents() {
     el.addEventListener('click', () => {
       const newType = el.dataset.type;
       if (newType === editingDoc.type) return;
+      const savedIdx = state.documents.findIndex((x) => x.id === editingDoc.id);
+      const oldType = editingDoc.type, oldNumber = editingDoc.number;
+      // A saved document that isn't the newest of its kind leaves a hole in
+      // that numbering when it changes kind: say so first.
+      if (savedIdx >= 0 && Number(state.settings[NEXT_KEY[oldType]]) !== Number(oldNumber) + 1
+        && !confirm(`${docNumber(editingDoc)} has already been saved, and later ${docTypeName(editingDoc)}s have been numbered since. Changing it to a ${newType === 'credit' ? 'credit note' : newType} leaves ${docNumber(editingDoc)} missing from your ${docTypeName(editingDoc)} numbers.\n\nChange it anyway?`)) return;
       editingDoc.type = newType;
       editingDoc.number = newType === 'invoice' ? state.settings.nextInv : newType === 'credit' ? state.settings.nextCredit : state.settings.nextQt;
       editingDoc.terms = termsFor(newType, editingDoc.clientId);
@@ -12228,6 +12314,14 @@ function bindEditorEvents() {
         if (editingDoc.appliesToInvoiceId === undefined) editingDoc.appliesToInvoiceId = null;
       }
       editingDoc.status = 'draft';
+      if (savedIdx >= 0) {
+        // Saved already: it takes its new number now (so the next one of that
+        // kind doesn't get it too) and gives the old one back if it was the newest.
+        state.documents[savedIdx] = { ...editingDoc };
+        claimDocNumber(newType, editingDoc.number);
+        releaseDocNumber(oldType, oldNumber);
+        saveState();
+      }
       renderDocEditor();
     });
   });
@@ -12845,15 +12939,25 @@ function openDocPreview(docId) {
   $('prev-delete').addEventListener('click', async () => {
     const removed = state.documents.find((x) => x.id === d.id);
     if (!removed) return;
+    // A sent or paid invoice (or an issued credit note) is part of the record:
+    // deleting it leaves its number missing. Ask, and point at the usual fix.
+    if ((removed.type === 'invoice' || removed.type === 'credit') && removed.status !== 'draft'
+      && !confirm(`Delete ${docNumber(removed)}? It has been ${removed.status === 'paid' ? 'paid' : removed.type === 'credit' ? 'issued' : 'sent'}, so ${docNumber(removed)} will be missing from your ${docTypeName(removed)} numbers.\n\n${removed.type === 'invoice' ? 'If it was wrong, a credit note cancels it and keeps your records complete.' : ''}`)) return;
     // Release any time entries that were billed on this invoice back to unbilled
     // (remember them so Undo can re-link).
     const billedTimeIds = (state.timeEntries || []).filter((te) => te.invoiceId === d.id).map((te) => te.id);
     state.documents = state.documents.filter((x) => x.id !== d.id);
     for (const te of (state.timeEntries || [])) if (te.invoiceId === d.id) te.invoiceId = null;
+    const released = releaseDocNumber(removed.type, removed.number);   // the newest: no hole
     await saveState();
     closeModal();
     render();
-    toastUndo(`Deleted ${docNumber(removed)}`, async () => {
+    toastUndo(`Deleted ${docNumber(removed)}${released ? '. The next one reuses its number' : ''}`, async () => {
+      // Its number may have been reused meanwhile: then it comes back with a new one.
+      const before = docNumber(removed);
+      if (state.documents.some((x) => x.type === removed.type && Number(x.number) === Number(removed.number))) removed.number = Number(state.settings[NEXT_KEY[removed.type]]);
+      claimDocNumber(removed.type, removed.number);
+      if (docNumber(removed) !== before) setTimeout(() => toast(`Restored as ${docNumber(removed)}`), 50);
       state.documents.push(removed);
       for (const te of (state.timeEntries || [])) if (billedTimeIds.includes(te.id)) te.invoiceId = removed.id;
       await saveState();
@@ -14541,6 +14645,13 @@ function bindViewEvents() {
   });
   document.querySelectorAll('[data-filter]').forEach((el) => {
     el.addEventListener('click', () => { docFilter = el.dataset.filter; render(); });
+  });
+  document.querySelectorAll('[data-doc-sort]').forEach((el) => {
+    el.addEventListener('click', () => {
+      docSort = el.dataset.docSort === 'number' ? 'number' : 'date';
+      try { localStorage.setItem(DOC_SORT_STORE, docSort); } catch (e) {}
+      render();
+    });
   });
 
   if (currentRoute === 'documents') {
@@ -16518,6 +16629,7 @@ function cloudShrinks(counts) {
 async function runCloudBackup(opts) {
   const o = opts || {};
   if (cloudBusy || !cloudEnrolled() || !currentDek) return null;
+  if (staleWindow) return null;   // another window has newer data: never send this copy
   if (o.silent && cloudGet(CLOUD_DIRTY_STORE) !== '1') return null;   // nothing new to send
   // Describe the copy that is actually sent: the saved copy's own counts, or the
   // state's when re-encrypting it below.
